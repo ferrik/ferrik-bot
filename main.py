@@ -1,32 +1,49 @@
-from flask import Flask, request
-import requests
-import os
+from flask import Flask, request, jsonify
+import logging
+import telegram
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8245370711:AAGeaVdip9vedm5jPDeX7toDkFRCUCkFRfg")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+# Налаштування логування
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-@app.route("/")
-def home():
-    return "Ferrik-bot is running!"
+# Налаштування Telegram бота
+TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # Замініть на ваш токен
+bot = telegram.Bot(token=TELEGRAM_TOKEN)
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-@app.route("/webhook/Ferrik123!", methods=["POST"])
-def webhook():
-    data = request.get_json()
+# Команда /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"User {update.effective_user.id} started the bot")
+    await update.message.reply_text("Вітаємо у боті доставки їжі! 🍽️ Виберіть заклад або перегляньте меню через /menu.")
 
-    if "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
+# Реєстрація обробників
+application.add_handler(CommandHandler("start", start))
 
-        reply_text = f"Привіт 👋, я Ferrik-бот! Ти написав: {text}"
+@app.route('/')
+def hello_world():
+    logger.info("Hello World endpoint accessed")
+    return "Hello, World! Food Delivery Bot is running."
 
-        requests.post(
-            f"{TELEGRAM_API_URL}/sendMessage",
-            json={"chat_id": chat_id, "text": reply_text}
-        )
+@app.route('/health')
+def health_check():
+    logger.info("Health check endpoint accessed")
+    return jsonify({"status": "healthy"})
 
-    return {"ok": True}
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    update = telegram.Update.de_json(request.get_json(force=True), bot)
+    await application.process_update(update)
+    return jsonify({"status": "ok"})
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+def set_webhook():
+    webhook_url = "YOUR_RENDER_URL/webhook"  # Замініть на ваш URL від Render.com
+    bot.set_webhook(url=webhook_url)
+    logger.info(f"Webhook set to {webhook_url}")
+
+if __name__ == '__main__':
+    set_webhook()
+    app.run(host='0.0.0.0', port=8000)

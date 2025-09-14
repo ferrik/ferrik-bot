@@ -196,4 +196,51 @@ def telegram_webhook():
 
         if data == "clear_cart":
             CARTS.pop(chat_id, None)
-            tg_answer_callback(callback_i_
+            tg_answer_callback(callback_id, text="Кошик очищено")
+            tg_send_message(chat_id, "🗑️ Ваш кошик очищено")
+            return jsonify({"ok": True})
+
+        if data == "order_confirm":
+            # create a fake order id and clear cart
+            cart = CARTS.get(chat_id, [])
+            if not cart:
+                tg_answer_callback(callback_id, text="Кошик порожній")
+                tg_send_message(chat_id, "Ваш кошик порожній 🛒")
+                return jsonify({"ok": True})
+            total = sum(item["price"] for item in cart)
+            order_id = str(uuid.uuid4())[:8]
+            CARTS.pop(chat_id, None)
+            tg_answer_callback(callback_id, text="Замовлення оформлене")
+            tg_send_message(chat_id, f"✅ Замовлення #{order_id} прийнято. Сума: {total} грн.\nМи зв'яжемося з вами для підтвердження.")
+            logger.info("New order %s from chat %s total=%s", order_id, chat_id, total)
+            return jsonify({"ok": True})
+
+        # default
+        tg_answer_callback(callback_id)
+        return jsonify({"ok": True})
+
+    # fallback
+    return jsonify({"ok": True})
+
+# ---- helper to show cart as separate function ----
+def _handle_show_cart(chat_id):
+    cart = CARTS.get(chat_id, [])
+    if not cart:
+        tg_send_message(chat_id, "🛒 Ваш кошик порожній.")
+        return jsonify({"ok": True})
+    lines = [f"• {it['name']} — {it['price']} грн" for it in cart]
+    total = sum(it["price"] for it in cart)
+    text = "🛒 Ваш кошик:\n" + "\n".join(lines) + f"\n\n<b>Загалом: {total} грн</b>"
+    tg_send_message(chat_id, text, reply_markup=cart_keyboard())
+    return jsonify({"ok": True})
+
+# ---- health check ----
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+# ---- Run (not used by gunicorn in prod, but useful locally) ----
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    logger.info("Starting local Flask server on port %s", port)
+    app.run(host="0.0.0.0", port=port)

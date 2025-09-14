@@ -4,7 +4,6 @@ import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import os
-import json
 
 app = Flask(__name__)
 
@@ -13,8 +12,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),  # Вивід у консоль (для Render.com)
-        logging.FileHandler('bot.log')  # Зберігання логів у файл
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -36,14 +35,14 @@ RESTAURANTS = {
     ]}
 }
 
-# Зберігання кошика (тимчасово в пам’яті)
+# Зберігання кошика
 CARTS = {}
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"User {user_id} started the bot")
-    await update.message.reply_text("Вітаємо у @FerrikFoodBot! 🍽️ Виберіть заклад або перегляньте меню через /menu.")
+    await update.message.reply_text("Вітаємо у @ferrikfoot_bot! 🍽️ Виберіть заклад або перегляньте меню через /menu.")
 
 # Команда /menu
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -74,7 +73,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(f"Меню {restaurant['name']}:", reply_markup=reply_markup)
         await query.answer()
-        logger.info(f"User {user_id} selected restaurant {rest_id}")
 
     elif data.startswith("add_"):
         item_id = data.split("_")[1]
@@ -100,7 +98,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(cart_text, reply_markup=reply_markup)
         await query.answer()
-        logger.info(f"User {user_id} viewed cart")
 
     elif data == "clear_cart":
         CARTS[user_id] = []
@@ -114,7 +111,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             cart_items = "\n".join(f"• {item['name']} - {item['price']} грн" for item in CARTS[user_id])
             total = sum(item["price"] for item in CARTS[user_id])
-            order_text = f"✅ Замовлення оформлено!\n{cart_items}\n\nСума: {total} грн\n\nОчікуйте дзвінка для підтвердження адреси та оплати (готівка/картка)."
+            order_text = f"✅ Замовлення оформлено!\n{cart_items}\n\nСума: {total} грн\n\nОчікуйте дзвінка для підтвердження."
             logger.info(f"ORDER from {user_id}: {cart_items}, Total: {total} грн")
             await query.edit_message_text(order_text)
             CARTS[user_id] = []
@@ -124,7 +121,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @app.route('/')
 def hello_world():
     logger.info("Hello World endpoint accessed")
-    return "Hello, World! @FerrikFoodBot is running."
+    return "Hello, World! @ferrikfoot_bot is running."
 
 @app.route('/health')
 def health_check():
@@ -134,9 +131,17 @@ def health_check():
 @app.route('/webhook', methods=['POST'])
 async def webhook():
     logger.info("Webhook received")
-    update = telegram.Update.de_json(request.get_json(force=True), bot)
-    await application.process_update(update)
-    return jsonify({"status": "ok"})
+    try:
+        update = telegram.Update.de_json(request.get_json(force=True), bot)
+        if update:
+            await application.process_update(update)
+            logger.info("Webhook processed successfully")
+        else:
+            logger.error("No update received in webhook")
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Webhook error: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # Реєстрація обробників
 application.add_handler(CommandHandler("start", start))
@@ -144,5 +149,5 @@ application.add_handler(CommandHandler("menu", menu))
 application.add_handler(CallbackQueryHandler(button_callback))
 
 if __name__ == '__main__':
-    logger.info("Starting @FerrikFoodBot")
+    logger.info("Starting @ferrikfoot_bot")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))

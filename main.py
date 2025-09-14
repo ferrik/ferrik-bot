@@ -10,7 +10,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN not set in environment")
 
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123!")  # повинен співпадати з setWebhook
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123")  # Коректний токен
 API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # ---- Логи ----

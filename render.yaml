@@ -1,13 +1,14 @@
 services:
   - type: web
-    name: ferrikfoot-bot
+    name: ferrik-bot
     env: python
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-    startCommand: "python main.py"
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.0
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-
+      - key: WEBHOOK_SECRET
+        value: Ferrik123!

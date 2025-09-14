@@ -1,4 +1,3 @@
-# main.py
 import os
 import logging
 import json
@@ -108,7 +107,7 @@ def cart_keyboard():
     return {"inline_keyboard": [[{"text":"📝 Оформити замовлення","callback_data":"order_confirm"}, {"text":"🗑 Очистити кошик","callback_data":"clear_cart"}]]}
 
 # ---- Webhook endpoint ----
-@app.route("/telegram/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def telegram_webhook():
     # optional header check (if you used secret token in setWebhook; adjust if you used secret in URL)
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")

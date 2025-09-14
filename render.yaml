@@ -2,9 +2,12 @@ services:
   - type: web
     name: ferrikfoot-bot
     env: python
-    buildCommand: "pip install -r requirements.txt"
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
     startCommand: "python main.py"
     plan: free
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+

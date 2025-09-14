@@ -11,4 +11,4 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: WEBHOOK_SECRET
-        value: Ferrik123!
+        value: Ferrik123

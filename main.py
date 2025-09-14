@@ -129,12 +129,12 @@ def health_check():
     return jsonify({"status": "healthy"})
 
 @app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     logger.info("Webhook received")
     try:
         update = telegram.Update.de_json(request.get_json(force=True), bot)
         if update:
-            await application.process_update(update)
+            application.run_polling(update=update)  # Синхронна обробка
             logger.info("Webhook processed successfully")
         else:
             logger.error("No update received in webhook")

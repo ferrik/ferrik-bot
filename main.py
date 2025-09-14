@@ -1,164 +1,281 @@
+# main.py — Ferrik minimal in-memory bot (Part 1)
 from flask import Flask, request, jsonify
-import logging
-import telegram
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import os
+import requests
+import json
+import uuid
+import logging
 
 app = Flask(__name__)
 
-# Налаштування логування
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('bot.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+# CONFIG from environment (set on Render)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # set this in Render env
+TELEGRAM_SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN", "Ferrik123!")  # set same when setWebhook
+API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Налаштування Telegram бота
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-if not TELEGRAM_TOKEN:
-    logger.error("TELEGRAM_TOKEN не знайдено! Додайте його до змінних оточення.")
-    raise ValueError("TELEGRAM_TOKEN is not set!")
+# logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ferrik_minimal")
 
-bot = telegram.Bot(token=TELEGRAM_TOKEN)
-application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-# Приклад бази даних закладів
+# --- In-memory sample data (MVP) ---
 RESTAURANTS = {
-    "1": {"name": "Піцерія Наполі", "menu": [
-        {"id": "1_1", "name": "Піца Маргарита", "price": 150},
-        {"id": "1_2", "name": "Піца Пепероні", "price": 180}
-    ]},
-    "2": {"name": "Суші Майстер", "menu": [
-        {"id": "2_1", "name": "Каліфорнія рол", "price": 200},
-        {"id": "2_2", "name": "Філадельфія", "price": 250}
-    ]}
+    "1": {
+        "name": "Піцерія Наполі 🍕",
+        "menu": [
+            {"id": "1_1", "name": "Піца Маргарита", "price": 150},
+            {"id": "1_2", "name": "Піца Пепероні", "price": 180}
+        ]
+    },
+    "2": {
+        "name": "Суші Майстер 🍣",
+        "menu": [
+            {"id": "2_1", "name": "Каліфорнія рол", "price": 220},
+            {"id": "2_2", "name": "Філадельфія", "price": 250}
+        ]
+    }
 }
 
-# Зберігання кошика
+# carts stored in memory: {telegram_id: [item_dict, ...]}
 CARTS = {}
 
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"User {user_id} started the bot")
-    await update.message.reply_text("Вітаємо у @ferrikfoot_bot! 🍽️ Виберіть заклад через /menu.")
-
-# Команда /menu
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"User {user_id} accessed menu")
-    keyboard = [
-        [InlineKeyboardButton(restaurant["name"], callback_data=f"rest_{id}")]
-        for id, restaurant in RESTAURANTS.items()
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Виберіть заклад у Тернополі:", reply_markup=reply_markup)
-
-# Обробка кнопок
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
-    logger.info(f"User {user_id} clicked button: {data}")
-
-    if data.startswith("rest_"):
-        rest_id = data.split("_")[1]
-        restaurant = RESTAURANTS[rest_id]
-        keyboard = [
-            [InlineKeyboardButton(f"{item['name']} ({item['price']} грн)", callback_data=f"add_{item['id']}")]
-            for item in restaurant["menu"]
-        ]
-        keyboard.append([InlineKeyboardButton("⬅️ Назад до закладів", callback_data="back_to_menu")])
-        keyboard.append([InlineKeyboardButton("📥 Переглянути кошик", callback_data="view_cart")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(f"Меню {restaurant['name']}:", reply_markup=reply_markup)
-
-    elif data.startswith("add_"):
-        item_id_parts = data.split("_")
-        rest_id = item_id_parts[1]
-        item_full_id = f"{item_id_parts[1]}_{item_id_parts[2]}"
-        item = next((i for i in RESTAURANTS[rest_id]["menu"] if i["id"] == item_full_id), None)
-        if item:
-            if user_id not in CARTS:
-                CARTS[user_id] = []
-            CARTS[user_id].append(item)
-            await context.bot.send_message(chat_id=user_id, text=f"✅ Додано '{item['name']}' до кошика!")
-            logger.info(f"User {user_id} added item {item['name']} to cart")
-        else:
-            await context.bot.send_message(chat_id=user_id, text="Помилка: страву не знайдено.")
-
-    elif data == "view_cart":
-        if user_id not in CARTS or not CARTS[user_id]:
-            cart_text = "Ваш кошик порожній! 🛒"
-            keyboard = [[InlineKeyboardButton("⬅️ Повернутись до меню", callback_data="back_to_menu")]]
-        else:
-            cart_items = "\n".join(f"• {item['name']} - {item['price']} грн" for item in CARTS[user_id])
-            total = sum(item["price"] for item in CARTS[user_id])
-            cart_text = f"🛒 Ваш кошик:\n{cart_items}\n\n*Загалом: {total} грн*"
-            keyboard = [
-                [InlineKeyboardButton("📝 Оформити замовлення", callback_data="order")],
-                [InlineKeyboardButton("🗑 Очистити кошик", callback_data="clear_cart")],
-                [InlineKeyboardButton("⬅️ Продовжити вибір", callback_data="back_to_menu")]
-            ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(cart_text, reply_markup=reply_markup, parse_mode='Markdown')
-
-    elif data == "clear_cart":
-        CARTS[user_id] = []
-        logger.info(f"User {user_id} cleared cart")
-        await query.edit_message_text("🗑 Кошик очищено!")
-
-    elif data == "order":
-        if user_id not in CARTS or not CARTS[user_id]:
-            await query.edit_message_text("Кошик порожній! Неможливо оформити замовлення.")
-        else:
-            cart_items = "\n".join(f"• {item['name']}" for item in CARTS[user_id])
-            total = sum(item["price"] for item in CARTS[user_id])
-            order_text = f"✅ Замовлення оформлено!\n\nСклад:\n{cart_items}\n\n*Сума: {total} грн*\n\nОчікуйте на дзвінок оператора для підтвердження."
-            logger.info(f"ORDER from {user_id}: {cart_items}, Total: {total} грн")
-            await query.edit_message_text(order_text, parse_mode='Markdown')
-            CARTS[user_id] = []
-
-    elif data == "back_to_menu":
-        await menu(query, context)
-
-# Ендпоінти
-@app.route('/')
-def index():
-    logger.info("Index endpoint accessed")
-    return "Hello, World! @ferrikfoot_bot is running."
-
-@app.route('/health')
-def health_check():
-    logger.info("Health check endpoint accessed")
-    return jsonify({"status": "healthy"})
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    logger.info("Webhook received")
+# --- Telegram helper functions ---
+def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup is not None:
+        # Telegram expects reply_markup as JSON string
+        payload["reply_markup"] = json.dumps(reply_markup)
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
-        update = telegram.Update.de_json(request.get_json(force=True), bot)
-        if update:
-            application.run_polling(update=update)  # Синхронна обробка
-            logger.info("Webhook processed successfully")
-        else:
-            logger.error("No update received in webhook")
-        return jsonify({"status": "ok"})
+        r = requests.post(f"{API_URL}/sendMessage", json=payload, timeout=8)
+        logger.info("sendMessage status %s", r.status_code)
+        return r.json()
     except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.exception("send_message error: %s", e)
+        return None
 
-# Реєстрація обробників
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("menu", menu))
-application.add_handler(CallbackQueryHandler(button_callback))
+def edit_message(chat_id, message_id, text, reply_markup=None, parse_mode=None):
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        r = requests.post(f"{API_URL}/editMessageText", json=payload, timeout=8)
+        logger.info("editMessage status %s", r.status_code)
+        return r.json()
+    except Exception as e:
+        logger.exception("edit_message error: %s", e)
+        return None
 
-if __name__ == '__main__':
-    logger.info("Starting @ferrikfoot_bot")
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
+def answer_callback(callback_id, text=None):
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    try:
+        r = requests.post(f"{API_URL}/answerCallbackQuery", json=payload, timeout=5)
+        return r.json()
+    except Exception as e:
+        logger.exception("answer_callback error: %s", e)
+        return None
+
+# helper to create inline keyboard from rows of buttons
+def make_inline_keyboard(rows):
+    return {"inline_keyboard": rows}
+
+# --- Webhook endpoint ---
+@app.route("/telegram/webhook", methods=["POST"])
+def webhook():
+    # verify secret header (Telegram sets X-Telegram-Bot-Api-Secret-Token when using secret_token)
+    header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if TELEGRAM_SECRET_TOKEN and header != TELEGRAM_SECRET_TOKEN:
+        logger.warning("Invalid secret header: %s", header)
+        return jsonify({"ok": False, "error": "invalid secret"}), 403
+
+    update = request.get_json(force=True)
+    logger.info("Update received keys: %s", list(update.keys()))
+    try:
+        # handle message
+        if "message" in update:
+            msg = update["message"]
+            chat_id = msg["chat"]["id"]
+            text = msg.get("text", "").strip()
+            user_name = msg.get("from", {}).get("first_name", "")
+            handle_text(chat_id, text, user_name)
+
+        # handle callback_query
+        if "callback_query" in update:
+            cq = update["callback_query"]
+            handle_callback(cq)
+
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.exception("Webhook processing failed: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# --- Text handler (simple commands and free text) ---
+def handle_text(chat_id, text, user_name):
+    text_l = (text or "").lower()
+    # start / greeting
+    if text_l in ["/start", "start", "привіт", "hi", "hello"]:
+        reply = (f"Привіт {user_name or ''}! 👋\n\n"
+                 "Я — Ferrik 🍽️. Можу допомогти замовити їжу.\n\n"
+                 "📌 Команди:\n"
+                 "• /menu — Переглянути заклади\n"
+                 "• 'кошик' — Показати мій кошик\n"
+                 "• Напиши пошук: наприклад — \"піца з куркою до 200 грн\"\n\nБажаєш почати? 😊")
+        send_message(chat_id, reply)
+        return
+
+    # show restaurants
+    if text_l in ["/menu", "menu", "ресторани", "ресторани 🍽️", "ресторани🍽️"]:
+        rows = []
+        for rid, r in RESTAURANTS.items():
+            rows.append([{"text": r["name"], "callback_data": f"rest_{rid}"}])
+        send_message(chat_id, "Оберіть ресторан у Тернополі:", reply_markup=make_inline_keyboard(rows))
+        return
+
+    # show cart
+    if text_l in ["кошик", "мій кошик", "cart"]:
+        show_cart(chat_id)
+        return
+
+    # naive free-text handling (we'll replace with Gemini in Part 3)
+    # simple keyword: if contains 'піца' show pizzas across restaurants
+    if "піца" in text_l or "pizza" in text_l:
+        # collect pizza dishes
+        rows = []
+        for rid, r in RESTAURANTS.items():
+            for item in r["menu"]:
+                if "піца" in item["name"].lower() or "pizza" in item["name"].lower() or "піца" in item.get("category", ""):
+                    rows.append([{"text": f"{item['name']} — {item['price']} грн", "callback_data": f"add_{item['id']}"}])
+        if rows:
+            send_message(chat_id, "Знайдено позиції (піца):", reply_markup=make_inline_keyboard(rows))
+            return
+
+    # fallback: help
+    send_message(chat_id, "Вибач, я не зрозумів. Спробуйте /menu або напишіть, що шукаєте (наприклад: 'піца').")
+
+# --- Callback handler (inline buttons) ---
+def handle_callback(cq):
+    data = cq.get("data")
+    callback_id = cq.get("id")
+    message = cq.get("message") or {}
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    logger.info("Callback data: %s", data)
+
+    if not data or not chat_id:
+        answer_callback(callback_id)
+        return
+
+    # restaurant selected -> show menu
+    if data.startswith("rest_"):
+        rest_id = data.split("_", 1)[1]
+        rest = RESTAURANTS.get(rest_id)
+        if not rest:
+            send_message(chat_id, "❗ Ресторан не знайдено.")
+            answer_callback(callback_id)
+            return
+        rows = []
+        for item in rest["menu"]:
+            rows.append([{"text": f"{item['name']} — {item['price']} грн", "callback_data": f"add_{item['id']}"}])
+        # extra buttons
+        rows.append([{"text": "📥 Переглянути кошик", "callback_data": "view_cart"}])
+        rows.append([{"text": "⬅️ Назад до закладів", "callback_data": "back_to_menu"}])
+        edit_message(chat_id, message_id, f"Меню {rest['name']}:", reply_markup=make_inline_keyboard(rows))
+        answer_callback(callback_id)
+        return
+
+    # add item to cart
+    if data.startswith("add_"):
+        item_id = data.split("_", 1)[1]  # e.g. "1_1"
+        item = None
+        for r in RESTAURANTS.values():
+            for it in r["menu"]:
+                if it["id"] == item_id:
+                    item = it; break
+            if item: break
+        if not item:
+            send_message(chat_id, "❗ Страву не знайдено.")
+            answer_callback(callback_id)
+            return
+        # add to cart
+        CARTS.setdefault(str(chat_id), []).append(item)
+        send_message(chat_id, f"✅ Додано до кошика: {item['name']} — {item['price']} грн")
+        answer_callback(callback_id, text="Додано до кошика ✅")
+        return
+
+    if data == "view_cart":
+        show_cart(chat_id)
+        answer_callback(callback_id)
+        return
+
+    if data == "clear_cart":
+        CARTS[str(chat_id)] = []
+        send_message(chat_id, "🗑️ Кошик очищено.")
+        answer_callback(callback_id)
+        return
+
+    if data == "order_confirm":
+        # create a simple fake order id
+        items = CARTS.get(str(chat_id), [])
+        if not items:
+            send_message(chat_id, "Кошик порожній — немає чого замовляти.")
+            answer_callback(callback_id)
+            return
+        total = sum(i["price"] for i in items)
+        order_id = str(uuid.uuid4())[:8]
+        CARTS[str(chat_id)] = []
+        send_message(chat_id, f"✅ Ваше замовлення {order_id} прийнято!\nСума: {total} грн\nМи зв'яжемося для підтвердження. ☎️")
+        logger.info("New order %s from %s total=%s", order_id, chat_id, total)
+        answer_callback(callback_id)
+        return
+
+    if data == "back_to_menu":
+        # simulate /menu
+        rows = []
+        for rid, r in RESTAURANTS.items():
+            rows.append([{"text": r["name"], "callback_data": f"rest_{rid}"}])
+        edit_message(chat_id, message_id, "Оберіть ресторан:", reply_markup=make_inline_keyboard(rows))
+        answer_callback(callback_id)
+        return
+
+    # default
+    answer_callback(callback_id)
+
+# --- show_cart helper ---
+def show_cart(chat_id):
+    items = CARTS.get(str(chat_id), [])
+    if not items:
+        send_message(chat_id, "🛒 Ваш кошик порожній.")
+        return
+    lines = []
+    total = 0
+    for it in items:
+        lines.append(f"• {it['name']} — {it['price']} грн")
+        total += it["price"]
+    text = "🛒 Ваш кошик:\n" + "\n".join(lines) + f"\n\n*Загалом: {total} грн*"
+    rows = [
+        [{"text": "📝 Підтвердити замовлення", "callback_data": "order_confirm"}],
+        [{"text": "🗑 Очистити кошик", "callback_data": "clear_cart"}],
+        [{"text": "⬅️ Продовжити вибір", "callback_data": "back_to_menu"}]
+    ]
+    send_message(chat_id, text, reply_markup=make_inline_keyboard(rows), parse_mode="Markdown")
+
+# --- health ---
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+# small index
+@app.route("/")
+def index():
+    return "Ferrik minimal bot running."
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    logger.info("Starting Ferrik minimal on port %s", port)
+    app.run(host="0.0.0.0", port=port)

@@ -1,34 +1,33 @@
-import os
-import logging
-import asyncio
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
-
+import logging
 import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import os
 
-# Завантаження .env для локальної розробки
-load_dotenv()
-
-# --- Налаштування ---
 app = Flask(__name__)
 
+# Налаштування логування
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()] # На Render краще логувати в консоль
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log')
+    ]
 )
 logger = logging.getLogger(__name__)
 
+# Налаштування Telegram бота
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     logger.error("TELEGRAM_TOKEN не знайдено! Додайте його до змінних оточення.")
     raise ValueError("TELEGRAM_TOKEN is not set!")
 
+bot = telegram.Bot(token=TELEGRAM_TOKEN)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# --- База даних (тимчасова, в пам'яті) ---
+# Приклад бази даних закладів
 RESTAURANTS = {
     "1": {"name": "Піцерія Наполі", "menu": [
         {"id": "1_1", "name": "Піца Маргарита", "price": 150},
@@ -39,14 +38,17 @@ RESTAURANTS = {
         {"id": "2_2", "name": "Філадельфія", "price": 250}
     ]}
 }
-CARTS = {} # ПОПЕРЕДЖЕННЯ: Дані будуть втрачатись при перезапуску!
 
-# --- Обробники команд ---
+# Зберігання кошика
+CARTS = {}
+
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"User {user_id} started the bot")
     await update.message.reply_text("Вітаємо у @ferrikfoot_bot! 🍽️ Виберіть заклад через /menu.")
 
+# Команда /menu
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"User {user_id} accessed menu")
@@ -57,10 +59,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Виберіть заклад у Тернополі:", reply_markup=reply_markup)
 
-# --- Обробник кнопок ---
+# Обробка кнопок
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() # Важливо відповісти на запит одразу
+    await query.answer()
     user_id = query.from_user.id
     data = query.data
     logger.info(f"User {user_id} clicked button: {data}")
@@ -121,52 +123,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order_text = f"✅ Замовлення оформлено!\n\nСклад:\n{cart_items}\n\n*Сума: {total} грн*\n\nОчікуйте на дзвінок оператора для підтвердження."
             logger.info(f"ORDER from {user_id}: {cart_items}, Total: {total} грн")
             await query.edit_message_text(order_text, parse_mode='Markdown')
-            CARTS[user_id] = [] # Очищуємо кошик після замовлення
+            CARTS[user_id] = []
 
     elif data == "back_to_menu":
-        # Імітуємо виклик команди /menu
         await menu(query, context)
 
-
-# --- Реєстрація обробників ---
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("menu", menu))
-application.add_handler(CallbackQueryHandler(button_callback))
-
-# --- Веб-сервер Flask ---
+# Ендпоінти
 @app.route('/')
 def index():
+    logger.info("Index endpoint accessed")
     return "Hello, World! @ferrikfoot_bot is running."
 
 @app.route('/health')
 def health_check():
-    return jsonify({"status": "healthy"}), 200
+    logger.info("Health check endpoint accessed")
+    return jsonify({"status": "healthy"})
 
-# Цей ендпоінт обробляє запити від Telegram
-@app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
-async def webhook():
-    json_data = request.get_json()
-    update = Update.de_json(json_data, application.bot)
-    await application.process_update(update)
-    return "OK", 200
-
-# Цей ендпоінт потрібен для одноразового налаштування вебхука
-@app.route('/set_webhook')
-def set_webhook():
-    render_url = os.getenv('RENDER_EXTERNAL_URL')
-    if not render_url:
-        return "Помилка: змінна RENDER_EXTERNAL_URL не встановлена.", 500
-    
-    webhook_url = f'{render_url}/{TELEGRAM_TOKEN}'
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    logger.info("Webhook received")
     try:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(application.bot.set_webhook(webhook_url))
-        logger.info(f"Webhook set to {webhook_url}")
-        return f"Webhook успішно встановлено на {webhook_url}", 200
+        update = telegram.Update.de_json(request.get_json(force=True), bot)
+        if update:
+            application.run_polling(update=update)  # Синхронна обробка
+            logger.info("Webhook processed successfully")
+        else:
+            logger.error("No update received in webhook")
+        return jsonify({"status": "ok"})
     except Exception as e:
-        logger.error(f"Помилка встановлення вебхука: {e}")
-        return f"Помилка встановлення вебхука: {e}", 500
+        logger.error(f"Webhook error: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Реєстрація обробників
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("menu", menu))
+application.add_handler(CallbackQueryHandler(button_callback))
 
 if __name__ == '__main__':
-    app.run(port=int(os.environ.get('PORT', 8000)))
-
+    logger.info("Starting @ferrikfoot_bot")
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))

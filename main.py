@@ -10,11 +10,18 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN not set in environment")
 
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123!")  # повинен співпадати з тим, що в setWebhook
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123!")  # повинен співпадати з setWebhook
 API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # ---- Логи ----
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log')
+    ]
+)
 logger = logging.getLogger("ferrik")
 
 # ---- Flask app (gunicorn шукає 'app') ----
@@ -83,7 +90,6 @@ def tg_answer_callback(callback_query_id: str, text: str = None):
 
 # ---- Utility: keyboards ----
 def main_keyboard():
-    # Reply keyboard (persistent)
     keyboard = [
         [{"text": "🍔 Замовити їжу"}, {"text": "📅 Забронювати столик"}],
         [{"text": "💸 Акції"}, {"text": "📦 Мій кошик"}],
@@ -109,7 +115,6 @@ def cart_keyboard():
 # ---- Webhook endpoint ----
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
-    # optional header check (if you used secret token in setWebhook; adjust if you used secret in URL)
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if WEBHOOK_SECRET and header_secret and header_secret != WEBHOOK_SECRET:
         logger.warning("Invalid webhook secret header: %s", header_secret)
@@ -144,7 +149,7 @@ def telegram_webhook():
             tg_send_message(chat_id, "📅 Напишіть, у якому ресторані та на який час ви бажаєте бронювати столик.")
             return jsonify({"ok": True})
 
-        # Free text fallback: if user types dish name -> show popular (MVP)
+        # Free text fallback
         tg_send_message(chat_id, "🔎 Шукаю по запиту... Показую популярні страви:", reply_markup=restaurants_inline_keyboard())
         return jsonify({"ok": True})
 
@@ -171,7 +176,6 @@ def telegram_webhook():
         # add dish
         if data.startswith("add_"):
             dish_id = int(data.split("_", 1)[1])
-            # find dish
             dish = None
             for r in RESTAURANTS.values():
                 for it in r["menu"]:
@@ -183,7 +187,6 @@ def telegram_webhook():
             if not dish:
                 tg_answer_callback(callback_id, text="Страва не знайдена")
                 return jsonify({"ok": True})
-            # add to cart
             CARTS.setdefault(chat_id, []).append(dish)
             tg_answer_callback(callback_id, text=f"✅ Додано: {dish['name']}")
             tg_send_message(chat_id, f"✅ Додано {dish['name']} — {dish['price']} грн")
@@ -200,7 +203,6 @@ def telegram_webhook():
             return jsonify({"ok": True})
 
         if data == "order_confirm":
-            # create a fake order id and clear cart
             cart = CARTS.get(chat_id, [])
             if not cart:
                 tg_answer_callback(callback_id, text="Кошик порожній")
@@ -214,14 +216,12 @@ def telegram_webhook():
             logger.info("New order %s from chat %s total=%s", order_id, chat_id, total)
             return jsonify({"ok": True})
 
-        # default
         tg_answer_callback(callback_id)
         return jsonify({"ok": True})
 
-    # fallback
     return jsonify({"ok": True})
 
-# ---- helper to show cart as separate function ----
+# ---- helper to show cart ----
 def _handle_show_cart(chat_id):
     cart = CARTS.get(chat_id, [])
     if not cart:
@@ -236,9 +236,10 @@ def _handle_show_cart(chat_id):
 # ---- health check ----
 @app.route("/health", methods=["GET"])
 def health():
+    logger.info("Health check endpoint accessed")
     return jsonify({"status": "ok"})
 
-# ---- Run (not used by gunicorn in prod, but useful locally) ----
+# ---- Run (for local testing) ----
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Starting local Flask server on port %s", port)

@@ -1,62 +1,199 @@
+# main.py
 import os
 import logging
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import json
+import uuid
+from flask import Flask, request, jsonify
+import requests
 
-# Логування
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# ---- Конфігурація ----
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN not set in environment")
 
-# Токен з Render (ENV VAR)
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123!")  # повинен співпадати з тим, що в setWebhook
+API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Меню з емодзі
-main_menu = [
-    ["🍔 Меню", "📦 Замовлення"],
-    ["ℹ️ Інформація", "☎️ Контакти"]
-]
+# ---- Логи ----
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ferrik")
 
-# /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reply_markup = ReplyKeyboardMarkup(main_menu, resize_keyboard=True)
-    await update.message.reply_text(
-        "👋 Привіт! Я бот FerrikFoot 🚀\n"
-        "Вибери дію з меню нижче ⬇️",
-        reply_markup=reply_markup
-    )
+# ---- Flask app (gunicorn шукає 'app') ----
+app = Flask(__name__)
 
-# Тексти для кнопок
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+# ---- Тестові дані (MVP) ----
+RESTAURANTS = {
+    1: {
+        "name": "Піцерія Наполі 🍕",
+        "menu": [
+            {"dish_id": 101, "name": "Маргарита", "price": 150},
+            {"dish_id": 102, "name": "Пепероні", "price": 180},
+        ],
+    },
+    2: {
+        "name": "Суші Майстер 🍣",
+        "menu": [
+            {"dish_id": 201, "name": "Каліфорнія рол", "price": 220},
+            {"dish_id": 202, "name": "Філадельфія", "price": 250},
+        ],
+    },
+}
 
-    if text == "🍔 Меню":
-        await update.message.reply_text("Наше меню 🍕🍟🍹\n(тут можна додати страви з БД або API)")
-    elif text == "📦 Замовлення":
-        await update.message.reply_text("Твої замовлення 🛒 ще пусті.")
-    elif text == "ℹ️ Інформація":
-        await update.message.reply_text("ℹ️ Ми працюємо щодня з 10:00 до 22:00")
-    elif text == "☎️ Контакти":
-        await update.message.reply_text("📞 Телефон: +380123456789\n📍 Адреса: м. Тернопіль")
-    else:
-        await update.message.reply_text("❓ Я тебе не зрозумів, вибери опцію з меню ⬇️")
+# у пам'яті кошики: {chat_id: [ {dish dict}, ... ] }
+CARTS = {}
 
-# Запуск
-def main():
-    app = Application.builder().token(TOKEN).build()
+# ---- Telegram helper functions ----
+def tg_send_message(chat_id: int, text: str, reply_markup: dict = None, parse_mode: str = "HTML"):
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    try:
+        r = requests.post(f"{API_URL}/sendMessage", json=payload, timeout=10)
+        logger.info("sendMessage status=%s json=%s", r.status_code, r.text[:200])
+        return r.json()
+    except Exception as e:
+        logger.exception("tg_send_message error: %s", e)
+        return None
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+def tg_edit_message(chat_id: int, message_id: int, text: str, reply_markup: dict = None):
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    try:
+        r = requests.post(f"{API_URL}/editMessageText", json=payload, timeout=10)
+        logger.info("editMessageText status=%s", r.status_code)
+        return r.json()
+    except Exception as e:
+        logger.exception("tg_edit_message error: %s", e)
+        return None
 
-    port = int(os.environ.get("PORT", 8080))
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=TOKEN,
-        webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
-    )
+def tg_answer_callback(callback_query_id: str, text: str = None):
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    try:
+        r = requests.post(f"{API_URL}/answerCallbackQuery", json=payload, timeout=5)
+        return r.json()
+    except Exception as e:
+        logger.exception("tg_answer_callback error: %s", e)
+        return None
 
-if __name__ == "__main__":
-    main()
+# ---- Utility: keyboards ----
+def main_keyboard():
+    # Reply keyboard (persistent)
+    keyboard = [
+        [{"text": "🍔 Замовити їжу"}, {"text": "📅 Забронювати столик"}],
+        [{"text": "💸 Акції"}, {"text": "📦 Мій кошик"}],
+    ]
+    return {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": False}
+
+def restaurants_inline_keyboard():
+    rows = []
+    for rid, r in RESTAURANTS.items():
+        rows.append([{"text": r["name"], "callback_data": f"rest_{rid}"}])
+    return {"inline_keyboard": rows}
+
+def menu_inline_keyboard_for_restaurant(rest_id):
+    rows = []
+    for item in RESTAURANTS[rest_id]["menu"]:
+        rows.append([{"text": f"{item['name']} — {item['price']} грн", "callback_data": f"add_{item['dish_id']}"}])
+    rows.append([{"text": "📥 Переглянути кошик", "callback_data": "view_cart"}])
+    return {"inline_keyboard": rows}
+
+def cart_keyboard():
+    return {"inline_keyboard": [[{"text":"📝 Оформити замовлення","callback_data":"order_confirm"}, {"text":"🗑 Очистити кошик","callback_data":"clear_cart"}]]}
+
+# ---- Webhook endpoint ----
+@app.route("/telegram/webhook", methods=["POST"])
+def telegram_webhook():
+    # optional header check (if you used secret token in setWebhook; adjust if you used secret in URL)
+    header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if WEBHOOK_SECRET and header_secret and header_secret != WEBHOOK_SECRET:
+        logger.warning("Invalid webhook secret header: %s", header_secret)
+        return jsonify({"ok": False, "error": "invalid secret"}), 403
+
+    update = request.get_json(force=True)
+    logger.info("Update received: %s", json.dumps(update)[:1000])
+
+    # message (text)
+    if "message" in update:
+        msg = update["message"]
+        chat_id = msg["chat"]["id"]
+        text = msg.get("text", "").strip()
+
+        # Commands /start
+        if text.lower() in ["/start", "start", "hi", "привіт", "hello"]:
+            tg_send_message(chat_id,
+                            "👋 Вітаю! Я — FerrikBot 🍽️\nВиберіть дію з меню ⬇️",
+                            reply_markup=main_keyboard())
+            return jsonify({"ok": True})
+
+        # Main menu buttons
+        if text == "🍔 Замовити їжу":
+            tg_send_message(chat_id, "Ось доступні заклади у Тернополі:", reply_markup=restaurants_inline_keyboard())
+            return jsonify({"ok": True})
+        if text == "📦 Мій кошик" or text.lower() == "кошик":
+            return _handle_show_cart(chat_id)
+        if text == "💸 Акції":
+            tg_send_message(chat_id, "🎉 Поки що акцій немає. Зовсім скоро будуть пропозиції!")
+            return jsonify({"ok": True})
+        if text == "📅 Забронювати столик":
+            tg_send_message(chat_id, "📅 Напишіть, у якому ресторані та на який час ви бажаєте бронювати столик.")
+            return jsonify({"ok": True})
+
+        # Free text fallback: if user types dish name -> show popular (MVP)
+        tg_send_message(chat_id, "🔎 Шукаю по запиту... Показую популярні страви:", reply_markup=restaurants_inline_keyboard())
+        return jsonify({"ok": True})
+
+    # callback_query (inline button pressed)
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        data = cq.get("data", "")
+        callback_id = cq.get("id")
+        message = cq.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+        message_id = message.get("message_id")
+
+        # restaurant selected
+        if data.startswith("rest_"):
+            rest_id = int(data.split("_", 1)[1])
+            if rest_id in RESTAURANTS:
+                tg_edit_message(chat_id, message_id, f"Меню — {RESTAURANTS[rest_id]['name']}", reply_markup=menu_inline_keyboard_for_restaurant(rest_id))
+                tg_answer_callback(callback_id)
+                return jsonify({"ok": True})
+            else:
+                tg_answer_callback(callback_id, text="Ресторан не знайдено")
+                return jsonify({"ok": True})
+
+        # add dish
+        if data.startswith("add_"):
+            dish_id = int(data.split("_", 1)[1])
+            # find dish
+            dish = None
+            for r in RESTAURANTS.values():
+                for it in r["menu"]:
+                    if it["dish_id"] == dish_id:
+                        dish = it
+                        break
+                if dish:
+                    break
+            if not dish:
+                tg_answer_callback(callback_id, text="Страва не знайдена")
+                return jsonify({"ok": True})
+            # add to cart
+            CARTS.setdefault(chat_id, []).append(dish)
+            tg_answer_callback(callback_id, text=f"✅ Додано: {dish['name']}")
+            tg_send_message(chat_id, f"✅ Додано {dish['name']} — {dish['price']} грн")
+            return jsonify({"ok": True})
+
+        if data == "view_cart":
+            tg_answer_callback(callback_id)
+            return _handle_show_cart(chat_id)
+
+        if data == "clear_cart":
+            CARTS.pop(chat_id, None)
+            tg_answer_callback(callback_i_

@@ -1,0 +1,17 @@
+from models.user import get_cart, set_cart, set_state
+from services.telegram import tg_send_message
+from services.sheets import save_order_to_sheets
+
+def start_checkout_process(chat_id):
+    cart = get_cart(chat_id)
+    if not cart.get("items"):
+        tg_send_message(chat_id, "🛒 Ваш кошик порожній. Додайте щось із меню! 🍽️")
+        return
+
+    total = sum(float(it.get("price", 0.0)) * int(it.get("qty", 0)) for it in cart.get("items", []))
+    if total < 300.0:  # MIN_ORDER_FOR_DELIVERY
+        tg_send_message(chat_id, f"Мінімальна сума для доставки — 300 грн. Додайте ще на {300.0 - total:.2f} грн! 😊")
+        return
+
+    tg_send_message(chat_id, "Введіть ваш номер телефону у форматі +380XXXXXXXXX: 📱")
+    set_state(chat_id, "awaiting_phone")

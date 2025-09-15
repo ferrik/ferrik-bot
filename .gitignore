@@ -3,3 +3,4 @@ __pycache__/
 .env
 bot.log
 creds.json
+bot_data.db

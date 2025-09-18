@@ -6,7 +6,7 @@ import requests
 from handlers.cart import show_cart, add_item_to_cart
 from handlers.order import start_checkout_process
 from handlers.geo import check_delivery_availability
-from services.sheets import init_gspread_client, update_menu_cache, get_item_by_id
+from services.sheets import init_gspread_client, update_menu_cache, get_item_by_id, test_gspread_connection
 from services.gemini import get_gemini_recommendation
 from models.user import init_db, get_state, set_state, get_cart, set_cart
 from datetime import datetime
@@ -211,8 +211,11 @@ def show_menu(chat_id):
 with app.app_context():
     logger.info("Bot initialization started.")
     init_db()
-    init_gspread_client()
-    update_menu_cache(force=True)
+    if init_gspread_client():
+        test_gspread_connection()  # Тестуємо підключення при старті
+        update_menu_cache(force=True)
+    else:
+        logger.error("Google Sheets initialization failed.")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

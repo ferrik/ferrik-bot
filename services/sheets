@@ -1,12 +1,13 @@
 import os
 import logging
 import json
+import base64
 import gspread
 from google.oauth2 import service_account
 from datetime import datetime
 
 logger = logging.getLogger("ferrik")
-SERVICE_ACCOUNT_KEY_PATH = os.environ.get("SERVICE_ACCOUNT_KEY_PATH", "/app/creds.json").strip()
+SERVICE_ACCOUNT_KEY_PATH = os.environ.get("SERVICE_ACCOUNT_KEY_PATH", "/tmp/creds.json").strip()
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 menu_cache = []
@@ -16,24 +17,31 @@ gc = None
 spreadsheet = None
 
 def create_creds_file():
-    creds_json = os.environ.get("CREDS_JSON")
-    if creds_json:
-        try:
-            json.loads(creds_json)
-            with open(SERVICE_ACCOUNT_KEY_PATH, "w") as f:
-                f.write(creds_json)
-            os.chmod(SERVICE_ACCOUNT_KEY_PATH, 0o600)
-            logger.info("creds.json created from CREDS_JSON environment variable.")
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in CREDS_JSON: {e}")
-        except Exception as e:
-            logger.error(f"Failed to create creds.json: {e}")
-    else:
-        logger.warning("CREDS_JSON not set, relying on existing creds.json.")
+    """Створює creds.json із base64-змінної CREDS_B64 у /tmp."""
+    creds_b64 = os.environ.get("CREDS_B64")
+    if not creds_b64:
+        logger.error("CREDS_B64 not set in environment variables.")
+        return False
+    try:
+        creds_bytes = base64.b64decode(creds_b64)
+        with open(SERVICE_ACCOUNT_KEY_PATH, "wb") as f:
+            f.write(creds_bytes)
+        os.chmod(SERVICE_ACCOUNT_KEY_PATH, 0o600)
+        logger.info(f"creds.json created at {SERVICE_ACCOUNT_KEY_PATH} from CREDS_B64.")
+        return True
+    except base64.binascii.Error as e:
+        logger.error(f"Invalid base64 in CREDS_B64: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to create creds.json: {e}")
+        return False
 
 def init_gspread_client():
+    """Ініціалізує клієнт Google Sheets."""
     global gc, spreadsheet
-    create_creds_file()
+    if not create_creds_file():
+        logger.error("Failed to initialize gspread client due to creds.json creation failure.")
+        return False
     logger.info("init_gspread_client: attempting to connect...")
     try:
         if not os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
@@ -57,7 +65,24 @@ def init_gspread_client():
         gc = spreadsheet = None
         return False
 
+def test_gspread_connection():
+    """Тестує підключення до Google Sheets."""
+    try:
+        if not spreadsheet and not init_gspread_client():
+            return False
+        ws = spreadsheet.worksheet("Меню")
+        records = ws.get_all_records()
+        logger.info(f"Test connection successful: retrieved {len(records)} records from 'Меню'.")
+        return True
+    except gspread.exceptions.WorksheetNotFound:
+        logger.error("Test connection failed: worksheet 'Меню' not found.")
+        return False
+    except Exception as e:
+        logger.error(f"Test connection error: {e}")
+        return False
+
 def update_menu_cache(force=False):
+    """Оновлює кеш меню з Google Sheets."""
     global menu_cache, last_menu_cache_time
     try:
         if not spreadsheet and not init_gspread_client():
@@ -108,6 +133,7 @@ def update_menu_cache(force=False):
         menu_cache = []
 
 def get_item_by_id(item_id):
+    """Отримує страву за ID."""
     update_menu_cache()
     item_id_str = str(item_id)
     for item in menu_cache:
@@ -117,6 +143,7 @@ def get_item_by_id(item_id):
     return None
 
 def save_order_to_sheets(chat_id, cart):
+    """Зберігає замовлення в Google Sheets."""
     try:
         ws = spreadsheet.worksheet("Замовлення")
         order_id = str(uuid.uuid4())

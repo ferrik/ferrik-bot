@@ -1,156 +1,106 @@
+# services/sheets.py
 import os
-import logging
 import json
-import base64
+import logging
 import gspread
 from google.oauth2 import service_account
-from datetime import datetime
-import uuid
+from datetime import datetime, timedelta
 
-logger = logging.getLogger("ferrik")
-SERVICE_ACCOUNT_KEY_PATH = os.environ.get("SERVICE_ACCOUNT_KEY_PATH", "/tmp/creds.json").strip()
+logger = logging.getLogger("ferrik.sheets")
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-menu_cache = []
-last_menu_cache_time = None
-CACHE_TIMEOUT_SECONDS = int(os.environ.get("CACHE_TIMEOUT_SECONDS", "900"))
+CREDS_JSON = os.environ.get("CREDS_JSON")  # якщо ти зберігаєш весь creds.json тут
+SERVICE_ACCOUNT_KEY_PATH = os.environ.get("SERVICE_ACCOUNT_KEY_PATH", "").strip()  # або шлях до файлу
+
+SCOPE = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
 gc = None
 spreadsheet = None
 
-def create_creds_file():
-    """Створює creds.json із base64-змінної CREDS_B64 у /tmp."""
-    creds_b64 = os.environ.get("CREDS_B64")
-    if not creds_b64:
-        logger.error("CREDS_B64 not set in environment variables.")
-        return False
-    try:
-        creds_bytes = base64.b64decode(creds_b64)
-        with open(SERVICE_ACCOUNT_KEY_PATH, "wb") as f:
-            f.write(creds_bytes)
-        os.chmod(SERVICE_ACCOUNT_KEY_PATH, 0o600)
-        logger.info(f"creds.json created at {SERVICE_ACCOUNT_KEY_PATH} from CREDS_B64.")
-        return True
-    except base64.binascii.Error as e:
-        logger.error(f"Invalid base64 in CREDS_B64: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Failed to create creds.json: {e}")
-        return False
+# простий кеш меню
+_menu_cache = []
+_menu_cache_time = None
+CACHE_TTL = int(os.environ.get("MENU_CACHE_TTL_SECONDS", "900"))  # 15 min
 
 def init_gspread_client():
-    """Ініціалізує клієнт Google Sheets."""
     global gc, spreadsheet
-    if not create_creds_file():
-        logger.error("Failed to initialize gspread client due to creds.json creation failure.")
-        return False
-    logger.info("init_gspread_client: attempting to connect...")
+    if gc:
+        return True
+
     try:
-        if not os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
-            logger.error(f"Service account key file not found at: {SERVICE_ACCOUNT_KEY_PATH}")
-            return False
-        if not GOOGLE_SHEET_ID:
-            logger.error("GOOGLE_SHEET_ID is not set.")
+        creds = None
+        # 1) якщо передали CREDS_JSON у змінній середовища
+        if CREDS_JSON:
+            logger.info("Using CREDS_JSON from env to init gspread")
+            info = json.loads(CREDS_JSON)
+            creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPE)
+        # 2) або використовуємо локальний файл (SERVICE_ACCOUNT_KEY_PATH)
+        elif SERVICE_ACCOUNT_KEY_PATH and os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
+            logger.info("Using service account file: %s", SERVICE_ACCOUNT_KEY_PATH)
+            creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_KEY_PATH, scopes=SCOPE)
+        else:
+            logger.error("No Google credentials found. Set CREDS_JSON or SERVICE_ACCOUNT_KEY_PATH.")
             return False
 
-        creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_KEY_PATH, scopes=SCOPE)
         gc = gspread.authorize(creds)
-        spreadsheet = gc.open_by_key(GOOGLE_SHEET_ID)
-        logger.info("init_gspread_client: connected to Google Sheets successfully.")
-        return True
-    except gspread.exceptions.SpreadsheetNotFound:
-        logger.error(f"Google Sheet with ID '{GOOGLE_SHEET_ID}' not found.")
-        gc = spreadsheet = None
-        return False
-    except Exception as e:
-        logger.exception(f"init_gspread_client error: {e}")
-        gc = spreadsheet = None
-        return False
-
-def test_gspread_connection():
-    """Тестує підключення до Google Sheets."""
-    try:
-        if not spreadsheet and not init_gspread_client():
+        if not GOOGLE_SHEET_ID:
+            logger.error("GOOGLE_SHEET_ID not set.")
             return False
-        ws = spreadsheet.worksheet("Меню")
-        records = ws.get_all_records()
-        logger.info(f"Test connection successful: retrieved {len(records)} records from 'Меню'.")
+        spreadsheet = gc.open_by_key(GOOGLE_SHEET_ID)
+        logger.info("Connected to Google Sheet: %s", GOOGLE_SHEET_ID)
         return True
-    except gspread.exceptions.WorksheetNotFound:
-        logger.error("Test connection failed: worksheet 'Меню' not found.")
-        return False
     except Exception as e:
-        logger.error(f"Test connection error: {e}")
+        logger.exception("init_gspread_client error: %s", e)
         return False
 
-def update_menu_cache(force=False):
-    """Оновлює кеш меню з Google Sheets."""
-    global menu_cache, last_menu_cache_time
+def get_menu_from_sheet(force=False):
+    """
+    Повертає список позицій меню (словарі). Кешує результат для CACHE_TTL секунд.
+    Очікується, що у вкладці 'Меню' є колонки: ID, Назва Страви, Ціна, Опис, Фото URL, Активний
+    """
+    global _menu_cache, _menu_cache_time
     try:
-        if not spreadsheet and not init_gspread_client():
-            logger.warning("update_menu_cache: Google Sheets client not available.")
-            return
+        if not init_gspread_client():
+            return []
 
-        if not force and last_menu_cache_time and (datetime.now() - last_menu_cache_time).total_seconds() < CACHE_TIMEOUT_SECONDS:
-            logger.debug("update_menu_cache: using cached menu.")
-            return
-        
-        logger.info("update_menu_cache: updating menu cache from Google Sheet...")
+        now = datetime.utcnow()
+        if not force and _menu_cache and _menu_cache_time and (now - _menu_cache_time).total_seconds() < CACHE_TTL:
+            return _menu_cache
+
         ws = spreadsheet.worksheet("Меню")
         records = ws.get_all_records()
         processed = []
-        for rec in records:
-            item = {k: v for k, v in rec.items() if k}
-            item['Назва Страви'] = str(item.get('Назва Страви') or item.get('Назва', '')).strip()
-            if not item['Назва Страви']:
-                logger.warning(f"update_menu_cache: skipped item without a name: {rec}")
+        for r in records:
+            # нормалізація полів
+            name = (r.get("Назва Страви") or r.get("Назва") or "").strip()
+            if not name:
                 continue
-
-            item['Активний'] = str(item.get('Активний', 'Так')).strip()
-            item['ID'] = str(item.get('ID')) if item.get('ID') is not None else None
-            if item['ID'] is None:
-                logger.warning(f"update_menu_cache: skipped item '{item['Назва Страви']}' without an ID.")
+            item_id = str(r.get("ID") or "").strip()
+            if not item_id:
+                # можна згенерувати, але краще вказувати ID у Sheets
                 continue
-
+            price_raw = r.get("Ціна", 0)
             try:
-                price_str = str(item.get('Ціна', '0')).strip().replace(',', '.')
-                item['Ціна'] = float(price_str) if price_str else 0.0
-            except (ValueError, TypeError):
-                logger.warning(f"update_menu_cache: invalid price '{item.get('Ціна')}' for '{item['Назва Страви']}'. Setting to 0.0.")
-                item['Ціна'] = 0.0
-            
-            item.setdefault('Опис', '').strip()
-            item.setdefault('Категорія', 'Без категорії').strip()
-            item.setdefault('Фото URL', '').strip()
-            processed.append(item)
-        
-        menu_cache = processed
-        last_menu_cache_time = datetime.now()
-        logger.info(f"update_menu_cache: cached {len(menu_cache)} menu items.")
+                price = float(str(price_raw).strip().replace(",", "."))
+            except:
+                price = 0.0
+            processed.append({
+                "ID": item_id,
+                "name": name,
+                "price": price,
+                "description": (r.get("Опис") or "").strip(),
+                "photo": (r.get("Фото URL") or "").strip(),
+                "active": str(r.get("Активний", "Так")).strip().lower() in ("так", "yes", "true")
+            })
+        _menu_cache = [p for p in processed if p.get("active")]
+        _menu_cache_time = now
+        logger.info("Menu loaded: %d items", len(_menu_cache))
+        return _menu_cache
     except gspread.exceptions.WorksheetNotFound:
-        logger.error("update_menu_cache: worksheet 'Меню' not found in Google Sheet.")
-        menu_cache = []
+        logger.error("Worksheet 'Меню' not found in the spreadsheet.")
+        return []
     except Exception as e:
-        logger.exception(f"update_menu_cache error: {e}")
-        menu_cache = []
-
-def get_item_by_id(item_id):
-    """Отримує страву за ID."""
-    update_menu_cache()
-    item_id_str = str(item_id)
-    for item in menu_cache:
-        if str(item.get('ID')) == item_id_str:
-            return item
-    logger.warning(f"get_item_by_id: item with ID '{item_id_str}' not found in menu.")
-    return None
-
-def save_order_to_sheets(chat_id, cart):
-    """Зберігає замовлення в Google Sheets."""
-    try:
-        ws = spreadsheet.worksheet("Замовлення")
-        order_id = str(uuid.uuid4())
-        items = "; ".join([f"{item['name']} (x{item['qty']})" for item in cart.get("items", [])])
-        total = sum(float(item.get("price", 0.0)) * int(item.get("qty", 0)) for item in cart.get("items", []))
-        ws.append_row([order_id, str(chat_id), cart.get("phone", ""), cart.get("address", ""), items, total, datetime.now().isoformat()])
-        logger.info(f"Order {order_id} saved to Google Sheets for chat_id {chat_id}")
-    except Exception as e:
-        logger.error(f"Failed to save order to Google Sheets: {e}")
+        logger.exception("get_menu_from_sheet error: %s", e)
+        return []

@@ -15,8 +15,10 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: SERVICE_ACCOUNT_KEY_PATH
-        value: /app/creds.json
+        value: /tmp/creds.json
       - key: GOOGLE_SHEET_ID
         value: 1Uz8T1E3_8eq8yt4SMh6Fd_KvGpW9Fe0PFI-mtcqSDJI
       - key: OPERATOR_CHAT_ID
+        sync: false
+      - key: CREDS_B64
         sync: false

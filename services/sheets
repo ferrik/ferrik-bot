@@ -5,6 +5,7 @@ import base64
 import gspread
 from google.oauth2 import service_account
 from datetime import datetime
+import uuid
 
 logger = logging.getLogger("ferrik")
 SERVICE_ACCOUNT_KEY_PATH = os.environ.get("SERVICE_ACCOUNT_KEY_PATH", "/tmp/creds.json").strip()

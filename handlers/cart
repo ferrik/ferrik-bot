@@ -46,7 +46,7 @@ def add_item_to_cart(chat_id, item_id, quantity=1):
     if not found_in_cart:
         user_cart["items"].append({
             "id": selected_item_info.get("ID"),
-            "name": selected_item_info.get("Назва Страви", "N/A"),
+            "name": selected_item_info.get("Страви", "N/A"),
             "price": selected_item_info.get("Ціна", 0.0),
             "qty": quantity
         })

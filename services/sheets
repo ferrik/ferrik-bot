@@ -1,4 +1,3 @@
-# services/sheets.py
 import os
 import json
 import logging
@@ -18,25 +17,25 @@ SCOPE = [
 
 gc = None
 spreadsheet = None
-
-# простий кеш меню
 _menu_cache = []
 _menu_cache_time = None
 CACHE_TTL = int(os.environ.get("MENU_CACHE_TTL_SECONDS", "900"))  # 15 min
 
 def init_gspread_client():
+    """
+    Ініціалізує клієнт gspread для роботи з Google Sheets.
+    Використовує або CREDS_JSON зі змінної середовища, або файл ключа.
+    """
     global gc, spreadsheet
     if gc:
         return True
 
     try:
         creds = None
-        # 1) якщо передали CREDS_JSON у змінній середовища
         if CREDS_JSON:
             logger.info("Using CREDS_JSON from env to init gspread")
             info = json.loads(CREDS_JSON)
             creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPE)
-        # 2) або використовуємо локальний файл (SERVICE_ACCOUNT_KEY_PATH)
         elif SERVICE_ACCOUNT_KEY_PATH and os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
             logger.info("Using service account file: %s", SERVICE_ACCOUNT_KEY_PATH)
             creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_KEY_PATH, scopes=SCOPE)
@@ -55,10 +54,17 @@ def init_gspread_client():
         logger.exception("init_gspread_client error: %s", e)
         return False
 
-def get_menu_from_sheet(force=False):
+def _parse_price(price_raw):
+    """Допоміжна функція для безпечного парсингу ціни."""
+    try:
+        # Замінюємо кому на крапку і парсимо в float
+        return float(str(price_raw).strip().replace(",", "."))
+    except (ValueError, TypeError):
+        return 0.0
+
+def update_menu_cache(force=False):
     """
-    Повертає список позицій меню (словарі). Кешує результат для CACHE_TTL секунд.
-    Очікується, що у вкладці 'Меню' є колонки: ID, Назва Страви, Ціна, Опис, Фото URL, Активний
+    Оновлює кеш меню з Google Sheets, якщо кеш застарів або force=True.
     """
     global _menu_cache, _menu_cache_time
     try:
@@ -67,6 +73,7 @@ def get_menu_from_sheet(force=False):
 
         now = datetime.utcnow()
         if not force and _menu_cache and _menu_cache_time and (now - _menu_cache_time).total_seconds() < CACHE_TTL:
+            logger.info("Using cached menu. Next update in %.1f seconds.", CACHE_TTL - (now - _menu_cache_time).total_seconds())
             return _menu_cache
 
         ws = spreadsheet.worksheet("Меню")
@@ -75,32 +82,46 @@ def get_menu_from_sheet(force=False):
         for r in records:
             # нормалізація полів
             name = (r.get("Назва Страви") or r.get("Назва") or "").strip()
-            if not name:
-                continue
             item_id = str(r.get("ID") or "").strip()
-            if not item_id:
-                # можна згенерувати, але краще вказувати ID у Sheets
+            
+            if not name or not item_id:
+                # Пропускаємо рядки без назви або ID
                 continue
-            price_raw = r.get("Ціна", 0)
-            try:
-                price = float(str(price_raw).strip().replace(",", "."))
-            except:
-                price = 0.0
+
             processed.append({
                 "ID": item_id,
                 "name": name,
-                "price": price,
+                "price": _parse_price(r.get("Ціна", 0)),
                 "description": (r.get("Опис") or "").strip(),
                 "photo": (r.get("Фото URL") or "").strip(),
                 "active": str(r.get("Активний", "Так")).strip().lower() in ("так", "yes", "true")
             })
+            
         _menu_cache = [p for p in processed if p.get("active")]
         _menu_cache_time = now
-        logger.info("Menu loaded: %d items", len(_menu_cache))
+        logger.info("Menu loaded: %d active items", len(_menu_cache))
         return _menu_cache
     except gspread.exceptions.WorksheetNotFound:
         logger.error("Worksheet 'Меню' not found in the spreadsheet.")
         return []
     except Exception as e:
-        logger.exception("get_menu_from_sheet error: %s", e)
+        logger.exception("update_menu_cache error: %s", e)
         return []
+
+def get_menu_from_cache():
+    """Повертає поточний кешований список меню."""
+    return _menu_cache
+
+def get_menu_item_by_id(item_id):
+    """
+    Шукає і повертає елемент меню за його ID з кешу.
+    Повертає None, якщо елемент не знайдено.
+    """
+    global _menu_cache
+    if not _menu_cache:
+        update_menu_cache()
+    
+    for item in _menu_cache:
+        if item.get("ID") == item_id:
+            return item
+    return None

@@ -111,7 +111,7 @@ def webhook():
             tg_send_message(chat_id, greeting)
             set_state(user_id, 'main')
         elif text == "/menu":
-            # ВИПРАВЛЕННЯ: прибрано другий аргумент
+            # ВИПРАВЛЕННЯ №1: прибрано другий аргумент
             menu_data = get_menu_from_sheet(gspread_client)
             menu_text = "<b>Наше меню:</b>\n\n"
             categories = {}
@@ -154,7 +154,7 @@ def webhook():
             tg_send_message(chat_id, help_message)
         else:
             # ВИКОРИСТОВУЄМО ШАБЛОН ПРОМПТА
-            # ВИПРАВЛЕННЯ: прибрано другий аргумент
+            # ВИПРАВЛЕННЯ №2: прибрано другий аргумент
             menu_data = get_menu_from_sheet(gspread_client)
             menu_json = json.dumps(menu_data, ensure_ascii=False, indent=2)
 
@@ -163,8 +163,8 @@ def webhook():
                 user_prompt=text
             )
             
-            # Викликаємо функцію, передаючи оновлений промпт
-            response_text = get_gemini_recommendation(prompt, GEMINI_API_KEY)
+            # ВИПРАВЛЕННЯ №3: прибрано зайвий аргумент
+            response_text = get_gemini_recommendation(prompt)
             
             # Відправка відповіді користувачу
             tg_send_message(chat_id, response_text)

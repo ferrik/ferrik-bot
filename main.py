@@ -11,6 +11,7 @@ from services.sheets import init_gspread_client, get_menu_from_sheet, get_item_b
 from services.gemini import get_gemini_recommendation
 from models.user import init_db, get_state, set_state, get_cart, set_cart
 from datetime import datetime
+from menu_logic import generate_menu_keyboard # Імпортуємо функцію для створення клавіатури меню
 
 try:
     from zoneinfo import ZoneInfo
@@ -34,168 +35,46 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123").strip()
 API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
 OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID", "").strip()
-DEFAULT_CITY = os.environ.get("DEFAULT_CITY", "Тернопіль")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+DEFAULT_CITY = os.environ.get("DEFAULT_CITY", "Тернопіль").strip()
+GOOGLE_SEARCH_API_KEY = os.environ.get("GOOGLE_SEARCH_API_KEY")
+GOOGLE_SEARCH_CX = os.environ.get("GOOGLE_SEARCH_CX")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+TIMEZONE_NAME = "Europe/Kyiv"
 
-# Зберігання стану в пам'яті
-bot_state = {}
+menu_cache = []
 
-# Ініціалізуємо клієнт Google Sheets
-gspread_client = init_gspread_client()
-
-# Функція відправки повідомлень у Telegram
-def tg_send_message(chat_id, text, reply_markup=None):
+# Функція для надсилання повідомлення в Telegram
+def send_telegram_message(chat_id, text, reply_markup=None):
     payload = {
         'chat_id': chat_id,
         'text': text,
-        'parse_mode': 'HTML'
+        'parse_mode': 'Markdown',
+        'reply_markup': reply_markup,
     }
-    if reply_markup:
-        payload['reply_markup'] = json.dumps(reply_markup)
+    try:
+        requests.post(f"{API_URL}/sendMessage", json=payload)
+    except Exception as e:
+        logger.error(f"Failed to send message: {e}")
 
-    response = requests.post(f"{API_URL}/sendMessage", json=payload)
-    return response.json()
+# Функція для надсилання дії в Telegram
+def send_chat_action(chat_id, action):
+    payload = {'chat_id': chat_id, 'action': action}
+    try:
+        requests.post(f"{API_URL}/sendChatAction", json=payload)
+    except Exception as e:
+        logger.error(f"Failed to send chat action: {e}")
 
-# Функція відправки відповіді на callback
-def tg_answer_callback(callback_id, text):
-    payload = {
-        'callback_query_id': callback_id,
-        'text': text,
-        'show_alert': False
-    }
-    requests.post(f"{API_URL}/answerCallbackQuery", json=payload)
-
-# === ПОКРАЩЕННЯ 1: ВИНОСИМО ПРОМПТ В ОКРЕМУ ЗМІННУ ===
-# Це робить код чистішим і дозволяє легко редагувати промпт
-GEMINI_PROMPT_TEMPLATE = """
-Ти — чат-бот для кафе. Твоє ім'я FerrikFootBot.
-Твоя головна мета — допомагати клієнтам, надаючи інформацію про меню та відповідаючи на їхні запитання.
-
-# Контекст
-Ось наше актуальне меню у форматі JSON. Відповідай, використовуючи лише цю інформацію. НЕ ВИГАДУЙ страв, яких немає в меню.
-
-{menu_json}
-
-Це історія нашої розмови (від найстарішого до найновішого):
-Користувач: {user_prompt}
-
-# Інструкції
-1. Завжди відповідай українською мовою.
-2. Відповідай дружньо, доброзичливо та інформативно.
-3. Усі відповіді мають ґрунтуватися виключно на наданому меню.
-4. Якщо клієнт запитує про страву, якої немає в меню, чесно повідомляй про це, використовуючи фразу: 'Вибачте, цієї страви немає в нашому меню. Можливо, я можу запропонувати щось інше?'.
-5. Якщо питання не стосується меню, відповідай: 'Вибачте, я можу допомогти лише з питаннями щодо нашого меню. Чим можу вас почастувати?'.
-6. Використовуй історію розмови для персоналізації.
-7. Якщо клієнт щось обрав, можеш порадити додаткову страву чи напій.
-8. Виділяй **назви страв** і **ціни** для кращої читабельності.
-"""
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
-        return jsonify({"error": "Invalid token"}), 403
-
-    update = request.json
-    logger.info(f"Received update: {update}")
-
-    if "message" in update:
-        message = update["message"]
-        chat_id = message["chat"]["id"]
-        text = message.get("text", "")
-        user_id = message["from"]["id"]
-        user_name = message["from"].get("first_name", "Друже")
-        
-        # Обробка команд
-        if text == "/start":
-            greeting = generate_personalized_greeting(user_name)
-            tg_send_message(chat_id, greeting)
-            set_state(user_id, 'main')
-        elif text == "/menu":
-            # ВИПРАВЛЕННЯ: прибрано другий аргумент
-            menu_data = get_menu_from_sheet(gspread_client)
-            menu_text = "<b>Наше меню:</b>\n\n"
-            categories = {}
-            for item in menu_data:
-                category = item.get("Категорія", "Інше")
-                if category not in categories:
-                    categories[category] = []
-                categories[category].append(f'<b>{item["Страви"]}</b> - {item["Опис"]} - <b>{item["Ціна"]}</b> грн.')
-            
-            for category, items in categories.items():
-                menu_text += f"<b>{category}</b>\n"
-                menu_text += "\n".join(items)
-                menu_text += "\n\n"
-            
-            tg_send_message(chat_id, menu_text)
-            
-        elif text == "/cart":
-            show_cart(chat_id, user_id)
-        elif text.startswith("/add_item"):
-            try:
-                item_id = text.split("_")[2]
-                add_item_to_cart(chat_id, user_id, item_id, gspread_client, GOOGLE_SHEET_ID)
-            except IndexError:
-                tg_send_message(chat_id, "Некоректний формат команди. Використовуйте /add_item_<ID>")
-        elif text == "/checkout":
-            start_checkout_process(chat_id, user_id)
-        elif text == "/history":
-             # Це лише заглушка для прикладу
-            tg_send_message(chat_id, "Історія ваших замовлень буде тут!")
-        elif text == "/help":
-            help_message = (
-                "<b>Список команд:</b>\n"
-                "/start - Почати спілкування\n"
-                "/menu - Показати наше меню\n"
-                "/cart - Показати ваш кошик\n"
-                "/checkout - Оформити замовлення\n"
-                "/history - Показати історію ваших замовлень\n"
-                "/help - Показати цю довідку"
-            )
-            tg_send_message(chat_id, help_message)
-        else:
-            # === ПОКРАЩЕННЯ 2: ВИКОРИСТОВУЄМО ШАБЛОН ПРОМПТА ===
-            # Тепер ми просто заповнюємо шаблон даними, що робить код лаконічнішим
-            # ВИПРАВЛЕННЯ: прибрано другий аргумент
-            menu_data = get_menu_from_sheet(gspread_client)
-            menu_json = json.dumps(menu_data, ensure_ascii=False, indent=2)
-
-            prompt = GEMINI_PROMPT_TEMPLATE.format(
-                menu_json=menu_json,
-                user_prompt=text
-            )
-            
-            # Викликаємо функцію, передаючи оновлений промпт
-            response_text = get_gemini_recommendation(prompt, GEMINI_API_KEY)
-            
-            # Відправка відповіді користувачу
-            tg_send_message(chat_id, response_text)
-
-    elif "callback_query" in update:
-        callback_query = update["callback_query"]
-        chat_id = callback_query["message"]["chat"]["id"]
-        query_data = callback_query["data"]
-        callback_id = callback_query["id"]
-        user_id = callback_query["from"]["id"]
-        
-        # Обробка callback запитів
-        if query_data.startswith("add_to_cart_"):
-            item_id = query_data.replace("add_to_cart_", "")
-            add_item_to_cart(chat_id, user_id, item_id, gspread_client, GOOGLE_SHEET_ID)
-            tg_answer_callback(callback_id, "Товар додано до кошика!")
-        elif query_data.startswith("remove_from_cart_"):
-            item_id = query_data.replace("remove_from_cart_", "")
-            cart = get_cart(user_id)
-            if item_id in cart:
-                del cart[item_id]
-                set_cart(user_id, cart)
-            show_cart(chat_id, user_id)
-            tg_answer_callback(callback_id, "Товар видалено з кошика!")
-
-    return jsonify({"status": "ok"})
+# Функція для відповіді на callback-запит
+def tg_answer_callback(callback_id, text=None):
+    payload = {'callback_query_id': callback_id, 'text': text}
+    try:
+        requests.post(f"{API_URL}/answerCallbackQuery", json=payload)
+    except Exception as e:
+        logger.error(f"Failed to answer callback query: {e}")
 
 def generate_personalized_greeting(user_name="Друже"):
     user_name = (user_name or '').strip() or 'Друже'
-    current = datetime.now() if not ZoneInfo else datetime.now(ZoneInfo('Europe/Kiev'))
+    current = datetime.now() if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME))
     hour = current.hour
 
     greeting = f"Доброго {'ранку' if 6 <= hour < 12 else 'дня' if 12 <= hour < 18 else 'вечора'}, {user_name}! 😊"
@@ -203,7 +82,7 @@ def generate_personalized_greeting(user_name="Друже"):
     return f"{greeting}\n\n{status}\n\nЯ ваш помічник для замовлення їжі! 🍔🍕"
 
 def is_restaurant_open():
-    current_hour = datetime.now().hour if not ZoneInfo else datetime.now(ZoneInfo('Europe/Kiev')).hour
+    current_hour = datetime.now().hour if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME)).hour
     return 9 <= current_hour < 22
 
 # Health check endpoint
@@ -219,7 +98,73 @@ with app.app_context():
         logger.info("Database initialized.")
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
+    try:
+        global menu_cache
+        menu_cache = get_menu_from_sheet(GOOGLE_SHEET_ID)
+        if not menu_cache:
+            raise ValueError("Menu is empty!")
+        logger.info(f"Menu loaded: {len([item for item in menu_cache if item.get('Активний') == 'Так'])} active items from {len(menu_cache)} total")
+    except Exception as e:
+        logger.error(f"Failed to load menu from Google Sheet: {e}")
+        menu_cache = []
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+# Webhook endpoint for Telegram updates
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != WEBHOOK_SECRET:
+        return jsonify({'status': 'invalid token'}), 403
+
+    update = request.get_json()
+    if not update:
+        return jsonify({'status': 'no update data'}), 200
+
+    logger.info(f"Received update: {update}")
+
+    message = update.get('message')
+    callback_query = update.get('callback_query')
+
+    if callback_query:
+        chat_id = callback_query['message']['chat']['id']
+        data = callback_query['data']
+        # Обробка callback data
+        if data.startswith('add_'):
+            item_id = data.split('_')[1]
+            add_item_to_cart(chat_id, item_id, menu_cache)
+        elif data.startswith('remove_'):
+            item_id = data.split('_')[1]
+            # Assumes a remove_item_from_cart function exists
+            pass
+        elif data == 'show_cart':
+            show_cart(chat_id, menu_cache)
+        elif data == 'start_checkout':
+            start_checkout_process(chat_id)
+        
+        tg_answer_callback(callback_query['id'])
+        return '', 200
+
+    if message:
+        chat_id = message['chat']['id']
+        user_id = message['from']['id']
+        user_name = message['from'].get('first_name', "Друже")
+        text = message.get('text')
+
+        if not text:
+            return '', 200
+
+        state = get_state(user_id) or 'start'
+        
+        if text == '/start':
+            send_telegram_message(chat_id, generate_personalized_greeting(user_name))
+            set_state(user_id, 'start')
+            return '', 200
+        
+        elif text == '🍔 Замовити їжу':
+            # Генеруємо клавіатуру меню за допомогою імпортованої функції
+            reply_markup = generate_menu_keyboard(menu_cache)
+            send_telegram_message(chat_id, "Оберіть, що бажаєте замовити:", reply_markup)
+            return '', 200
+
+    return '', 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

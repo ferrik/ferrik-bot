@@ -65,7 +65,7 @@ def tg_answer_callback(callback_id, text):
     }
     requests.post(f"{API_URL}/answerCallbackQuery", json=payload)
 
-# === ВИКОРИСТОВУЄМО ШАБЛОН ПРОМПТА ===
+# === ПОКРАЩЕННЯ 1: ВИНОСИМО ПРОМПТ В ОКРЕМУ ЗМІННУ ===
 # Це робить код чистішим і дозволяє легко редагувати промпт
 GEMINI_PROMPT_TEMPLATE = """
 Ти — чат-бот для кафе. Твоє ім'я FerrikFootBot.
@@ -111,7 +111,7 @@ def webhook():
             tg_send_message(chat_id, greeting)
             set_state(user_id, 'main')
         elif text == "/menu":
-            # ВИПРАВЛЕННЯ №1: прибрано другий аргумент
+            # ВИПРАВЛЕННЯ: прибрано другий аргумент
             menu_data = get_menu_from_sheet(gspread_client)
             menu_text = "<b>Наше меню:</b>\n\n"
             categories = {}
@@ -153,8 +153,9 @@ def webhook():
             )
             tg_send_message(chat_id, help_message)
         else:
-            # ВИКОРИСТОВУЄМО ШАБЛОН ПРОМПТА
-            # ВИПРАВЛЕННЯ №2: прибрано другий аргумент
+            # === ПОКРАЩЕННЯ 2: ВИКОРИСТОВУЄМО ШАБЛОН ПРОМПТА ===
+            # Тепер ми просто заповнюємо шаблон даними, що робить код лаконічнішим
+            # ВИПРАВЛЕННЯ: прибрано другий аргумент
             menu_data = get_menu_from_sheet(gspread_client)
             menu_json = json.dumps(menu_data, ensure_ascii=False, indent=2)
 
@@ -163,8 +164,8 @@ def webhook():
                 user_prompt=text
             )
             
-            # ВИПРАВЛЕННЯ №3: прибрано зайвий аргумент
-            response_text = get_gemini_recommendation(prompt)
+            # Викликаємо функцію, передаючи оновлений промпт
+            response_text = get_gemini_recommendation(prompt, GEMINI_API_KEY)
             
             # Відправка відповіді користувачу
             tg_send_message(chat_id, response_text)

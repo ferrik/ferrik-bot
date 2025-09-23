@@ -11,7 +11,7 @@ from services.sheets import init_gspread_client, get_menu_from_sheet, get_item_b
 from services.gemini import get_gemini_recommendation
 from models.user import init_db, get_state, set_state, get_cart, set_cart
 from datetime import datetime
-from menu_logic import generate_menu_keyboard # Імпортуємо функцію для створення клавіатури меню
+from menu_logic import generate_menu_keyboard
 
 try:
     from zoneinfo import ZoneInfo
@@ -99,7 +99,7 @@ with app.app_context():
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
     try:
-        global menu_cache
+        global menu_cache # Оголошення global має бути тут, до першого використання
         menu_cache = get_menu_from_sheet(GOOGLE_SHEET_ID)
         if not menu_cache:
             raise ValueError("Menu is empty!")

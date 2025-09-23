@@ -160,4 +160,100 @@ def handle_cart_quantity_change(chat_id, action, item_index, callback_id):
         if action == "plus":
             new_qty = min(current_qty + 1, 99)  # Максимум 99 штук
         elif action == "minus":
-            new_qty = max(current_qty - 1, 1)   # Мінімум 1
+            new_qty = max(current_qty - 1, 1)   # Мінімум 1 штука
+        else:
+            return
+        
+        # Оновлюємо кількість
+        items[item_index]["qty"] = new_qty
+        cart["items"] = items
+        set_cart(chat_id, cart)
+        
+        tg_answer_callback(callback_id, f"Кількість оновлено: {new_qty} шт")
+        
+        # Оновлюємо відображення кошика
+        show_cart(chat_id)
+        
+    except Exception as e:
+        logger.error(f"Error changing quantity for user {chat_id}: {e}")
+        tg_answer_callback(callback_id, "Помилка при оновленні кількості", show_alert=True)
+
+def remove_item_from_cart(chat_id, item_index, callback_id):
+    """Видаляє товар з кошика"""
+    try:
+        cart = get_cart(chat_id)
+        items = cart.get("items", [])
+        
+        if not (0 <= item_index < len(items)):
+            tg_answer_callback(callback_id, "Помилка: товар не знайдено", show_alert=True)
+            return
+        
+        # Запам'ятовуємо назву для повідомлення
+        item_name = items[item_index].get("name", "товар")
+        
+        # Видаляємо товар
+        items.pop(item_index)
+        cart["items"] = items
+        set_cart(chat_id, cart)
+        
+        tg_answer_callback(callback_id, f"'{item_name}' видалено з кошика")
+        
+        # Оновлюємо відображення кошика
+        show_cart(chat_id)
+        
+        logger.info(f"Removed item {item_index} from cart for user {chat_id}")
+        
+    except Exception as e:
+        logger.error(f"Error removing item for user {chat_id}: {e}")
+        tg_answer_callback(callback_id, "Помилка при видаленні товару", show_alert=True)
+
+def clear_cart(chat_id, callback_id=None):
+    """Очищує весь кошик"""
+    try:
+        from models.user import clear_cart as clear_user_cart
+        
+        if clear_user_cart(chat_id):
+            message = "🗑️ Кошик очищено!\n\nМожете почати нові покупки з меню."
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "🍽️ Переглянути меню", "callback_data": "show_menu"}]
+                ]
+            }
+            tg_send_message(chat_id, message, reply_markup=keyboard)
+            
+            if callback_id:
+                tg_answer_callback(callback_id, "Кошик очищено!")
+                
+            logger.info(f"Cart cleared for user {chat_id}")
+        else:
+            tg_send_message(chat_id, "Помилка при очищенні кошика.")
+            
+    except Exception as e:
+        logger.error(f"Error clearing cart for user {chat_id}: {e}")
+        if callback_id:
+            tg_answer_callback(callback_id, "Помилка при очищенні кошика", show_alert=True)
+
+def get_cart_total(chat_id):
+    """Розраховує загальну суму кошика"""
+    try:
+        cart = get_cart(chat_id)
+        items = cart.get("items", [])
+        
+        total = sum(float(item.get("price", 0)) * int(item.get("qty", 0)) for item in items)
+        return total
+        
+    except Exception as e:
+        logger.error(f"Error calculating cart total for {chat_id}: {e}")
+        return 0.0
+
+def get_cart_items_count(chat_id):
+    """Підраховує кількість позицій в кошику"""
+    try:
+        cart = get_cart(chat_id)
+        items = cart.get("items", [])
+        
+        return sum(int(item.get("qty", 0)) for item in items)
+        
+    except Exception as e:
+        logger.error(f"Error counting cart items for {chat_id}: {e}")
+        return 0

@@ -240,4 +240,29 @@ def clear_cart(chat_id, callback_id=None):
         logger.error(f"Error clearing cart for user {chat_id}: {e}")
         if callback_id:
             from services.telegram import tg_answer_callback
-            tg_answer_callback(callback
+            tg_answer_callback(callback_id, "Помилка при очищенні кошика", show_alert=True)
+
+def get_cart_total(chat_id):
+    """Розраховує загальну суму кошика"""
+    try:
+        cart = get_cart(chat_id)
+        items = cart.get("items", [])
+        
+        total = sum(float(item.get("price", 0)) * int(item.get("qty", 0)) for item in items)
+        return total
+        
+    except Exception as e:
+        logger.error(f"Error calculating cart total for {chat_id}: {e}")
+        return 0.0
+
+def get_cart_items_count(chat_id):
+    """Підраховує кількість позицій в кошику"""
+    try:
+        cart = get_cart(chat_id)
+        items = cart.get("items", [])
+        
+        return sum(int(item.get("qty", 0)) for item in items)
+        
+    except Exception as e:
+        logger.error(f"Error counting cart items for {chat_id}: {e}")
+        return 0

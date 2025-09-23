@@ -65,7 +65,7 @@ def tg_answer_callback(callback_id, text):
     }
     requests.post(f"{API_URL}/answerCallbackQuery", json=payload)
 
-# === ПОКРАЩЕННЯ 1: ВИНОСИМО ПРОМПТ В ОКРЕМУ ЗМІННУ ===
+# === ВИКОРИСТОВУЄМО ШАБЛОН ПРОМПТА ===
 # Це робить код чистішим і дозволяє легко редагувати промпт
 GEMINI_PROMPT_TEMPLATE = """
 Ти — чат-бот для кафе. Твоє ім'я FerrikFootBot.
@@ -111,7 +111,8 @@ def webhook():
             tg_send_message(chat_id, greeting)
             set_state(user_id, 'main')
         elif text == "/menu":
-            menu_data = get_menu_from_sheet(gspread_client, GOOGLE_SHEET_ID)
+            # ВИПРАВЛЕННЯ: прибрано другий аргумент
+            menu_data = get_menu_from_sheet(gspread_client)
             menu_text = "<b>Наше меню:</b>\n\n"
             categories = {}
             for item in menu_data:
@@ -152,9 +153,9 @@ def webhook():
             )
             tg_send_message(chat_id, help_message)
         else:
-            # === ПОКРАЩЕННЯ 2: ВИКОРИСТОВУЄМО ШАБЛОН ПРОМПТА ===
-            # Тепер ми просто заповнюємо шаблон даними, що робить код лаконічнішим
-            menu_data = get_menu_from_sheet(gspread_client, GOOGLE_SHEET_ID)
+            # ВИКОРИСТОВУЄМО ШАБЛОН ПРОМПТА
+            # ВИПРАВЛЕННЯ: прибрано другий аргумент
+            menu_data = get_menu_from_sheet(gspread_client)
             menu_json = json.dumps(menu_data, ensure_ascii=False, indent=2)
 
             prompt = GEMINI_PROMPT_TEMPLATE.format(

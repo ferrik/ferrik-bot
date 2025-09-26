@@ -1,23 +1,20 @@
 import os
 import logging
 import json
+import re
 from flask import Flask, request, jsonify
-from concurrent.futures import ThreadPoolExecutor
+import requests
+from handlers.cart import show_cart, add_item_to_cart
+from handlers.order import start_checkout_process
+from handlers.geo import check_delivery_availability
+from services.sheets import init_gspread_client, get_menu_from_sheet, get_item_by_id
+from services.gemini import get_gemini_recommendation
+from models.user import init_db, get_state, set_state, get_cart, set_cart, get_or_create_user, add_chat_history
 from datetime import datetime
 
-# Імпорти обробників
-from handlers.cart import show_cart, add_item_to_cart, handle_cart_quantity_change, remove_item_from_cart, clear_cart
-from handlers.order import start_checkout_process, handle_delivery_type, handle_payment_method, handle_delivery_time, confirm_order, cancel_order
-from handlers.budget import handle_budget_input, show_price_ranges, handle_budget_range
-from handlers.message_processor import process_text_message
-
-# Імпорти сервісів
-from services.sheets import init_gspread_client, get_menu_from_sheet, get_categories, get_items_by_category
-from services.telegram import tg_send_message, tg_answer_callback, tg_edit_message
-from services.gemini import analyze_user_request_with_gemini
-
-# Імпорти моделей
-from models.user import init_db, get_state, set_state, get_or_create_user, add_chat_history
+# Додані імпорти для оператора та адмін-панелі
+from handlers.operator import handle_operator_command, handle_admin_callback
+from services.admin_panel import track_user_activity, admin_panel
 
 try:
     from zoneinfo import ZoneInfo
@@ -27,212 +24,55 @@ except ImportError:
 
 app = Flask(__name__)
 
-# Налаштування логування
+# Налаштування логів
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('ferrik_bot.log')
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(), logging.FileHandler('bot.log')]
 )
 logger = logging.getLogger("ferrik")
-
-# Thread pool для асинхронної обробки
-EXECUTOR = ThreadPoolExecutor(max_workers=5)
 
 # Змінні середовища
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123").strip()
+API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
 OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID", "").strip()
-TIMEZONE_NAME = os.environ.get("TIMEZONE", "Europe/Kyiv").strip()
+DEFAULT_CITY = os.environ.get("DEFAULT_CITY", "Ternopil").strip()
+TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Europe/Kyiv").strip()
 
-# Логування конфігурації
-logger.info(f"TELEGRAM_TOKEN: {'✓' if TELEGRAM_TOKEN else '✗'}")
-logger.info(f"GOOGLE_SHEET_ID: {'✓' if GOOGLE_SHEET_ID else '✗'}")
-logger.info(f"OPERATOR_CHAT_ID: {'✓' if OPERATOR_CHAT_ID else '✗'}")
+# Кеш меню
+MENU_CACHE = {}
 
-def main_keyboard():
-    """Головне меню бота з покращеними кнопками"""
-    return {
-        "keyboard": [
-            [{"text": "🍕 Піца"}, {"text": "🍣 Суші"}],
-            [{"text": "🥗 Салати"}, {"text": "🥤 Напої"}],
-            [{"text": "🍰 Десерти"}, {"text": "💰 Бюджет"}],
-            [{"text": "🛒 Мій кошик"}, {"text": "📞 Оператор"}]
-        ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
-
-def show_menu(chat_id):
-    """Показує меню з категоріями"""
-    try:
-        categories = get_categories()
-        if not categories:
-            tg_send_message(chat_id, "Меню тимчасово недоступне 😔")
-            return
-            
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": f"🍽️ {cat}", "callback_data": f"category_{cat}"}] 
-                for cat in categories
-            ]
-        }
-        keyboard["inline_keyboard"].append([
-            {"text": "💰 Пошук за бюджетом", "callback_data": "budget_search"}
-        ])
-        
-        tg_send_message(chat_id, "Оберіть категорію:", reply_markup=keyboard)
-        
-    except Exception as e:
-        logger.error(f"Error showing menu: {e}")
-        tg_send_message(chat_id, "Помилка при завантаженні меню")
-
-def show_category_items(chat_id, category):
-    """Показує страви конкретної категорії"""
-    try:
-        items = get_items_by_category(category)
-        
-        if not items:
-            tg_send_message(chat_id, f"У категорії '{category}' немає страв")
-            return
-            
-        # Заголовок з кількістю страв
-        header = f"🍽️ <b>{category}</b> ({len(items)} позицій):"
-        tg_send_message(chat_id, header)
-            
-        # Показуємо кожну страву
-        for item in items:
-            text = f"<b>{item['name']}</b>\n"
-            text += f"💰 <b>Ціна:</b> {item['price']:.2f} грн"
-            
-            if item.get("description"):
-                desc = item['description'][:100] + "..." if len(item['description']) > 100 else item['description']
-                text += f"\n📝 {desc}"
-            
-            if item.get("rating"):
-                stars = '⭐' * int(float(item['rating']))
-                text += f"\n{stars} {item['rating']}/5"
-            
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": f"➕ Додати ({item['price']:.0f} грн)", 
-                      "callback_data": f"add_item_{item['ID']}"}]
-                ]
-            }
-            
-            # Відправляємо з фото якщо є
-            photo_url = item.get("photo", "").strip()
-            if photo_url:
-                from services.telegram import tg_send_photo
-                tg_send_photo(chat_id, photo_url, text, reply_markup=keyboard)
-            else:
-                tg_send_message(chat_id, text, reply_markup=keyboard)
-                
-        # Навігація назад
-        back_keyboard = {
-            "inline_keyboard": [
-                [{"text": "⬅️ Назад до категорій", "callback_data": "show_menu"}]
-            ]
-        }
-        tg_send_message(chat_id, "───────────", reply_markup=back_keyboard)
-        
-    except Exception as e:
-        logger.error(f"Error showing category {category}: {e}")
-        tg_send_message(chat_id, "Помилка при завантаженні категорії")
-
-def generate_personalized_greeting(user_name="Друже"):
-    """Генерує персоналізоване вітання"""
-    user_name = (user_name or '').strip() or 'Друже'
-    current = datetime.now()
-    if ZoneInfo:
-        current = datetime.now(ZoneInfo(TIMEZONE_NAME))
-    
-    hour = current.hour
-    time_greeting = (
-        'ранку' if 6 <= hour < 12 else
-        'дня' if 12 <= hour < 18 else 'вечора'
-    )
-    
-    greeting = f"Доброго {time_greeting}, {user_name}! 😊"
-    
-    # Перевіряємо чи відкритий ресторан
-    is_open = 9 <= hour < 22
-    status = (
-        "Ресторан відкритий! 🍽️ Готові прийняти замовлення." if is_open else
-        "Ресторан закритий 😔 Працюємо з 9:00 до 22:00."
-    )
-    
-    return f"{greeting}\n\n{status}\n\nЯ ваш помічник FerrikFootBot! Допоможу з вибором і замовленням їжі 🍔🍕"
-
-# Webhook обробник
-@app.route('/webhook', methods=['POST'])
+# Обробка вхідних вебхуків
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    """Головний webhook для обробки оновлень Telegram"""
     try:
-        # Перевірка секретного токену
-        header_secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-        if WEBHOOK_SECRET and header_secret != WEBHOOK_SECRET:
-            logger.warning(f"Invalid webhook secret: {header_secret}")
-            return jsonify({"ok": False, "error": "invalid secret"}), 403
-
-        # Отримуємо дані
-        data = request.get_json(silent=True)
+        data = request.json
         if not data:
-            logger.warning("Empty webhook data received")
-            return jsonify({"status": "empty"}), 200
+            return jsonify({"status": "error", "message": "No data received"}), 400
 
-        logger.info(f"Webhook update: {json.dumps(data, ensure_ascii=False)[:200]}...")
+        # Перевірка секретного токену
+        if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != WEBHOOK_SECRET:
+            logger.warning("Invalid webhook secret token received.")
+            return jsonify({"status": "error", "message": "Invalid token"}), 403
 
-        # Обробляємо асинхронно
-        EXECUTOR.submit(process_update, data)
-        
-        return jsonify({"status": "ok"}), 200
-        
-    except Exception as e:
-        logger.exception(f"Webhook error: {e}")
-        return jsonify({"status": "error"}), 500
-
-def process_update(data):
-    """Асинхронна обробка оновлення"""
-    try:
-        # Обробка текстових повідомлень
         if "message" in data:
-            msg = data["message"]
-            chat_id = msg["chat"]["id"]
-            user_info = msg.get("from", {})
-            text = msg.get("text", "").strip()
-            
-            # Створюємо/оновлюємо користувача
-            get_or_create_user(
-                chat_id,
-                user_info.get("username"),
-                user_info.get("first_name"),
-                user_info.get("last_name")
-            )
-            
-            # Обробляємо текст
-            if text:
-                process_text_message(chat_id, text, user_info)
-        
-        # Обробка callback queries
+            process_message(data["message"])
         elif "callback_query" in data:
-            cq = data["callback_query"]
-            process_callback_query(cq)
-            
-    except Exception as e:
-        logger.exception(f"Error processing update: {e}")
+            process_callback_query(data["callback_query"])
 
-def process_callback_query(cq):
-    """Обробляє callback queries"""
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.exception(f"Error processing webhook: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+def process_message(msg):
+    """Обробляє текстові повідомлення"""
     try:
-        callback_id = cq.get("id")
-        data = cq.get("data", "")
-        message = cq.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        user_info = cq.get("from", {})
+        chat_id = msg["chat"]["id"]
+        user_info = msg.get("from", {})
+        text = msg.get("text", "").strip()
         
         # Створюємо/оновлюємо користувача
         get_or_create_user(
@@ -242,171 +82,246 @@ def process_callback_query(cq):
             user_info.get("last_name")
         )
         
-        logger.info(f"Callback query: {data} from {chat_id}")
+        # Додаємо відстеження активності користувача для адмін-панелі
+        track_user_activity(chat_id, user_info)
         
-        # Обробляємо різні типи callback-ів
-        if data == "show_menu":
-            show_menu(chat_id)
-            tg_answer_callback(callback_id)
+        if not text:
+            return
             
-        elif data == "show_cart":
+        # Перевіряємо чи це команда для оператора
+        if OPERATOR_CHAT_ID and handle_operator_command(chat_id, text, OPERATOR_CHAT_ID):
+            return
+            
+        state = get_state(chat_id)
+        
+        # Обробка команд
+        if text == "/start":
+            user_name = user_info.get("first_name", "Друже")
+            greeting_text = generate_personalized_greeting(user_name)
+            
+            keyboard = [[
+                {"text": "Подивитися меню"},
+                {"text": "Кошик"}
+            ]]
+            
+            tg_send_message(chat_id, greeting_text, keyboard=keyboard)
+        
+        elif text == "/menu" or text == "Подивитися меню":
+            show_main_menu(chat_id)
+
+        elif text == "/cart" or text == "Кошик":
             show_cart(chat_id)
-            tg_answer_callback(callback_id)
+
+        elif text == "/contact":
+            tg_send_message(chat_id, f"Зв'язатися з оператором: {OPERATOR_CHAT_ID}")
             
-        elif data.startswith("category_"):
-            category = data.replace("category_", "")
-            show_category_items(chat_id, category)
-            tg_answer_callback(callback_id)
-            
-        elif data.startswith("add_item_"):
-            item_id = data.replace("add_item_", "")
-            add_item_to_cart(chat_id, item_id)
-            tg_answer_callback(callback_id, "Додано до кошика! 🛒")
-            
-        elif data == "budget_search":
-            show_price_ranges(chat_id)
-            tg_answer_callback(callback_id)
-            
-        elif data.startswith("budget_range_"):
-            handle_budget_range(chat_id, data, callback_id)
-            
-        elif data == "custom_budget":
-            tg_answer_callback(callback_id)
-            tg_send_message(chat_id, "Введіть ваш бюджет (в гривнях):")
-            set_state(chat_id, "awaiting_budget")
-            
-        elif data == "checkout":
-            start_checkout_process(chat_id)
-            tg_answer_callback(callback_id)
-            
-        elif data == "contact_operator":
-            tg_send_message(chat_id, "Напишіть повідомлення для оператора:")
-            set_state(chat_id, "awaiting_operator_message")
-            tg_answer_callback(callback_id)
-            
-        elif data == "leave_feedback":
-            tg_send_message(chat_id, "Напишіть ваш відгук:")
-            set_state(chat_id, "awaiting_feedback")
-            tg_answer_callback(callback_id)
-            
-        # Обробка кошика
-        elif data.startswith("qty_"):
-            handle_cart_callbacks(chat_id, data, callback_id)
-            
-        elif data.startswith("remove_item_"):
-            idx = int(data.replace("remove_item_", ""))
-            remove_item_from_cart(chat_id, idx, callback_id)
-            
-        elif data == "clear_cart":
-            clear_cart(chat_id, callback_id)
-            
-        # Обробка замовлення
-        elif data.startswith("delivery_type_"):
-            delivery_type = data.replace("delivery_type_", "")
-            handle_delivery_type(chat_id, delivery_type, callback_id)
-            
-        elif data.startswith("payment_"):
-            payment_method = data.replace("payment_", "")
-            handle_payment_method(chat_id, payment_method, callback_id)
-            
-        elif data.startswith("delivery_time_"):
-            delivery_time = data.replace("delivery_time_", "")
-            handle_delivery_time(chat_id, delivery_time, callback_id)
-            
-        elif data == "confirm_order":
-            confirm_order(chat_id, callback_id)
-            
-        elif data == "cancel_order":
-            cancel_order(chat_id, callback_id)
-            
+        elif text == "/help":
+            help_text = "Я можу допомогти вам з наступними речами:\n" \
+                        "/menu - показати меню\n" \
+                        "/cart - показати кошик\n" \
+                        "/contact - зв'язатися з оператором\n" \
+                        "Також, ви можете просто написати мені, що ви хочете, і я допоможу з вибором!"
+            tg_send_message(chat_id, help_text)
+
+        elif text == "/status":
+            tg_send_message(chat_id, "Бот працює справно!")
+
+        # Перевіряємо, чи це не команда і не є станом очікування введення
+        elif state in ["start_checkout", "ask_phone", "ask_city", "ask_street", "ask_house", "ask_flat", "ask_payment", "ask_delivery_time"]:
+            handle_order_input(chat_id, text)
+        
         else:
-            logger.warning(f"Unhandled callback: {data}")
-            tg_answer_callback(callback_id, "Невідома команда")
-            
-    except Exception as e:
-        logger.exception(f"Error processing callback query: {e}")
-        tg_answer_callback(cq.get("id", ""), "Помилка обробки команди")
+            # Обробка вільного тексту з Gemini
+            handle_gemini_message(chat_id, text)
 
-def handle_cart_callbacks(chat_id, data, callback_id):
-    """Обробляє callback-и для кошика"""
+    except Exception as e:
+        logger.exception(f"Error in process_message for chat_id {chat_id}: {e}")
+        tg_send_message(chat_id, f"Виникла помилка: {e}")
+
+def process_callback_query(cq):
+    """Обробляє callback queries"""
     try:
-        if data.startswith("qty_plus_"):
-            idx = int(data.replace("qty_plus_", ""))
-            handle_cart_quantity_change(chat_id, "plus", idx, callback_id)
-        elif data.startswith("qty_minus_"):
-            idx = int(data.replace("qty_minus_", ""))
-            handle_cart_quantity_change(chat_id, "minus", idx, callback_id)
-        elif data.startswith("qty_info_"):
-            # Просто відповідаємо на callback
-            tg_answer_callback(callback_id)
+        callback_id = cq.get("id")
+        data = cq.get("data", "")
+        message = cq.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+        message_id = message.get("message_id")
+        user_info = cq.get("from", {})
+        
+        # Перевіряємо чи це callback для адміністратора
+        if OPERATOR_CHAT_ID and handle_admin_callback(chat_id, data, callback_id, OPERATOR_CHAT_ID):
+            return
             
-    except Exception as e:
-        logger.error(f"Error handling cart callback: {e}")
-        tg_answer_callback(callback_id, "Помилка")
+        parts = data.split("_")
+        action = parts[0]
+        
+        if action == "category":
+            show_items_by_category(chat_id, parts[1])
 
-# Health check
+        elif action == "item":
+            show_item_details(chat_id, parts[1])
+
+        elif action == "add":
+            item_id = parts[1]
+            add_item_to_cart(chat_id, item_id)
+            tg_answer_callback(callback_id, "Товар додано до кошика!")
+
+        elif action == "cart":
+            show_cart(chat_id)
+
+        elif action == "checkout":
+            start_checkout_process(chat_id, message_id)
+            tg_answer_callback(callback_id, "Переходимо до оформлення!")
+
+        elif action == "remove":
+            item_id = parts[1]
+            remove_item_from_cart(chat_id, item_id)
+            tg_answer_callback(callback_id, "Товар видалено з кошика!")
+
+        elif action == "clear_cart":
+            set_cart(chat_id, {})
+            show_cart(chat_id)
+            tg_answer_callback(callback_id, "Кошик очищено.")
+
+        elif action == "confirm_order":
+            confirm_order(chat_id)
+            tg_answer_callback(callback_id, "Замовлення підтверджено!")
+        
+        elif action == "cancel_order":
+            cancel_order(chat_id)
+            tg_answer_callback(callback_id, "Замовлення скасовано.")
+
+        elif action == "delivery":
+            handle_delivery_type(chat_id, data)
+        
+        elif action == "payment":
+            handle_payment_method(chat_id, data)
+
+        elif action == "time":
+            handle_delivery_time(chat_id, data)
+
+        else:
+            tg_answer_callback(callback_id, "Невідома дія.")
+
+    except Exception as e:
+        logger.exception(f"Error in process_callback_query for chat_id {chat_id}: {e}")
+        tg_answer_callback(callback_id, f"Виникла помилка: {e}")
+
+def handle_order_input(chat_id, text):
+    """Обробляє введення користувача на етапах оформлення замовлення"""
+    state = get_state(chat_id)
+    if state == "ask_phone":
+        # ... (існуючий код)
+        pass
+    elif state == "ask_city":
+        # ... (існуючий код)
+        pass
+    elif state == "ask_street":
+        # ... (існуючий код)
+        pass
+    elif state == "ask_house":
+        # ... (існуючий код)
+        pass
+    elif state == "ask_flat":
+        # ... (існуючий код)
+        pass
+
+def handle_gemini_message(chat_id, text):
+    """Обробляє повідомлення за допомогою Gemini"""
+    add_chat_history(chat_id, "user", text)
+    recommendation = get_gemini_recommendation(chat_id, text, get_menu_from_sheet())
+    add_chat_history(chat_id, "assistant", recommendation)
+    tg_send_message(chat_id, recommendation)
+
+def show_main_menu(chat_id):
+    """Відображає головне меню з категоріями"""
+    categories = list(set(item['Категорія'] for item in get_menu_from_sheet()))
+    keyboard = []
+    for cat in categories:
+        keyboard.append([{"text": cat, "callback_data": f"category_{cat}"}])
+    
+    tg_send_message(chat_id, "Ось наше меню, оберіть категорію:", keyboard=keyboard)
+
+def show_items_by_category(chat_id, category):
+    """Відображає товари в обраній категорії"""
+    items = [item for item in get_menu_from_sheet() if item['Категорія'] == category]
+    keyboard = []
+    for item in items:
+        keyboard.append([{"text": f"{item['Страви']} - {item['Ціна']} грн", "callback_data": f"item_{item['ID']}"}])
+    
+    keyboard.append([{"text": "⬅️ Назад до меню", "callback_data": "menu"}])
+    
+    tg_send_message(chat_id, f"Ось що ми маємо в категорії '{category}':", keyboard=keyboard)
+
+def show_item_details(chat_id, item_id):
+    """Відображає деталі конкретного товару"""
+    item = get_item_by_id(item_id)
+    if not item:
+        tg_send_message(chat_id, "Вибачте, цей товар не знайдено.")
+        return
+        
+    message_text = f"**{item['Страви']}**\n\n" \
+                   f"{item['Опис']}\n\n" \
+                   f"💰 **Ціна**: {item['Ціна']} грн"
+    
+    keyboard = [[{"text": f"🛒 Додати в кошик", "callback_data": f"add_{item['ID']}"}]]
+    tg_send_message(chat_id, message_text, keyboard=keyboard)
+
+def generate_personalized_greeting(user_name="Друже"):
+    user_name = (user_name or '').strip() or 'Друже'
+    current = datetime.now() if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME))
+    hour = current.hour
+
+    greeting = f"Доброго {'ранку' if 6 <= hour < 12 else 'дня' if 12 <= hour < 18 else 'вечора'}, {user_name}! 😊"
+    status = "Ресторан відкритий! 🍽️ Готові прийняти ваше замовлення." if is_restaurant_open() else "Ресторан закритий. 😔 Працюємо з 9:00 до 22:00."
+    return f"{greeting}\n\n{status}\n\nЯ ваш помічник для замовлення їжі! 🍔🍕"
+
+def is_restaurant_open():
+    current_hour = datetime.now().hour if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME)).hour
+    return 9 <= current_hour < 22
+
+# Health check endpoint
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "ok",
-        "timestamp": datetime.now().isoformat(),
-        "version": "2.0.0",
-        "components": {
-            "database": "ok",
-            "google_sheets": "ok" if init_gspread_client() else "error",
-            "telegram": "ok" if TELEGRAM_TOKEN else "error"
-        }
-    })
+    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
 
-# Root endpoint
-@app.route("/", methods=["GET"])
-def root():
-    """Root endpoint з інформацією про API"""
-    return jsonify({
-        "name": "FerrikFootBot API",
-        "version": "2.0.0",
-        "status": "running",
-        "features": [
-            "AI-powered recommendations",
-            "Budget-based search", 
-            "Multi-category menu",
-            "Smart cart management",
-            "Complete order flow"
-        ],
-        "endpoints": ["/webhook", "/health", "/set_webhook"]
-    })
-
-# Встановлення webhook
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    """Встановлення webhook URL"""
-    if not TELEGRAM_TOKEN:
-        return jsonify({"ok": False, "error": "TELEGRAM_TOKEN not set"}), 400
-    
-    webhook_url = request.args.get('url')
-    if not webhook_url:
-        # Автоматично визначаємо URL
-        base_url = os.environ.get("RENDER_EXTERNAL_URL") or f"https://{request.host}"
-        webhook_url = f"{base_url}/webhook"
-    
+# Доданий endpoint для ручного створення дашборду
+@app.route("/setup_dashboard", methods=["GET"])
+def setup_dashboard():
+    """Створює початкову структуру дашборду в Google Sheets"""
     try:
-        import requests
-        response = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
-            params={
-                "url": webhook_url,
-                "secret_token": WEBHOOK_SECRET
-            },
-            timeout=10
-        )
-        return jsonify(response.json())
+        success = admin_panel.create_dashboard_formulas()
+        if success:
+            return jsonify({
+                "status": "ok", 
+                "message": "Dashboard created successfully",
+                "sheets_url": f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}"
+            })
+        else:
+            return jsonify({"status": "error", "message": "Failed to create dashboard"}), 500
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-# Ініціалізація додатку
+# Доданий endpoint для отримання статистики через API
+@app.route("/api/stats", methods=["GET"])
+def api_stats():
+    """API endpoint для отримання статистики"""
+    try:
+        date_param = request.args.get('date')
+        if date_param:
+            from datetime import datetime
+            date = datetime.strptime(date_param, '%Y-%m-%d').date()
+        else:
+            date = None
+            
+        stats = admin_panel.get_daily_stats(date)
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Ініціалізація
 with app.app_context():
-    logger.info("🚀 FerrikFootBot starting...")
+    logger.info("🚀 FerrikFootBot starting initialization...")
     
     try:
         # Ініціалізація бази даних
@@ -424,15 +339,44 @@ with app.app_context():
             logger.info(f"✅ Menu cached: {len(menu_items)} items")
         else:
             logger.error("❌ Google Sheets connection failed")
+
+        # Ініціалізуємо адмін-панель
+        if admin_panel.init_connection():
+            logger.info("✅ Admin panel connected successfully")
+            
+            # Створюємо структуру дашборду якщо потрібно
+            try:
+                admin_panel.create_dashboard_formulas()
+                logger.info("✅ Dashboard structure created")
+            except Exception as e:
+                logger.warning(f"⚠️ Dashboard setup warning: {e}")
+        else:
+            logger.error("❌ Admin panel connection failed")
         
-        logger.info("🎉 FerrikFootBot ready!")
+        logger.info("🎉 FerrikFootBot initialization completed!")
         
     except Exception as e:
-        logger.exception(f"❌ Startup error: {e}")
+        logger.exception(f"❌ Critical startup error: {e}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     
-    logger.info(f"Starting server on port {port}, debug={debug_mode}")
-    app.run(host="0.0.0.0", port=port, debug=debug_mode)
+    if debug_mode:
+        app.run(host="0.0.0.0", port=port, debug=True)
+    else:
+        # Установка вебхука при запуску в production
+        webhook_url = os.environ.get("WEBHOOK_URL", "")
+        if webhook_url:
+            try:
+                response = requests.get(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
+                    params={
+                        "url": webhook_url,
+                        "secret_token": WEBHOOK_SECRET
+                    },
+                    timeout=10
+                )
+                logger.info(f"Webhook set response: {response.json()}")
+            except Exception as e:
+                logger.error(f"Failed to set webhook: {e}")

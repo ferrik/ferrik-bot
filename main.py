@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify
 from werkzeug.exceptions import BadRequest
 import json
 from datetime import datetime
+import requests
 
 # Налаштування логування
 logging.basicConfig(
@@ -15,60 +16,18 @@ logger = logging.getLogger(__name__)
 # Ініціалізація Flask
 app = Flask(__name__)
 
-# Глобальні змінні
+# Глобальні змінні - декларуються на початку
 menu_cache = {}
 sheets_client = None
-
-def safe_import():
-    """Безпечний імпорт модулів з обробкою помилок"""
-    global tg_send_message, get_gemini_recommendation, init_sheets, get_menu_from_sheets, create_user, get_user
-    
-    try:
-        # Імпорти з config
-        from config import BOT_TOKEN, GEMINI_API_KEY, SPREADSHEET_ID
-        logger.info("Config imported successfully")
-    except Exception as e:
-        logger.error(f"Config import error: {e}")
-        # Fallback to environment variables
-        BOT_TOKEN = os.environ.get('BOT_TOKEN')
-        GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-        SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
-    
-    try:
-        from services.telegram import send_message as tg_send_message
-        logger.info("Telegram service imported")
-    except Exception as e:
-        logger.error(f"Telegram import error: {e}")
-        # Fallback function
-        tg_send_message = create_fallback_send_message()
-    
-    try:
-        from services.gemini import get_gemini_recommendation
-        logger.info("Gemini service imported")
-    except Exception as e:
-        logger.error(f"Gemini import error: {e}")
-        get_gemini_recommendation = lambda x: "AI тимчасово недоступний"
-    
-    try:
-        from services.sheets import init_sheets, get_menu_from_sheets
-        logger.info("Sheets service imported")
-    except Exception as e:
-        logger.error(f"Sheets import error: {e}")
-        init_sheets = lambda: None
-        get_menu_from_sheets = lambda: {}
-    
-    try:
-        from models.user import create_user, get_user
-        logger.info("User model imported")
-    except Exception as e:
-        logger.error(f"User model import error: {e}")
-        create_user = lambda x, y: True
-        get_user = lambda x: None
+tg_send_message = None
+get_gemini_recommendation = None
+init_sheets = None
+get_menu_from_sheets = None
+create_user = None
+get_user = None
 
 def create_fallback_send_message():
     """Створює fallback функцію для відправки повідомлень"""
-    import requests
-    
     def fallback_send(chat_id, text, keyboard=None, parse_mode="Markdown"):
         try:
             bot_token = os.environ.get('BOT_TOKEN')
@@ -101,6 +60,49 @@ def create_fallback_send_message():
             return None
     
     return fallback_send
+
+def safe_import():
+    """Безпечний імпорт модулів з обробкою помилок"""
+    global tg_send_message, get_gemini_recommendation, init_sheets, get_menu_from_sheets, create_user, get_user
+    
+    try:
+        # Імпорти з config
+        from config import BOT_TOKEN, GEMINI_API_KEY, SPREADSHEET_ID
+        logger.info("Config imported successfully")
+    except Exception as e:
+        logger.error(f"Config import error: {e}")
+        # Fallback to environment variables - вони і так використовуються
+    
+    try:
+        from services.telegram import send_message as tg_send_message
+        logger.info("Telegram service imported")
+    except Exception as e:
+        logger.error(f"Telegram import error: {e}")
+        # Fallback function
+        tg_send_message = create_fallback_send_message()
+    
+    try:
+        from services.gemini import get_gemini_recommendation
+        logger.info("Gemini service imported")
+    except Exception as e:
+        logger.error(f"Gemini import error: {e}")
+        get_gemini_recommendation = lambda x: "AI тимчасово недоступний"
+    
+    try:
+        from services.sheets import init_sheets, get_menu_from_sheets
+        logger.info("Sheets service imported")
+    except Exception as e:
+        logger.error(f"Sheets import error: {e}")
+        init_sheets = lambda: None
+        get_menu_from_sheets = lambda: {}
+    
+    try:
+        from models.user import create_user, get_user
+        logger.info("User model imported")
+    except Exception as e:
+        logger.error(f"User model import error: {e}")
+        create_user = lambda x, y: True
+        get_user = lambda x: None
 
 def initialize_bot():
     """Ініціалізація всіх компонентів бота"""
@@ -269,10 +271,11 @@ def handle_unknown_message(chat_id, text):
 
 def show_menu(chat_id):
     """Показати меню"""
+    global menu_cache
+    
     try:
         if not menu_cache:
             # Спробуємо перезавантажити
-            global menu_cache
             menu_cache = get_menu_from_sheets()
     except:
         pass

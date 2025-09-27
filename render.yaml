@@ -8,7 +8,7 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.9.0
-      - key: TELEGRAM_BOT_TOKEN
+      - key: BOT_TOKEN # Змінено з TELEGRAM_BOT_TOKEN на BOT_TOKEN
         sync: false
       - key: WEBHOOK_SECRET
         value: Ferrik123
@@ -22,3 +22,4 @@ services:
         sync: false
       - key: CREDS_B64
         sync: false
+

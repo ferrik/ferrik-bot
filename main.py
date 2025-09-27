@@ -4,15 +4,14 @@ from flask import Flask, request, jsonify
 from werkzeug.exceptions import BadRequest
 import json
 from datetime import datetime
-import time
 
-# Імпорти для бота
-from utils.telegram_api import send_message as tg_send_message, send_photo, edit_message  # Додано імпорт
-from database.db_manager import init_db, create_user, get_user
-from handlers.message_processor import process_text_message
-from utils.google_sheets import init_sheets, add_user_data, get_menu_from_sheets
+# Імпорти з вашої існуючої структури
 from config import BOT_TOKEN, GEMINI_API_KEY, SPREADSHEET_ID
-from utils.gemini_api import get_gemini_recommendation
+from services.telegram import send_message as tg_send_message
+from services.sheets import init_sheets, get_menu_from_sheets
+from services.gemini import get_gemini_recommendation
+from models.user import create_user, get_user
+from handlers.message_processor import process_text_message
 
 # Налаштування логування
 logging.basicConfig(
@@ -35,47 +34,23 @@ def initialize_bot():
     logger.info("🚀 FerrikFootBot starting initialization...")
     
     try:
-        # 1. Ініціалізація бази даних
-        init_db()
-        logger.info("✅ Database initialized")
-        
-        # 2. Ініціалізація Google Sheets
+        # 1. Ініціалізація Google Sheets
         sheets_client = init_sheets()
         logger.info("✅ Google Sheets connected")
         
-        # 3. Завантаження меню
-        menu_cache = get_menu_from_sheets()
-        logger.info(f"✅ Menu cached: {len(menu_cache)} items")
-        
-        # 4. Створення структури панелі адміністратора
-        create_dashboard_structure()
-        logger.info("✅ Dashboard structure created")
+        # 2. Завантаження меню
+        try:
+            menu_cache = get_menu_from_sheets()
+            logger.info(f"✅ Menu cached: {len(menu_cache)} items")
+        except Exception as e:
+            logger.warning(f"Menu loading failed: {e}")
+            menu_cache = {}
         
         logger.info("🎉 FerrikFootBot initialization completed!")
         
     except Exception as e:
         logger.error(f"❌ Initialization failed: {e}")
-        raise
-
-def create_dashboard_structure():
-    """Створює структуру панелі адміністратора"""
-    try:
-        if sheets_client:
-            # Спробуємо створити воркшіт для статистики, якщо його немає
-            try:
-                stats_sheet = sheets_client.worksheet("Statistics")
-            except:
-                try:
-                    stats_sheet = sheets_client.add_worksheet("Statistics", 1000, 10)
-                    # Додаємо заголовки
-                    stats_sheet.append_row([
-                        "Date", "User ID", "Username", "Action", 
-                        "Order Details", "Total Amount", "Status"
-                    ])
-                except Exception as e:
-                    logger.error(f"Error creating Statistics worksheet: {e}")
-    except Exception as e:
-        logger.error(f"Error creating dashboard: {e}")
+        # Не викидаємо помилку, щоб сервіс продовжував працювати
 
 # Ініціалізація при запуску
 initialize_bot()
@@ -86,7 +61,18 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "FerrikFootBot"
+        "service": "FerrikFootBot",
+        "menu_items": len(menu_cache)
+    })
+
+@app.route('/keep-alive', methods=['GET'])
+def keep_alive():
+    """Endpoint для підтримки активності сервісу"""
+    return jsonify({
+        "status": "alive",
+        "timestamp": datetime.now().isoformat(),
+        "uptime": "service is running",
+        "cache_status": "active" if menu_cache else "empty"
     })
 
 @app.route('/webhook', methods=['POST'])
@@ -97,6 +83,8 @@ def webhook():
         
         if not data:
             raise BadRequest("No JSON data received")
+        
+        logger.info(f"Received update: {data}")
         
         # Обробка повідомлення
         if "message" in data:
@@ -121,16 +109,13 @@ def process_message(message):
         logger.info(f"Processing message from {username} ({user_id}): {text}")
         
         # Створення користувача, якщо не існує
-        user = get_user(user_id)
-        if not user:
-            create_user(user_id, username)
-            logger.info(f"Created new user: {user_id}")
-            
-            # Додавання в Google Sheets
-            try:
-                add_user_data(user_id, username, "New user registered")
-            except Exception as e:
-                logger.error(f"Error adding user data: {e}")
+        try:
+            user = get_user(user_id)
+            if not user:
+                create_user(user_id, username)
+                logger.info(f"Created new user: {user_id}")
+        except Exception as e:
+            logger.error(f"Error with user management: {e}")
         
         # Обробка команди /start
         if text == "/start":
@@ -168,31 +153,54 @@ def process_message(message):
         elif text == "🎯 Рекомендації":
             show_recommendations(chat_id)
         else:
-            # Обробка через AI
+            # Спробуємо використати існуючий message_processor
             try:
-                prompt = f"""
-Користувач написав: "{text}"
-Меню ресторану: {json.dumps(menu_cache, ensure_ascii=False)}
-Дай корисну відповідь українською мовою.
-"""
-                # Виправлення: передаємо тільки prompt
-                response_text = get_gemini_recommendation(prompt)
-                tg_send_message(chat_id, response_text)
+                from handlers.message_processor import process_text_message
+                response = process_text_message(text, user_id, chat_id)
+                if response:
+                    tg_send_message(chat_id, response)
+                else:
+                    handle_unknown_message(chat_id, text)
             except Exception as e:
-                logger.error(f"AI processing error: {e}")
-                tg_send_message(chat_id, "Вибачте, виникла помилка при обробці запиту.")
+                logger.error(f"Message processor error: {e}")
+                handle_unknown_message(chat_id, text)
         
     except Exception as e:
         logger.error(f"Error in process_message for chat_id {chat_id}: {e}")
         try:
-            tg_send_message(chat_id, f"Виникла помилка: {e}")
+            tg_send_message(chat_id, "Виникла помилка. Спробуйте пізніше.")
         except:
             logger.error("Failed to send error message to user")
 
+def handle_unknown_message(chat_id, text):
+    """Обробка невідомих повідомлень через AI"""
+    try:
+        if GEMINI_API_KEY:
+            prompt = f"""
+Користувач написав: "{text}"
+Меню ресторану: {json.dumps(menu_cache, ensure_ascii=False)}
+Дай корисну відповідь українською мовою про наш ресторан або їжу.
+"""
+            response_text = get_gemini_recommendation(prompt)
+            tg_send_message(chat_id, response_text)
+        else:
+            tg_send_message(chat_id, "Не розумію. Виберіть опцію з меню.")
+    except Exception as e:
+        logger.error(f"AI processing error: {e}")
+        tg_send_message(chat_id, "Не розумію. Виберіть опцію з меню.")
+
 def show_menu(chat_id):
     """Показати меню"""
+    try:
+        if not menu_cache:
+            # Спробуємо перезавантажити меню
+            global menu_cache
+            menu_cache = get_menu_from_sheets()
+    except:
+        pass
+    
     if not menu_cache:
-        tg_send_message(chat_id, "❌ Меню тимчасово недоступне")
+        tg_send_message(chat_id, "❌ Меню тимчасово недоступне. Спробуйте пізніше.")
         return
     
     menu_text = "🍽️ **Наше меню:**\n\n"
@@ -258,27 +266,24 @@ Facebook: FerrikFoot
 
 def show_recommendations(chat_id):
     """Показати рекомендації"""
-    if not menu_cache:
-        tg_send_message(chat_id, "❌ Рекомендації тимчасово недоступні")
-        return
-    
     try:
-        # Створюємо промт для AI
-        menu_items = []
-        for item in menu_cache.values():
-            if item.get('active', True):
-                menu_items.append(f"{item['name']} - {item['price']} грн")
-        
-        prompt = f"""
-З нашого меню: {', '.join(menu_items)}
+        if GEMINI_API_KEY and menu_cache:
+            # Створюємо промт для AI
+            menu_items = []
+            for item in menu_cache.values():
+                if item.get('active', True):
+                    menu_items.append(f"{item['name']} - {item['price']} грн")
+            
+            prompt = f"""
+З нашого меню: {', '.join(menu_items[:5])}
 Порекомендуй 2-3 найпопулярніші страви для замовлення. 
 Відповідь українською мовою, коротко та переконливо.
 """
-        
-        # Виправлення: передаємо тільки prompt
-        recommendation = get_gemini_recommendation(prompt)
-        tg_send_message(chat_id, f"🎯 **Наші рекомендації:**\n\n{recommendation}")
-        
+            
+            recommendation = get_gemini_recommendation(prompt)
+            tg_send_message(chat_id, f"🎯 **Наші рекомендації:**\n\n{recommendation}")
+        else:
+            tg_send_message(chat_id, "🍕 Рекомендуємо спробувати нашу фірмову піцу!")
     except Exception as e:
         logger.error(f"Error getting recommendations: {e}")
         tg_send_message(chat_id, "🍕 Рекомендуємо спробувати нашу фірмову піцу!")
@@ -294,16 +299,6 @@ def process_callback_query(callback_query):
         
     except Exception as e:
         logger.error(f"Error processing callback query: {e}")
-
-# Функція для підтримки активності сервісу
-@app.route('/keep-alive', methods=['GET'])
-def keep_alive():
-    """Endpoint для підтримки активності сервісу"""
-    return jsonify({
-        "status": "alive",
-        "timestamp": datetime.now().isoformat(),
-        "uptime": "service is running"
-    })
 
 if __name__ == '__main__':
     # Для локального тестування

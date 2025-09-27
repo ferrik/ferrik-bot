@@ -1,80 +1,56 @@
+# config.py
 import os
-from dotenv import load_dotenv
+import base64
+import json
+import logging
 
-# Завантажуємо змінні з .env файлу (якщо є)
-load_dotenv()
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# Telegram Bot Token
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
+# Telegram token (обов'язково)
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is required")
+    logger.error("BOT_TOKEN (або TELEGRAM_BOT_TOKEN) не заданий у змінних середовища.")
+    # не кидаємо помилку відразу — дозволяємо стартувати у dev, але попереджаємо
+    # якщо хочеш — розкоментуй наступний рядок, щоб падало одразу:
+    # raise ValueError("BOT_TOKEN environment variable is required")
 
-# Google Gemini API Key
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable is required")
-
-# Gemini Model Name (FIXED: Using gemini-2.5-flash instead of the deprecated gemini-pro)
-GEMINI_MODEL_NAME = os.environ.get('GEMINI_MODEL_NAME', 'gemini-2.5-flash').strip()
-
-# Google Sheets Configuration
-SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
+# Google Sheets
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 if not SPREADSHEET_ID:
-    raise ValueError("SPREADSHEET_ID environment variable is required")
+    logger.warning("SPREADSHEET_ID не задано. Функції, що працюють з Sheets, можуть падати.")
 
-# Google Service Account Credentials
-GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-CREDS_B64 = os.environ.get('CREDS_B64')
+# Декілька форматів зберігання Google creds:
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # повний JSON як str
+CREDS_B64 = os.getenv("CREDS_B64")  # base64-encoded creds.json
 
-if not GOOGLE_CREDENTIALS_JSON and not CREDS_B64:
-    raise ValueError("Either GOOGLE_CREDENTIALS_JSON or CREDS_B64 environment variable is required")
+# Якщо є CREDS_B64 — декодуємо в JSON-рядок
+if not GOOGLE_CREDENTIALS_JSON and CREDS_B64:
+    try:
+        GOOGLE_CREDENTIALS_JSON = base64.b64decode(CREDS_B64).decode("utf-8")
+        logger.info("CREDS_B64 прочитано і декодовано у GOOGLE_CREDENTIALS_JSON.")
+    except Exception as e:
+        logger.exception("Не вдалося декодувати CREDS_B64: %s", e)
 
-# Database Configuration
-DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///bot.db')
+if not GOOGLE_CREDENTIALS_JSON:
+    logger.warning("Немає GOOGLE_CREDENTIALS_JSON або CREDS_B64. Доступ до Google Sheets буде неможливим.")
 
-# App Configuration
-DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
-PORT = int(os.environ.get('PORT', 5000))
+# Додаткові змінні (опціонально)
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # наприклад для логів/повідомлень адміну
+MIN_DELIVERY_AMOUNT = os.getenv("MIN_DELIVERY_AMOUNT")  # можна зчитувати з env як fallback
 
-# Webhook URL для Render
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://ferrik-bot-zvev.onrender.com/webhook')
+# Типові версії/флаги
+ENV = os.getenv("ENV", "production")
 
-# Logging Configuration
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
-
-# Feature Flags
-ENABLE_AI_RECOMMENDATIONS = os.environ.get('ENABLE_AI_RECOMMENDATIONS', 'True').lower() == 'true'
-ENABLE_GOOGLE_SHEETS = os.environ.get('ENABLE_GOOGLE_SHEETS', 'True').lower() == 'true'
-
-# Cache Configuration
-MENU_CACHE_TTL = int(os.environ.get('MENU_CACHE_TTL', 3600))  # 1 hour
-
-# Rate Limiting
-MAX_REQUESTS_PER_MINUTE = int(os.environ.get('MAX_REQUESTS_PER_MINUTE', 60))
-
-# Error Messages
-ERROR_MESSAGES = {
-    'generic': 'Виникла помилка. Спробуйте пізніше.',
-    'ai_unavailable': 'AI рекомендації тимчасово недоступні.',
-    'menu_unavailable': 'Меню тимчасово недоступне.',
-    'sheets_error': 'Помилка підключення до Google Sheets.'
-}
-
-# Success Messages
-SUCCESS_MESSAGES = {
-    'order_created': 'Замовлення успішно створено!',
-    'user_registered': 'Ви успішно зареєстровані!'
-}
-
-# Validate configuration
-def validate_config():
-    """Валідація конфігурації при запуску"""
-    required_vars = ['BOT_TOKEN', 'GEMINI_API_KEY', 'SPREADSHEET_ID', 'GEMINI_MODEL_NAME']
-    
-    for var in required_vars:
-        if not globals().get(var):
-            raise ValueError(f"Required configuration variable '{var}' is missing or empty.")
-    
-    if not GOOGLE_CREDENTIALS_JSON and not CREDS_B64:
-        raise ValueError("Either GOOGLE_CREDENTIALS_JSON or CREDS_B64 environment variable is required")
-
+def get_google_creds_dict():
+    """
+    Повертає dict з креденшелів для gspread.service_account_from_dict
+    або None, якщо немає налаштованих креденшелів.
+    """
+    if not GOOGLE_CREDENTIALS_JSON:
+        return None
+    try:
+        return json.loads(GOOGLE_CREDENTIALS_JSON)
+    except Exception as e:
+        logger.exception("Помилка при парсингу GOOGLE_CREDENTIALS_JSON: %s", e)
+        return None

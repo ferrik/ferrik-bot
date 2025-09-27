@@ -11,10 +11,11 @@ from services.sheets import init_gspread_client, get_menu_from_sheet, get_item_b
 from services.gemini import get_gemini_recommendation
 from models.user import init_db, get_state, set_state, get_cart, set_cart, get_or_create_user, add_chat_history
 from datetime import datetime
+from werkzeug.exceptions import BadRequest
 
 # Додані імпорти для оператора та адмін-панелі
-from handlers.operator import handle_operator_command, handle_admin_callback
-from services.admin_panel import track_user_activity, admin_panel
+# from handlers.operator import handle_operator_command, handle_admin_callback
+# from services.admin_panel import track_user_activity, admin_panel
 
 try:
     from zoneinfo import ZoneInfo
@@ -41,8 +42,8 @@ OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID", "").strip()
 DEFAULT_CITY = os.environ.get("DEFAULT_CITY", "Kyiv").strip()
 TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Europe/Kiev").strip()
 
-# Глобальні об'єкти
-MENU_CACHE = {} # Глобальний кеш меню
+# Глобальні об'єкти (ініціалізація на рівні модуля)
+MENU_CACHE = {} 
 GSPREAD_CLIENT = None
 GEMINI_CLIENT = None
 
@@ -132,13 +133,13 @@ with app.app_context():
             logger.error("❌ Database initialization failed")
         
         # Підключення до Google Sheets
-        global GSPREAD_CLIENT
+        # **ВИДАЛЕНО: global GSPREAD_CLIENT**
         GSPREAD_CLIENT = init_gspread_client()
         if GSPREAD_CLIENT:
             logger.info("✅ Google Sheets connected")
             
             # Завантажуємо меню для кешування
-            global MENU_CACHE
+            # **ВИДАЛЕНО: global MENU_CACHE**
             MENU_CACHE = get_menu_from_sheet(force=True)
             logger.info(f"✅ Menu cached: {len(MENU_CACHE)} items")
         else:
@@ -147,7 +148,7 @@ with app.app_context():
         # Ініціалізація Gemini (для усунення помилки імпорту, якщо вона все ще виникає)
         try:
             from services.gemini import init_gemini_client
-            global GEMINI_CLIENT
+            # **ВИДАЛЕНО: global GEMINI_CLIENT**
             GEMINI_CLIENT = init_gemini_client() 
             if not GEMINI_CLIENT:
                 logger.warning("⚠️ Gemini client not initialized. AI recommendations will be unavailable.")
@@ -212,6 +213,7 @@ def telegram_webhook():
                 tg_send_message(chat_id, contacts_text)
             else:
                 from handlers.message_processor import process_text_message
+                # Використовуємо глобальні змінні
                 process_text_message(chat_id, user_id, user_name, text, MENU_CACHE, GEMINI_CLIENT)
 
         elif "callback_query" in update:

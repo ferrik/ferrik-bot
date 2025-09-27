@@ -5,14 +5,6 @@ from werkzeug.exceptions import BadRequest
 import json
 from datetime import datetime
 
-# Імпорти з вашої існуючої структури
-from config import BOT_TOKEN, GEMINI_API_KEY, SPREADSHEET_ID
-from services.telegram import send_message as tg_send_message
-from services.sheets import init_sheets, get_menu_from_sheets
-from services.gemini import get_gemini_recommendation
-from models.user import create_user, get_user
-from handlers.message_processor import process_text_message
-
 # Налаштування логування
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +19,89 @@ app = Flask(__name__)
 menu_cache = {}
 sheets_client = None
 
+def safe_import():
+    """Безпечний імпорт модулів з обробкою помилок"""
+    global tg_send_message, get_gemini_recommendation, init_sheets, get_menu_from_sheets, create_user, get_user
+    
+    try:
+        # Імпорти з config
+        from config import BOT_TOKEN, GEMINI_API_KEY, SPREADSHEET_ID
+        logger.info("Config imported successfully")
+    except Exception as e:
+        logger.error(f"Config import error: {e}")
+        # Fallback to environment variables
+        BOT_TOKEN = os.environ.get('BOT_TOKEN')
+        GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+        SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
+    
+    try:
+        from services.telegram import send_message as tg_send_message
+        logger.info("Telegram service imported")
+    except Exception as e:
+        logger.error(f"Telegram import error: {e}")
+        # Fallback function
+        tg_send_message = create_fallback_send_message()
+    
+    try:
+        from services.gemini import get_gemini_recommendation
+        logger.info("Gemini service imported")
+    except Exception as e:
+        logger.error(f"Gemini import error: {e}")
+        get_gemini_recommendation = lambda x: "AI тимчасово недоступний"
+    
+    try:
+        from services.sheets import init_sheets, get_menu_from_sheets
+        logger.info("Sheets service imported")
+    except Exception as e:
+        logger.error(f"Sheets import error: {e}")
+        init_sheets = lambda: None
+        get_menu_from_sheets = lambda: {}
+    
+    try:
+        from models.user import create_user, get_user
+        logger.info("User model imported")
+    except Exception as e:
+        logger.error(f"User model import error: {e}")
+        create_user = lambda x, y: True
+        get_user = lambda x: None
+
+def create_fallback_send_message():
+    """Створює fallback функцію для відправки повідомлень"""
+    import requests
+    
+    def fallback_send(chat_id, text, keyboard=None, parse_mode="Markdown"):
+        try:
+            bot_token = os.environ.get('BOT_TOKEN')
+            if not bot_token:
+                logger.error("BOT_TOKEN not found")
+                return None
+                
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode
+            }
+            
+            if keyboard:
+                payload["reply_markup"] = json.dumps(keyboard)
+            
+            response = requests.post(url, data=payload, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info(f"Fallback message sent to {chat_id}")
+                return response.json()
+            else:
+                logger.error(f"Fallback send failed: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Fallback send error: {e}")
+            return None
+    
+    return fallback_send
+
 def initialize_bot():
     """Ініціалізація всіх компонентів бота"""
     global menu_cache, sheets_client
@@ -34,11 +109,18 @@ def initialize_bot():
     logger.info("🚀 FerrikFootBot starting initialization...")
     
     try:
-        # 1. Ініціалізація Google Sheets
-        sheets_client = init_sheets()
-        logger.info("✅ Google Sheets connected")
+        # Безпечний імпорт
+        safe_import()
         
-        # 2. Завантаження меню
+        # Ініціалізація Google Sheets
+        try:
+            sheets_client = init_sheets()
+            logger.info("✅ Google Sheets connected")
+        except Exception as e:
+            logger.warning(f"Sheets connection failed: {e}")
+            sheets_client = None
+        
+        # Завантаження меню
         try:
             menu_cache = get_menu_from_sheets()
             logger.info(f"✅ Menu cached: {len(menu_cache)} items")
@@ -50,20 +132,19 @@ def initialize_bot():
         
     except Exception as e:
         logger.error(f"❌ Initialization failed: {e}")
-        # Не викидаємо помилку, щоб сервіс продовжував працювати
 
 # Ініціалізація при запуску
 initialize_bot()
 
 @app.route('/', methods=['GET'])
 def health_check():
-    """Перевірка здоров'я сервісу для запобігання засипанню"""
+    """Перевірка здоров'я сервісу"""
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "service": "FerrikFootBot",
-        "menu_items": len(menu_cache)
-    })
+        "menu_items": len(menu_cache) if menu_cache else 0
+    }), 200
 
 @app.route('/keep-alive', methods=['GET'])
 def keep_alive():
@@ -73,7 +154,7 @@ def keep_alive():
         "timestamp": datetime.now().isoformat(),
         "uptime": "service is running",
         "cache_status": "active" if menu_cache else "empty"
-    })
+    }), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -82,9 +163,9 @@ def webhook():
         data = request.get_json()
         
         if not data:
-            raise BadRequest("No JSON data received")
+            return jsonify({"status": "error", "message": "No data"}), 400
         
-        logger.info(f"Received update: {data}")
+        logger.info(f"Received update: {data.get('update_id', 'unknown')}")
         
         # Обробка повідомлення
         if "message" in data:
@@ -96,10 +177,11 @@ def webhook():
         
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": "Internal error"}), 500
 
 def process_message(message):
     """Обробка текстових повідомлень"""
+    chat_id = None
     try:
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
@@ -108,14 +190,14 @@ def process_message(message):
         
         logger.info(f"Processing message from {username} ({user_id}): {text}")
         
-        # Створення користувача, якщо не існує
+        # Створення користувача
         try:
             user = get_user(user_id)
             if not user:
                 create_user(user_id, username)
                 logger.info(f"Created new user: {user_id}")
         except Exception as e:
-            logger.error(f"Error with user management: {e}")
+            logger.error(f"User management error: {e}")
         
         # Обробка команди /start
         if text == "/start":
@@ -138,7 +220,10 @@ def process_message(message):
                 "one_time_keyboard": False
             }
             
-            tg_send_message(chat_id, greeting_text, keyboard=keyboard)
+            try:
+                tg_send_message(chat_id, greeting_text, keyboard=keyboard)
+            except Exception as e:
+                logger.error(f"Error sending greeting: {e}")
             return
         
         # Обробка інших повідомлень
@@ -153,47 +238,40 @@ def process_message(message):
         elif text == "🎯 Рекомендації":
             show_recommendations(chat_id)
         else:
-            # Спробуємо використати існуючий message_processor
-            try:
-                from handlers.message_processor import process_text_message
-                response = process_text_message(text, user_id, chat_id)
-                if response:
-                    tg_send_message(chat_id, response)
-                else:
-                    handle_unknown_message(chat_id, text)
-            except Exception as e:
-                logger.error(f"Message processor error: {e}")
-                handle_unknown_message(chat_id, text)
+            handle_unknown_message(chat_id, text)
         
     except Exception as e:
-        logger.error(f"Error in process_message for chat_id {chat_id}: {e}")
-        try:
-            tg_send_message(chat_id, "Виникла помилка. Спробуйте пізніше.")
-        except:
-            logger.error("Failed to send error message to user")
+        logger.error(f"Error in process_message: {e}")
+        if chat_id:
+            try:
+                tg_send_message(chat_id, "Виникла помилка. Спробуйте пізніше.")
+            except:
+                logger.error("Failed to send error message")
 
 def handle_unknown_message(chat_id, text):
-    """Обробка невідомих повідомлень через AI"""
+    """Обробка невідомих повідомлень"""
     try:
-        if GEMINI_API_KEY:
-            prompt = f"""
+        # Спробуємо AI
+        prompt = f"""
 Користувач написав: "{text}"
-Меню ресторану: {json.dumps(menu_cache, ensure_ascii=False)}
-Дай корисну відповідь українською мовою про наш ресторан або їжу.
+Ти помічник ресторану FerrikFoot. Дай коротку корисну відповідь українською.
 """
-            response_text = get_gemini_recommendation(prompt)
-            tg_send_message(chat_id, response_text)
+        response = get_gemini_recommendation(prompt)
+        
+        if response and "недоступний" not in response:
+            tg_send_message(chat_id, response)
         else:
-            tg_send_message(chat_id, "Не розумію. Виберіть опцію з меню.")
+            tg_send_message(chat_id, "Не розумію. Виберіть опцію з меню або напишіть /help")
+            
     except Exception as e:
-        logger.error(f"AI processing error: {e}")
-        tg_send_message(chat_id, "Не розумію. Виберіть опцію з меню.")
+        logger.error(f"Error handling unknown message: {e}")
+        tg_send_message(chat_id, "Використовуйте кнопки меню для навігації")
 
 def show_menu(chat_id):
     """Показати меню"""
     try:
         if not menu_cache:
-            # Спробуємо перезавантажити меню
+            # Спробуємо перезавантажити
             global menu_cache
             menu_cache = get_menu_from_sheets()
     except:
@@ -215,91 +293,65 @@ def show_menu(chat_id):
     tg_send_message(chat_id, menu_text)
 
 def show_orders(chat_id):
-    """Показати замовлення користувача"""
-    tg_send_message(chat_id, "📋 Ваші замовлення:\n\nПоки що замовлень немає.")
+    """Показати замовлення"""
+    tg_send_message(chat_id, "📋 **Ваші замовлення:**\n\nПоки що замовлень немає.")
 
 def show_info(chat_id):
     """Показати інформацію"""
     info_text = """
 ℹ️ **Інформація про FerrikFoot**
 
-🕒 **Час роботи:**
-Пн-Нд: 10:00 - 22:00
-
-🚚 **Доставка:**
-Безкоштовна доставка від 300 грн
-Час доставки: 30-45 хв
-
-💳 **Оплата:**
-• Готівка при отриманні
-• Карткою при отриманні
-• Онлайн оплата
-
-🎯 **Наші переваги:**
-• Свіжі продукти
-• Швидка доставка
-• Доступні ціни
-• Якісне обслуговування
+🕒 **Час роботи:** Пн-Нд: 10:00 - 22:00
+🚚 **Доставка:** Безкоштовна від 300 грн (30-45 хв)
+💳 **Оплата:** Готівка або картка
+🎯 **Переваги:** Свіжі продукти, швидка доставка
 """
     tg_send_message(chat_id, info_text)
 
 def show_contacts(chat_id):
     """Показати контакти"""
     contacts_text = """
-📞 **Контактна інформація**
+📞 **Контакти**
 
 📱 Телефон: +380XX XXX XX XX
 📧 Email: info@ferrikfoot.com
-🌐 Сайт: www.ferrikfoot.com
-
-📍 **Адреса:**
-м. Київ, вул. Прикладна, 1
-
-🕒 **Час роботи:**
-Щодня з 10:00 до 22:00
-
-📱 **Соціальні мережі:**
-Instagram: @ferrikfoot
-Facebook: FerrikFoot
+📍 Адреса: м. Київ, вул. Прикладна, 1
 """
     tg_send_message(chat_id, contacts_text)
 
 def show_recommendations(chat_id):
     """Показати рекомендації"""
     try:
-        if GEMINI_API_KEY and menu_cache:
-            # Створюємо промт для AI
-            menu_items = []
-            for item in menu_cache.values():
-                if item.get('active', True):
-                    menu_items.append(f"{item['name']} - {item['price']} грн")
+        if menu_cache:
+            menu_items = [f"{item['name']} - {item['price']} грн" 
+                         for item in menu_cache.values() if item.get('active', True)][:5]
             
-            prompt = f"""
-З нашого меню: {', '.join(menu_items[:5])}
-Порекомендуй 2-3 найпопулярніші страви для замовлення. 
-Відповідь українською мовою, коротко та переконливо.
-"""
-            
+            prompt = f"Порекомендуй страви з меню: {', '.join(menu_items)}. Коротко українською."
             recommendation = get_gemini_recommendation(prompt)
-            tg_send_message(chat_id, f"🎯 **Наші рекомендації:**\n\n{recommendation}")
+            
+            tg_send_message(chat_id, f"🎯 **Рекомендації:**\n\n{recommendation}")
         else:
-            tg_send_message(chat_id, "🍕 Рекомендуємо спробувати нашу фірмову піцу!")
-    except Exception as e:
-        logger.error(f"Error getting recommendations: {e}")
-        tg_send_message(chat_id, "🍕 Рекомендуємо спробувати нашу фірмову піцу!")
+            tg_send_message(chat_id, "🍕 Рекомендуємо нашу фірмову піцу!")
+    except:
+        tg_send_message(chat_id, "🍕 Рекомендуємо нашу фірмову піцу!")
 
 def process_callback_query(callback_query):
     """Обробка callback запитів"""
     try:
         chat_id = callback_query["message"]["chat"]["id"]
         data = callback_query["data"]
-        
-        # Тут можна додати логіку обробки inline кнопок
         tg_send_message(chat_id, f"Обрано: {data}")
-        
     except Exception as e:
-        logger.error(f"Error processing callback query: {e}")
+        logger.error(f"Callback error: {e}")
+
+# Обробка помилок Flask
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
-    # Для локального тестування
     app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

@@ -1,167 +1,118 @@
+# services/sheets.py
 """
-Google Sheets service для роботи з таблицями
+Сервіс для роботи з Google Sheets.
+Функції:
+- init_sheet_client() - ініціалізація клієнта
+- get_item_by_id(item_id) - повертає словник рядка товару по ID (ключ стовпця: "id" або інший)
+- get_min_delivery_amount() - повертає мінімальну суму доставки (fallback з ENV або клітинки)
+- get_all_records() - повертає всі записи як list[dict]
 """
 
-import gspread
-import json
-import base64
 import logging
-from io import BytesIO
-from config import SPREADSHEET_ID, GOOGLE_CREDENTIALS_JSON, CREDS_B64
+from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-def init_sheets():
-    """Ініціалізація підключення до Google Sheets"""
-    try:
-        # Спробуємо використати CREDS_B64
-        if CREDS_B64:
-            logger.info("Using CREDS_B64 from env")
-            credentials_data = base64.b64decode(CREDS_B64).decode('utf-8')
-            credentials_dict = json.loads(credentials_data)
-            logger.info("Successfully loaded credentials from CREDS_B64")
-        elif GOOGLE_CREDENTIALS_JSON:
-            logger.info("Using GOOGLE_CREDENTIALS_JSON from env")
-            credentials_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-        else:
-            # Спробуємо прочитати з файлу
-            logger.info("Trying to load from creds.json file")
-            with open('creds.json', 'r') as f:
-                credentials_dict = json.load(f)
-        
-        # Підключення до Google Sheets
-        gc = gspread.service_account_from_dict(credentials_dict)
-        sheet = gc.open_by_key(SPREADSHEET_ID)
-        
-        logger.info(f"Connected to Google Sheet: {SPREADSHEET_ID}")
-        return sheet
-        
-    except Exception as e:
-        logger.error(f"Failed to connect to Google Sheets: {e}")
+try:
+    import gspread
+except Exception as e:
+    logger.exception("gspread не доступний: %s. Додай до requirements.txt 'gspread'.", e)
+    raise
+
+from config import SPREADSHEET_ID, get_google_creds_dict, MIN_DELIVERY_AMOUNT
+
+_gc = None
+_sheet = None
+
+def init_sheet_client(force: bool = False):
+    """
+    Ініціалізувати клієнт gspread та встановити об'єкт sheet у _sheet.
+    Якщо SPREADSHEET_ID або креденшали відсутні, повертає None.
+    """
+    global _gc, _sheet
+    if _gc is not None and not force:
+        return _sheet
+
+    creds = get_google_creds_dict()
+    if not creds:
+        logger.warning("Google credentials не налаштовані. init_sheet_client повертає None.")
         return None
 
-def get_menu_from_sheets():
-    """Завантаження меню з Google Sheets"""
-    try:
-        sheet = init_sheets()
-        if not sheet:
-            logger.error("No sheet connection available")
-            return {}
-        
-        # Спробуємо знайти worksheet з меню
-        try:
-            menu_worksheet = sheet.worksheet("Menu")
-        except:
-            try:
-                menu_worksheet = sheet.worksheet("Меню")
-            except:
-                # Використаємо перший worksheet
-                menu_worksheet = sheet.get_worksheet(0)
-        
-        # Отримуємо всі записи
-        records = menu_worksheet.get_all_records()
-        
-        menu_cache = {}
-        active_count = 0
-        
-        for i, record in enumerate(records):
-            # Гнучка перевірка колонок
-            item_id = record.get('id') or record.get('ID') or str(i + 1)
-            name = record.get('name') or record.get('Name') or record.get('назва') or record.get('Назва')
-            price = record.get('price') or record.get('Price') or record.get('ціна') or record.get('Ціна')
-            description = record.get('description') or record.get('Description') or record.get('опис') or record.get('Опис') or ''
-            active = record.get('active') or record.get('Active') or record.get('активний') or record.get('Активний')
-            
-            # Перевірка активності
-            is_active = True
-            if active is not None:
-                if isinstance(active, str):
-                    is_active = active.lower() in ['true', '1', 'yes', 'так', 'активний']
-                else:
-                    is_active = bool(active)
-            
-            if name and price:
-                try:
-                    price_value = float(str(price).replace(',', '.'))
-                    menu_cache[str(item_id)] = {
-                        'id': str(item_id),
-                        'name': str(name),
-                        'price': price_value,
-                        'description': str(description),
-                        'active': is_active
-                    }
-                    if is_active:
-                        active_count += 1
-                except ValueError:
-                    logger.warning(f"Invalid price for item {name}: {price}")
-        
-        logger.info(f"Menu loaded: {active_count} active items from {len(menu_cache)} total")
-        return menu_cache
-        
-    except Exception as e:
-        logger.error(f"Error loading menu from sheets: {e}")
-        return {}
+    if not SPREADSHEET_ID:
+        logger.warning("SPREADSHEET_ID не налаштований. init_sheet_client повертає None.")
+        return None
 
-def add_user_data(user_id, username, action="User interaction"):
-    """Додавання даних користувача в Google Sheets"""
     try:
-        sheet = init_sheets()
-        if not sheet:
-            logger.error("No sheet connection available")
-            return False
-        
-        # Спробуємо знайти worksheet для користувачів
-        try:
-            users_worksheet = sheet.worksheet("Users")
-        except:
-            try:
-                users_worksheet = sheet.worksheet("Statistics")
-            except:
-                # Створимо новий worksheet
-                users_worksheet = sheet.add_worksheet("Users", rows=1000, cols=5)
-                users_worksheet.append_row(["Date", "User ID", "Username", "Action", "Timestamp"])
-        
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        users_worksheet.append_row([
-            timestamp,
-            str(user_id),
-            str(username),
-            str(action),
-            timestamp
-        ])
-        
-        logger.info(f"User data added for {user_id}: {action}")
-        return True
-        
+        _gc = gspread.service_account_from_dict(creds)
+        wb = _gc.open_by_key(SPREADSHEET_ID)
+        # За замовчуванням беремо перший лист; за потреби вказати назву
+        _sheet = wb.sheet1
+        logger.info("Google Sheets клієнт ініціалізовано успішно.")
+        return _sheet
     except Exception as e:
-        logger.error(f"Error adding user data: {e}")
-        return False
+        logger.exception("Помилка при ініціалізації Google Sheets: %s", e)
+        return None
 
-def get_statistics():
-    """Отримання статистики з Google Sheets"""
+
+def get_all_records() -> List[Dict]:
+    """
+    Повертає всі записи з листа у вигляді list[dict].
+    Повертає порожній список, якщо неможливо зчитати.
+    """
+    sh = init_sheet_client()
+    if not sh:
+        return []
     try:
-        sheet = init_sheets()
-        if not sheet:
-            return {}
-        
-        try:
-            stats_worksheet = sheet.worksheet("Statistics")
-            records = stats_worksheet.get_all_records()
-            
-            # Базова статистика
-            total_users = len(set(record.get('User ID') for record in records if record.get('User ID')))
-            total_actions = len(records)
-            
-            return {
-                'total_users': total_users,
-                'total_actions': total_actions,
-                'recent_actions': records[-10:] if records else []
-            }
-        except:
-            return {}
-            
+        return sh.get_all_records()
     except Exception as e:
-        logger.error(f"Error getting statistics: {e}")
-        return {}
+        logger.exception("Не вдалося отримати всі записи з Sheets: %s", e)
+        return []
+
+
+def get_item_by_id(item_id: str, id_column: str = "id") -> Optional[Dict]:
+    """
+    Знаходить товар по item_id у колонці id_column (за замовчуванням 'id').
+    Повертає словник рядка або None.
+    """
+    if item_id is None:
+        return None
+
+    records = get_all_records()
+    for row in records:
+        # переводимо в str для порівняння, бо Google повертає все як str/number
+        try:
+            if str(row.get(id_column)) == str(item_id):
+                return row
+        except Exception:
+            continue
+    return None
+
+
+def get_min_delivery_amount(default_from_env: Optional[str] = MIN_DELIVERY_AMOUNT, fallback_cell: tuple = (2, 5)) -> float:
+    """
+    Повертає мінімальну суму доставки:
+    - спочатку читає з ENV (MIN_DELIVERY_AMOUNT якщо задано)
+    - інакше читає з конкретної клітинки (рядок, колонка) за fallback_cell (рядок, колонка),
+      за замовчуванням (2,5) = E2.
+    - якщо нічого нема — повертає 0.0
+    """
+    # 1) ENV
+    if default_from_env:
+        try:
+            return float(default_from_env)
+        except Exception:
+            logger.warning("MIN_DELIVERY_AMOUNT з ENV не є числом: %s", default_from_env)
+
+    # 2) Google Sheet
+    sh = init_sheet_client()
+    if sh:
+        try:
+            r, c = fallback_cell
+            value = sh.cell(r, c).value
+            if value:
+                return float(value)
+        except Exception as e:
+            logger.exception("Не вдалося зчитати мінімальну сумму з клітинки: %s", e)
+
+    return 0.0

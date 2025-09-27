@@ -1,154 +1,212 @@
+"""
+Message processor для обробки текстових повідомлень
+"""
+
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from services.gemini import analyze_user_request_with_gemini, format_ai_response
-from services.sheets import get_menu_from_sheet
-from services.telegram import tg_send_message
-from handlers.cart import add_item_to_cart, show_cart
-from handlers.budget import handle_budget_input, show_price_ranges
-from models.user import get_state, set_state, add_chat_history
+import json
+from services.gemini import get_gemini_recommendation
+from models.user import update_user_activity
 
-logger = logging.getLogger("ferrik.processor")
+logger = logging.getLogger(__name__)
 
-# Thread pool для асинхронної обробки
-EXECUTOR = ThreadPoolExecutor(max_workers=3)
-
-def process_text_message(chat_id, text, user_info=None):
-    """Обробляє текстові повідомлення користувача"""
+def process_text_message(text, user_id, chat_id):
+    """
+    Обробка текстових повідомлень користувачів
+    
+    Args:
+        text (str): Текст повідомлення
+        user_id (int): ID користувача
+        chat_id (int): ID чату
+        
+    Returns:
+        str: Відповідь для користувача або None
+    """
     try:
-        # Додаємо до історії
-        add_chat_history(chat_id, text, is_user=True)
+        # Оновлюємо активність користувача
+        update_user_activity(user_id)
         
-        user_state = get_state(chat_id)
+        # Логуємо повідомлення
+        logger.info(f"Processing text from user {user_id}: {text}")
         
-        # Обробляємо стани
-        if user_state and user_state != "normal":
-            return handle_state_input(chat_id, text, user_state)
-        
-        # Команди
+        # Обробка команд
         if text.startswith('/'):
-            return handle_commands(chat_id, text, user_info)
+            return process_command(text, user_id, chat_id)
         
-        # Кнопки головного меню
-        if text in get_main_menu_buttons():
-            return handle_main_menu_button(chat_id, text)
+        # Обробка ключових слів
+        text_lower = text.lower()
         
-        # Використовуємо AI для аналізу
-        EXECUTOR.submit(process_with_ai, chat_id, text)
-        return True
+        if any(word in text_lower for word in ['меню', 'menu', 'їжа', 'food']):
+            return "Для перегляду меню натисніть кнопку '🍔 Замовити їжу'"
+        
+        if any(word in text_lower for word in ['ціна', 'price', 'скільки', 'вартість']):
+            return "Ціни на всі страви можна переглянути в нашому меню. Натисніть '🍔 Замовити їжу'"
+        
+        if any(word in text_lower for word in ['доставка', 'delivery', 'привезти']):
+            return "🚚 Безкоштовна доставка від 300 грн. Час доставки: 30-45 хв"
+        
+        if any(word in text_lower for word in ['контакт', 'телефон', 'зв\'язок']):
+            return "📞 Наші контакти доступні в розділі 'Контакти'"
+        
+        if any(word in text_lower for word in ['робота', 'час', 'відкрито']):
+            return "🕒 Ми працюємо щодня з 10:00 до 22:00"
+        
+        # Якщо нічого не підійшло, використовуємо AI
+        return process_with_ai(text, user_id)
         
     except Exception as e:
-        logger.error(f"Error processing text message for {chat_id}: {e}")
-        tg_send_message(chat_id, "Вибачте, сталася помилка при обробці повідомлення.")
+        logger.error(f"Error processing text message: {e}")
+        return "Виникла помилка при обробці повідомлення"
+
+def process_command(command, user_id, chat_id):
+    """Обробка команд бота"""
+    try:
+        command_lower = command.lower().strip()
+        
+        if command_lower == '/start':
+            return None  # Обробляється в main.py
+        
+        elif command_lower == '/help':
+            return """
+🤖 **Доступні команди:**
+
+/start - Почати роботу з ботом
+/help - Показати це меню
+/menu - Переглянути меню
+/contact - Контактна інформація
+/info - Інформація про ресторан
+
+Або використовуйте кнопки меню для навігації!
+"""
+        
+        elif command_lower == '/menu':
+            return "Для перегляду меню натисніть кнопку '🍔 Замовити їжу'"
+        
+        elif command_lower == '/contact':
+            return """
+📞 **Контактна інформація**
+
+📱 Телефон: +380XX XXX XX XX
+📧 Email: info@ferrikfoot.com
+🌐 Сайт: www.ferrikfoot.com
+
+📍 Адреса: м. Київ, вул. Прикладна, 1
+"""
+        
+        elif command_lower == '/info':
+            return """
+ℹ️ **Про FerrikFoot**
+
+🍔 Ми - команда ентузіастів, які створюють смачну їжу для вас!
+
+🎯 Наша мета - швидка доставка якісної їжі за доступними цінами.
+
+⭐ Що нас відрізняє:
+• Свіжі інгредієнти
+• Швидке приготування
+• Дружній сервіс
+"""
+        
+        else:
+            return f"Команда {command} не розпізнана. Введіть /help для списку команд."
+            
+    except Exception as e:
+        logger.error(f"Error processing command: {e}")
+        return "Помилка при обробці команди"
+
+def process_with_ai(text, user_id):
+    """Обробка повідомлення через AI"""
+    try:
+        # Створюємо контекстний промт
+        prompt = f"""
+Ти - помічник ресторану FerrikFoot. Користувач написав: "{text}"
+
+Контекст про ресторан:
+- Назва: FerrikFoot
+- Спеціалізація: швидке харчування, піца, бургери
+- Час роботи: 10:00-22:00 щодня
+- Безкоштовна доставка від 300 грн
+- Час доставки: 30-45 хв
+- Місто: Київ
+
+Дай корисну та дружню відповідь українською мовою. Будь стислим (до 200 символів).
+Якщо питання не стосується ресторану, ввічливо переспрямуй на наші послуги.
+"""
+        
+        response = get_gemini_recommendation(prompt)
+        
+        if response and "недоступний" not in response.lower():
+            return response
+        else:
+            return generate_fallback_response(text)
+            
+    except Exception as e:
+        logger.error(f"Error processing with AI: {e}")
+        return generate_fallback_response(text)
+
+def generate_fallback_response(text):
+    """Генерація запасної відповіді без AI"""
+    text_lower = text.lower()
+    
+    # Привітання
+    if any(word in text_lower for word in ['привіт', 'hello', 'вітаю', 'добрий']):
+        return "Привіт! Я помічник ресторану FerrikFoot. Чим можу допомогти? 😊"
+    
+    # Подяка
+    if any(word in text_lower for word in ['дякую', 'спасибі', 'thanks']):
+        return "Будь ласка! Завжди радий допомогти! 🙂"
+    
+    # Питання про їжу
+    if any(word in text_lower for word in ['смачно', 'голодний', 'поїсти', 'їсти']):
+        return "У нас дуже смачна їжа! Подивіться наше меню 🍔"
+    
+    # Загальна відповідь
+    return """
+Не зовсім розумію ваше питання. 
+
+Я можу допомогти з:
+🍔 Замовленням їжі
+📋 Інформацією про ресторан
+📞 Контактами
+🚚 Доставкою
+
+Використовуйте кнопки меню!
+"""
+
+def is_spam_message(text, user_id):
+    """Перевірка на спам"""
+    try:
+        # Базові перевірки на спам
+        if len(text) > 1000:  # Занадто довге повідомлення
+            return True
+            
+        # Занадто багато повторень символів
+        if any(char * 5 in text for char in text):
+            return True
+            
+        # Підозрілі слова
+        spam_words = ['реклама', 'знижка', 'акція', 'купи', 'продам']
+        if sum(word in text.lower() for word in spam_words) >= 2:
+            return True
+            
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking spam: {e}")
         return False
 
-def process_with_ai(chat_id, text):
-    """Асинхронна обробка за допомогою AI"""
+def log_user_interaction(user_id, text, response_type="text"):
+    """Логування взаємодії з користувачем"""
     try:
-        # Отримуємо меню для AI
-        menu_items = get_menu_from_sheet()
-        
-        # Аналізуємо запит
-        ai_result = analyze_user_request_with_gemini(text, menu_items)
-        
-        if not ai_result:
-            fallback_search(chat_id, text, menu_items)
-            return
-        
-        action = ai_result.get("action")
-        
-        if action == "add_to_cart":
-            handle_ai_add_to_cart(chat_id, ai_result)
-        elif action == "question":
-            handle_ai_question(chat_id, ai_result)
-        elif action == "search":
-            handle_ai_search(chat_id, ai_result, menu_items)
-        else:
-            handle_ai_error(chat_id, ai_result)
-        
-        # Додаємо відповідь AI до історії
-        reply = ai_result.get("reply", "")
-        if reply:
-            add_chat_history(chat_id, reply, is_user=False)
-            
-    except Exception as e:
-        logger.error(f"Error in AI processing for {chat_id}: {e}")
-        fallback_search(chat_id, text, get_menu_from_sheet())
-
-def handle_ai_add_to_cart(chat_id, ai_result):
-    """Обробляє додавання товарів до кошика через AI"""
-    try:
-        items_to_add = ai_result.get("items", [])
-        reply = ai_result.get("reply", "Додаю до кошика...")
-        
-        # Відправляємо підтвердження
-        tg_send_message(chat_id, reply)
-        
-        # Додаємо товари
-        added_count = 0
-        for item_data in items_to_add:
-            item_id = item_data.get("id")
-            quantity = item_data.get("quantity", 1)
-            
-            for _ in range(quantity):
-                if add_item_to_cart(chat_id, item_id, quantity=1):
-                    added_count += 1
-        
-        # Показуємо кошик якщо щось додано
-        if added_count > 0:
-            show_cart(chat_id)
-        else:
-            tg_send_message(chat_id, "Не вдалося додати товари. Перевірте наявність в меню.")
-            
-    except Exception as e:
-        logger.error(f"Error handling AI add to cart: {e}")
-        tg_send_message(chat_id, "Помилка при додаванні до кошика.")
-
-def handle_ai_question(chat_id, ai_result):
-    """Обробляє питання/поради від AI"""
-    reply = ai_result.get("reply", "")
-    formatted_reply = format_ai_response(ai_result)
-    
-    # Додаємо швидкі дії якщо це рекомендація
-    keyboard = None
-    if any(word in reply.lower() for word in ["рекомендую", "пораджу", "спробуйте"]):
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🍽️ Переглянути меню", "callback_data": "show_menu"}],
-                [{"text": "💰 Підібрати за бюджетом", "callback_data": "budget_search"}]
-            ]
+        interaction_data = {
+            'user_id': user_id,
+            'message': text[:100],  # Перші 100 символів
+            'response_type': response_type,
+            'timestamp': logging.Formatter().formatTime(logging.LogRecord(
+                'interaction', logging.INFO, '', 0, '', (), None
+            ))
         }
-    
-    tg_send_message(chat_id, formatted_reply, reply_markup=keyboard)
-
-def handle_ai_search(chat_id, ai_result, menu_items):
-    """Обробляє пошукові запити від AI"""
-    query = ai_result.get("query", "").lower()
-    reply = ai_result.get("reply", "Шукаю...")
-    
-    # Відправляємо повідомлення про пошук
-    tg_send_message(chat_id, reply)
-    
-    # Виконуємо пошук
-    found_items = [
-        item for item in menu_items
-        if item.get('active', True) and (
-            query in item.get('name', '').lower() or
-            query in item.get('category', '').lower() or
-            query in item.get('description', '').lower()
-        )
-    ]
-    
-    if found_items:
-        show_search_results(chat_id, found_items, query)
-    else:
-        suggest_alternatives(chat_id, query, menu_items)
-
-def handle_ai_error(chat_id, ai_result):
-    """Обробляє помилки AI"""
-    reply = ai_result.get("reply", "Не зрозумів запит.")
-    
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "🍽️ Показати меню", "callback_data": "show_menu"}],
-            [{"text": "💰 Пошук за бюджетом", "callback_data": "budget_search"}],
-            [{"text": "
+        
+        logger.info(f"User interaction: {json.dumps(interaction_data, ensure_ascii=False)}")
+        
+    except Exception as e:
+        logger.error(f"Error logging interaction: {e}")

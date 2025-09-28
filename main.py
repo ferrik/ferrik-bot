@@ -13,10 +13,6 @@ from models.user import init_db, get_state, set_state, get_cart, set_cart, get_o
 from datetime import datetime
 from werkzeug.exceptions import BadRequest
 
-# Додані імпорти для оператора та адмін-панелі
-# from handlers.operator import handle_operator_command, handle_admin_callback
-# from services.admin_panel import track_user_activity, admin_panel
-
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -113,7 +109,7 @@ def health_check():
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
         # Припускаємо, що init_db має параметр check_only=True для перевірки стану
-        "db_status": "ok" if init_db(check_only=True) else "error", 
+        "db_status": "ok" if init_db() else "error", 
         "sheets_status": "ok" if GSPREAD_CLIENT else "error",
         "menu_cached_items": len(MENU_CACHE),
         "bot_token_present": bool(BOT_TOKEN)
@@ -133,31 +129,23 @@ with app.app_context():
             logger.error("❌ Database initialization failed")
         
         # Підключення до Google Sheets
-        # **ВИДАЛЕНО: global GSPREAD_CLIENT**
         GSPREAD_CLIENT = init_gspread_client()
         if GSPREAD_CLIENT:
             logger.info("✅ Google Sheets connected")
             
             # Завантажуємо меню для кешування
-            # **ВИДАЛЕНО: global MENU_CACHE**
             MENU_CACHE = get_menu_from_sheet(force=True)
             logger.info(f"✅ Menu cached: {len(MENU_CACHE)} items")
         else:
             logger.error("❌ Google Sheets connection failed")
             
-        # Ініціалізація Gemini (для усунення помилки імпорту, якщо вона все ще виникає)
-        try:
-            from services.gemini import init_gemini_client
-            # **ВИДАЛЕНО: global GEMINI_CLIENT**
-            GEMINI_CLIENT = init_gemini_client() 
-            if not GEMINI_CLIENT:
-                logger.warning("⚠️ Gemini client not initialized. AI recommendations will be unavailable.")
-            else:
-                logger.info("✅ Gemini client initialized.")
-        except ImportError as e:
-            logger.error(f"❌ Gemini initialization failed during import. Check 'services/gemini.py' imports: {e}")
-        except Exception as e:
-            logger.error(f"❌ Gemini initialization failed: {e}")
+        # Ініціалізація Gemini
+        from services.gemini import init_gemini_client
+        GEMINI_CLIENT = init_gemini_client() 
+        if not GEMINI_CLIENT:
+            logger.warning("⚠️ Gemini client not initialized. AI recommendations will be unavailable.")
+        else:
+            logger.info("✅ Gemini client initialized.")
 
         logger.info("🎉 FerrikFootBot initialization completed!")
         
@@ -289,4 +277,3 @@ if __name__ == "__main__":
                 logger.info(f"Webhook set response: {response.json()}")
             except Exception as e:
                 logger.error(f"Failed to set webhook: {e}")
-

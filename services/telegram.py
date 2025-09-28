@@ -1,7 +1,3 @@
-"""
-Telegram API service - основний сервіс для роботи з Telegram Bot API
-"""
-
 import requests
 import json
 import logging
@@ -73,8 +69,8 @@ class TelegramAPI:
 telegram_api = TelegramAPI()
 
 # Функції для зворотної сумісності
-def send_message(chat_id, text, keyboard=None, parse_mode="Markdown"):
+def tg_send_message(chat_id, text, keyboard=None, parse_mode="Markdown"):
     return telegram_api.send_message(chat_id, text, keyboard, parse_mode)
 
-def send_photo(chat_id, photo, caption=None, keyboard=None):
+def tg_send_photo(chat_id, photo, caption=None, keyboard=None):
     return telegram_api.send_photo(chat_id, photo, caption, keyboard)

@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ferrik")
 
-# Змінні середовища - ОНОВЛЕННЯ: використовуємо BOT_TOKEN
+# Змінні середовища
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123").strip()
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -38,7 +38,7 @@ OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID", "").strip()
 DEFAULT_CITY = os.environ.get("DEFAULT_CITY", "Kyiv").strip()
 TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Europe/Kiev").strip()
 
-# Глобальні об'єкти (ініціалізація на рівні модуля)
+# Глобальні об'єкти
 MENU_CACHE = {} 
 GSPREAD_CLIENT = None
 GEMINI_CLIENT = None
@@ -108,7 +108,6 @@ def health_check():
     status = {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
-        # Припускаємо, що init_db має параметр check_only=True для перевірки стану
         "db_status": "ok" if init_db() else "error", 
         "sheets_status": "ok" if GSPREAD_CLIENT else "error",
         "menu_cached_items": len(MENU_CACHE),
@@ -267,7 +266,7 @@ if __name__ == "__main__":
         if webhook_url:
             try:
                 response = requests.get(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", # Використовуємо BOT_TOKEN
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
                     params={
                         "url": webhook_url,
                         "secret_token": WEBHOOK_SECRET

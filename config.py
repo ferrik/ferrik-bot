@@ -17,12 +17,12 @@ def load_env_var(name, required=False, default=None):
     return value
 
 BOT_TOKEN = load_env_var("BOT_TOKEN", required=True)
-SPREADSHEET_ID = load_env_var("SPREADSHEET_ID", required=True)
+SPREADSHEET_ID = load_env_var("SPREADSHEET_ID", required=True)  # Синхронізовано з render.yaml
 GOOGLE_CREDENTIALS_JSON = load_env_var("GOOGLE_CREDENTIALS_JSON", required=True)
 CREDS_B64 = load_env_var("CREDS_B64")
 GEMINI_API_KEY = load_env_var("GEMINI_API_KEY", required=True)
 GEMINI_MODEL_NAME = load_env_var("GEMINI_MODEL_NAME", default="gemini-1.5-flash")
-ENABLE_AI_RECOMMENDATIONS = load_env_var("ENABLE_AI_RECOMMENDATIONS", default=True)
+ENABLE_AI_RECOMMENDATIONS = load_env_var("ENABLE_AI_RECOMMENDATIONS", default="true").lower() == "true"
 ERROR_MESSAGES = {
     'ai_unavailable': "AI недоступний",
     'generic': "Помилка"

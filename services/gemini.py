@@ -94,4 +94,3 @@ def get_gemini_recommendation(user_prompt: str, chat_history: list = None) -> st
     except Exception as e:
         logger.error(f"❌ Critical error in get_gemini_recommendation: {e}")
         return ERROR_MESSAGES['generic']
-

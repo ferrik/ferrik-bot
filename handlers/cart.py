@@ -1,12 +1,3 @@
-# handlers/cart.py
-"""
-Обробники корзини — простий варіант, який використовує services.sheets.get_item_by_id
-Функції експортуються у main.py:
-- add_item_to_cart(chat_id, item_id, quantity=1)
-- show_cart(chat_id)
-(адаптуй під твою архітектуру збереження корзини — тут використовуємо простий in-memory fallback)
-"""
-
 import logging
 from typing import Dict, Any
 
@@ -14,19 +5,14 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 from services.sheets import get_item_by_id, get_min_delivery_amount
+from models.user import get_cart, set_cart  # Використовуємо SQLite замість in-memory
 
-# Простий in-memory storage для корзин (в продакшні треба замінити на БД або Redis)
-_CARTS: Dict[str, Dict[str, Any]] = {}
-
-def _get_cart_key(chat_id: str) -> str:
-    return str(chat_id)
-
-def add_item_to_cart(chat_id: str, item_id: str, quantity: int = 1) -> Dict:
+def add_item_to_cart(chat_id: str, user_id: str, item_id: str, quantity: int = 1) -> Dict:
     """
     Додає товар до корзини. Повертає оновлену корзину.
     """
-    if not chat_id:
-        raise ValueError("chat_id is required")
+    if not chat_id or not user_id:
+        raise ValueError("chat_id and user_id are required")
     if not item_id:
         raise ValueError("item_id is required")
 
@@ -35,42 +21,52 @@ def add_item_to_cart(chat_id: str, item_id: str, quantity: int = 1) -> Dict:
         logger.warning("Item with id %s not found", item_id)
         return {"error": "Item not found"}
 
-    key = _get_cart_key(chat_id)
-    cart = _CARTS.setdefault(key, {"items": {}, "total": 0.0})
+    # Отримуємо поточну корзину з БД
+    cart = get_cart(user_id)
+    if not cart:
+        cart = {"items": [], "total": 0.0}
+
     items = cart["items"]
 
-    # Припускаємо, що у item є поле "price"
+    # Шукаємо існуючий item
+    existing_item = next((i for i in items if i['id'] == item_id), None)
     price = float(item.get("price", 0))
-    if item_id in items:
-        items[item_id]["quantity"] += quantity
+
+    if existing_item:
+        existing_item["quantity"] += quantity
     else:
-        items[item_id] = {
+        new_item = {
             "id": item_id,
             "name": item.get("name") or item.get("title") or "Item",
             "price": price,
             "quantity": quantity
         }
+        items.append(new_item)
 
     # Оновлюємо total
-    total = 0.0
-    for it in items.values():
-        total += float(it["price"]) * int(it["quantity"])
+    total = sum(float(it["price"]) * int(it["quantity"]) for it in items)
     cart["total"] = total
+    set_cart(user_id, cart)  # Зберігаємо в БД
 
-    logger.info("Added item %s x%s to cart %s. New total: %s", item_id, quantity, chat_id, total)
+    logger.info("Added item %s x%s to cart %s. New total: %s", item_id, quantity, user_id, total)
     return cart
 
-def show_cart(chat_id: str) -> Dict:
+def show_cart(chat_id: str, user_id: str) -> Dict:
     """
-    Повертає корзину для chat_id у вигляді словника.
+    Повертає корзину для user_id у вигляді словника.
     """
-    key = _get_cart_key(chat_id)
-    cart = _CARTS.get(key)
+    cart = get_cart(user_id)
     if not cart:
-        return {"items": {}, "total": 0.0}
+        cart = {"items": [], "total": 0.0}
+    min_delivery = get_min_delivery_amount()
+    if cart["total"] < min_delivery:
+        message = f"Ваш кошик: {cart['total']:.2f} грн (мінімум для доставки: {min_delivery:.2f} грн)"
+    else:
+        message = f"Ваш кошик: {cart['total']:.2f} грн"
+    # Відправляємо повідомлення (інтеграція з tg_send_message)
+    from services.telegram import tg_send_message
+    tg_send_message(chat_id, message)
     return cart
 
-def clear_cart(chat_id: str) -> None:
-    key = _get_cart_key(chat_id)
-    if key in _CARTS:
-        del _CARTS[key]
+def clear_cart(user_id: str) -> None:
+    set_cart(user_id, {"items": [], "total": 0.0})

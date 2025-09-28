@@ -1,196 +1,132 @@
 import sqlite3
-import json
 import logging
+import json
 from datetime import datetime
 
-# Налаштування логування
-logger = logging.getLogger("models.user")
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# Конфігурація бази даних
-# Припускаємо, що використовується bot_data.db (з config.py, або за замовчуванням)
-DATABASE_URL = 'bot_data.db' 
+DB_PATH = "bot_data.db"
 
-def init_db():
-    """Ініціалізація бази даних та створення таблиць, якщо вони не існують."""
+def init_db(check_only=False):
+    """Ініціалізує базу даних SQLite."""
     try:
-        conn = sqlite3.connect(DATABASE_URL)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
-        # Створення таблиці користувачів (зберігає state, cart, history)
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
+                user_id TEXT PRIMARY KEY,
+                chat_id TEXT,
+                user_name TEXT,
                 state TEXT,
-                cart_json TEXT,
-                chat_history_json TEXT,
-                last_activity TIMESTAMP
+                cart TEXT,
+                chat_history TEXT,
+                created_at TEXT
             )
-        ''')
-        
+        """)
         conn.commit()
         conn.close()
-        logger.info("Database schema initialized.")
+        logger.info("Database initialized successfully")
         return True
     except Exception as e:
-        logger.error(f"Error initializing database: {e}")
+        logger.error(f"Failed to initialize database: {e}")
         return False
 
-def get_or_create_user(user_id, username=None, first_name=None, last_name=None):
-    """Отримати або створити користувача, оновивши його дані."""
+def get_or_create_user(user_id, chat_id, user_name):
+    """Отримує або створює користувача."""
     try:
-        conn = sqlite3.connect(DATABASE_URL)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
-        # Перевірка на існування користувача
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        user_row = cursor.fetchone()
+        user = cursor.fetchone()
         
-        current_time = datetime.now().isoformat()
-
-        if user_row is None:
-            # Створення нового користувача
-            initial_data = {
-                'user_id': user_id,
-                'username': username or '',
-                'first_name': first_name or '',
-                'last_name': last_name or '',
-                'state': 'main',
-                'cart_json': '[]',
-                'chat_history_json': '[]',
-                'last_activity': current_time
-            }
-            cursor.execute('''
-                INSERT INTO users (user_id, username, first_name, last_name, state, cart_json, chat_history_json, last_activity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                initial_data['user_id'], initial_data['username'], initial_data['first_name'], initial_data['last_name'], 
-                initial_data['state'], initial_data['cart_json'], initial_data['chat_history_json'], initial_data['last_activity']
-            ))
-            logger.info(f"Created new user: {user_id}")
+        if not user:
+            cursor.execute("""
+                INSERT INTO users (user_id, chat_id, user_name, state, cart, chat_history, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, chat_id, user_name, "", json.dumps({"items": [], "total": 0.0}), json.dumps([]), datetime.now().isoformat()))
             conn.commit()
-        else:
-            # Оновлення даних та часу активності
-            cursor.execute('''
-                UPDATE users SET last_activity = ?, username = ?, first_name = ?, last_name = ? WHERE user_id = ?
-            ''', (current_time, username or user_row[1], first_name or user_row[2], last_name or user_row[3], user_id))
-            conn.commit()
-
-        # Повторне отримання даних для повернення
-        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        user_data = cursor.fetchone()
+            user = (user_id, chat_id, user_name, "", json.dumps({"items": [], "total": 0.0}), json.dumps([]), datetime.now().isoformat())
         
         conn.close()
-        return user_data
+        return {
+            "user_id": user[0],
+            "chat_id": user[1],
+            "user_name": user[2],
+            "state": user[3],
+            "cart": json.loads(user[4]),
+            "chat_history": json.loads(user[5]),
+            "created_at": user[6]
+        }
     except Exception as e:
-        logger.error(f"Error getting/creating user {user_id}: {e}")
+        logger.error(f"Error in get_or_create_user: {e}")
         return None
 
 def get_state(user_id):
-    """Отримати поточний стан користувача."""
+    """Отримує стан користувача."""
     try:
-        conn = sqlite3.connect(DATABASE_URL)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT state FROM users WHERE user_id = ?", (user_id,))
-        state = cursor.fetchone()
+        result = cursor.fetchone()
         conn.close()
-        return state[0] if state else 'main'
+        return result[0] if result else ""
     except Exception as e:
-        logger.error(f"Error getting state for user {user_id}: {e}")
-        return 'main'
+        logger.error(f"Error in get_state: {e}")
+        return ""
 
 def set_state(user_id, state):
-    """Встановити новий стан користувача."""
+    """Встановлює стан користувача."""
     try:
-        conn = sqlite3.connect(DATABASE_URL)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET state = ? WHERE user_id = ?", (state, user_id))
         conn.commit()
         conn.close()
-        logger.info(f"User {user_id} state set to: {state}")
         return True
     except Exception as e:
-        logger.error(f"Error setting state for user {user_id}: {e}")
+        logger.error(f"Error in set_state: {e}")
         return False
 
 def get_cart(user_id):
-    """Отримати вміст кошика користувача (список об'єктів товарів)."""
+    """Отримує корзину користувача."""
     try:
-        conn = sqlite3.connect(DATABASE_URL)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT cart_json FROM users WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT cart FROM users WHERE user_id = ?", (user_id,))
         result = cursor.fetchone()
         conn.close()
-        if result and result[0]:
-            return json.loads(result[0])
-        return []
+        return json.loads(result[0]) if result else {"items": [], "total": 0.0}
     except Exception as e:
-        logger.error(f"Error getting cart for user {user_id}: {e}")
-        return []
+        logger.error(f"Error in get_cart: {e}")
+        return {"items": [], "total": 0.0}
 
-def set_cart(user_id, cart_items):
-    """Зберегти вміст кошика користувача (список об'єктів товарів)."""
+def set_cart(user_id, cart):
+    """Зберігає корзину користувача."""
     try:
-        cart_json = json.dumps(cart_items)
-        conn = sqlite3.connect(DATABASE_URL)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("UPDATE users SET cart_json = ? WHERE user_id = ?", (cart_json, user_id))
+        cursor.execute("UPDATE users SET cart = ? WHERE user_id = ?", (json.dumps(cart), user_id))
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        logger.error(f"Error setting cart for user {user_id}: {e}")
+        logger.error(f"Error in set_cart: {e}")
         return False
-
-def get_chat_history(user_id):
-    """Отримати історію чату користувача."""
-    try:
-        conn = sqlite3.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute("SELECT chat_history_json FROM users WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        if result and result[0]:
-            return json.loads(result[0])
-        return []
-    except Exception as e:
-        logger.error(f"Error getting chat history for user {user_id}: {e}")
-        return []
 
 def add_chat_history(user_id, role, text):
-    """Додати повідомлення до історії чату користувача."""
+    """Додає повідомлення до історії чату."""
     try:
-        conn = sqlite3.connect(DATABASE_URL)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
-        # 1. Отримати поточну історію
-        cursor.execute("SELECT chat_history_json FROM users WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT chat_history FROM users WHERE user_id = ?", (user_id,))
         result = cursor.fetchone()
-        
-        history = json.loads(result[0]) if result and result[0] else []
-        
-        # 2. Додати нове повідомлення
-        history.append({
-            'role': role,
-            'text': text,
-            'timestamp': datetime.now().isoformat()
-        })
-        
-        # 3. Обмежити історію (наприклад, останні 20 повідомлень)
-        if len(history) > 20:
-            history = history[-20:]
-            
-        history_json = json.dumps(history)
-        
-        # 4. Зберегти оновлену історію
-        cursor.execute("UPDATE users SET chat_history_json = ? WHERE user_id = ?", (history_json, user_id))
+        history = json.loads(result[0]) if result else []
+        history.append({"role": role, "text": text, "timestamp": datetime.now().isoformat()})
+        cursor.execute("UPDATE users SET chat_history = ? WHERE user_id = ?", (json.dumps(history), user_id))
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        logger.error(f"Error adding chat history for user {user_id}: {e}")
+        logger.error(f"Error in add_chat_history: {e}")
         return False
-

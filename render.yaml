@@ -4,14 +4,14 @@ services:
     env: python
     plan: free
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn main:app
+    startCommand: gunicorn main:app --workers 4 --timeout 120 --bind 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
-        value: 3.9.0
-      - key: BOT_TOKEN # Змінено з TELEGRAM_BOT_TOKEN на BOT_TOKEN
+        value: 3.12.3  # Оновлено до актуальної версії
+      - key: BOT_TOKEN
         sync: false
       - key: WEBHOOK_SECRET
-        value: Ferrik123
+        value: Ferrik123  # Змініть на більш безпечний секрет
       - key: GEMINI_API_KEY
         sync: false
       - key: SERVICE_ACCOUNT_KEY_PATH
@@ -22,4 +22,13 @@ services:
         sync: false
       - key: CREDS_B64
         sync: false
-
+      - key: SPREADSHEET_ID
+        sync: false
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: MIN_DELIVERY_AMOUNT
+        value: 300
+      - key: ENABLE_AI_RECOMMENDATIONS
+        value: true
+      - key: GEMINI_MODEL_NAME
+        value: gemini-1.5-flash

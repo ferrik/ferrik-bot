@@ -1,13 +1,3 @@
-# services/sheets.py
-"""
-Сервіс для роботи з Google Sheets.
-Функції:
-- init_sheet_client() - ініціалізація клієнта
-- get_item_by_id(item_id) - повертає словник рядка товару по ID (ключ стовпця: "id" або інший)
-- get_min_delivery_amount() - повертає мінімальну суму доставки (fallback з ENV або клітинки)
-- get_all_records() - повертає всі записи як list[dict]
-"""
-
 import logging
 from typing import Optional, List, Dict
 
@@ -25,7 +15,7 @@ from config import SPREADSHEET_ID, get_google_creds_dict, MIN_DELIVERY_AMOUNT
 _gc = None
 _sheet = None
 
-def init_sheet_client(force: bool = False):
+def init_gspread_client(force: bool = False):
     """
     Ініціалізувати клієнт gspread та встановити об'єкт sheet у _sheet.
     Якщо SPREADSHEET_ID або креденшали відсутні, повертає None.
@@ -40,7 +30,7 @@ def init_sheet_client(force: bool = False):
         return None
 
     if not SPREADSHEET_ID:
-        logger.warning("SPREADSHEET_ID не налаштований. init_sheet_client повертає None.")
+        logger.warning("SPREADSHEET_ID не задано. init_sheet_client повертає None.")
         return None
 
     try:
@@ -60,7 +50,7 @@ def get_all_records() -> List[Dict]:
     Повертає всі записи з листа у вигляді list[dict].
     Повертає порожній список, якщо неможливо зчитати.
     """
-    sh = init_sheet_client()
+    sh = init_gspread_client()
     if not sh:
         return []
     try:
@@ -105,7 +95,7 @@ def get_min_delivery_amount(default_from_env: Optional[str] = MIN_DELIVERY_AMOUN
             logger.warning("MIN_DELIVERY_AMOUNT з ENV не є числом: %s", default_from_env)
 
     # 2) Google Sheet
-    sh = init_sheet_client()
+    sh = init_gspread_client()
     if sh:
         try:
             r, c = fallback_cell
@@ -113,6 +103,35 @@ def get_min_delivery_amount(default_from_env: Optional[str] = MIN_DELIVERY_AMOUN
             if value:
                 return float(value)
         except Exception as e:
-            logger.exception("Не вдалося зчитати мінімальну сумму з клітинки: %s", e)
+            logger.exception("Не вдалося зчитати мінімальну сумму з клітинки: {e}")
 
     return 0.0
+
+def get_menu_from_sheet(force=False):
+    """Завантажує меню з Google Sheets"""
+    sh = init_gspread_client(force=force)
+    if not sh:
+        return []
+    try:
+        # Припускаємо, що меню в листі 'Menu'
+        ws = sh.get_worksheet(0)  # або sh.worksheet('Menu')
+        records = ws.get_all_records()
+        menu = [item for item in records if item.get('active', True)]
+        return menu
+    except Exception as e:
+        logger.error(f"Error fetching menu: {e}")
+        return []
+
+def save_order_to_sheets(order_data):
+    """Зберігає замовлення в Google Sheets"""
+    sh = init_gspread_client()
+    if not sh:
+        return None
+    try:
+        ws = sh.worksheet("Замовлення")  # Припускаємо лист "Замовлення"
+        row = [datetime.now().strftime('%Y-%m-%d %H:%M'), order_data['chat_id'], order_data['total'], 'Нове']  # Приклад полів
+        ws.append_row(row)
+        return len(ws.get_all_records())  # Повертає ID як номер рядка
+    except Exception as e:
+        logger.error(f"Error saving order: {e}")
+        return None

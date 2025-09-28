@@ -6,23 +6,19 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: gunicorn main:app --workers 4 --timeout 120 --bind 0.0.0.0:$PORT
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.3  # Оновлено до актуальної версії
       - key: BOT_TOKEN
         sync: false
       - key: WEBHOOK_SECRET
-        value: Ferrik123  # Змініть на більш безпечний секрет
+        value: Ferrik123  # Змініть на унікальний секрет
       - key: GEMINI_API_KEY
         sync: false
       - key: SERVICE_ACCOUNT_KEY_PATH
         value: /tmp/creds.json
-      - key: GOOGLE_SHEET_ID
+      - key: SPREADSHEET_ID  # Синхронізовано з кодом (замість GOOGLE_SHEET_ID)
         value: 1Uz8T1E3_8eq8yt4SMh6Fd_KvGpW9Fe0PFI-mtcqSDJI
       - key: OPERATOR_CHAT_ID
         sync: false
       - key: CREDS_B64
-        sync: false
-      - key: SPREADSHEET_ID
         sync: false
       - key: GOOGLE_CREDENTIALS_JSON
         sync: false
@@ -32,3 +28,4 @@ services:
         value: true
       - key: GEMINI_MODEL_NAME
         value: gemini-1.5-flash
+      # Видалено PYTHON_VERSION — використовуйте runtime.txt для версії Python

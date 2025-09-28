@@ -1,56 +1,48 @@
-# config.py
 import os
 import base64
 import json
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Telegram token (обов'язково)
-BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("BOT_TOKEN (або TELEGRAM_BOT_TOKEN) не заданий у змінних середовища.")
-    # не кидаємо помилку відразу — дозволяємо стартувати у dev, але попереджаємо
-    # якщо хочеш — розкоментуй наступний рядок, щоб падало одразу:
-    # raise ValueError("BOT_TOKEN environment variable is required")
+def load_env_var(name, required=False, default=None):
+    value = os.getenv(name, default)
+    if required and not value:
+        logger.error(f"{name} environment variable is required")
+        raise ValueError(f"{name} environment variable is required")
+    return value
 
-# Google Sheets
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-if not SPREADSHEET_ID:
-    logger.warning("SPREADSHEET_ID не задано. Функції, що працюють з Sheets, можуть падати.")
+BOT_TOKEN = load_env_var("BOT_TOKEN", required=True)
+SPREADSHEET_ID = load_env_var("SPREADSHEET_ID", required=True)
+GOOGLE_CREDENTIALS_JSON = load_env_var("GOOGLE_CREDENTIALS_JSON", required=True)
+CREDS_B64 = load_env_var("CREDS_B64")
+GEMINI_API_KEY = load_env_var("GEMINI_API_KEY", required=True)
+GEMINI_MODEL_NAME = load_env_var("GEMINI_MODEL_NAME", default="gemini-1.5-flash")
+ENABLE_AI_RECOMMENDATIONS = load_env_var("ENABLE_AI_RECOMMENDATIONS", default=True)
+ERROR_MESSAGES = {
+    'ai_unavailable': "AI недоступний",
+    'generic': "Помилка"
+}
+ADMIN_CHAT_ID = load_env_var("ADMIN_CHAT_ID")
+MIN_DELIVERY_AMOUNT = load_env_var("MIN_DELIVERY_AMOUNT", default="300")
 
-# Декілька форматів зберігання Google creds:
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # повний JSON як str
-CREDS_B64 = os.getenv("CREDS_B64")  # base64-encoded creds.json
-
-# Якщо є CREDS_B64 — декодуємо в JSON-рядок
 if not GOOGLE_CREDENTIALS_JSON and CREDS_B64:
     try:
         GOOGLE_CREDENTIALS_JSON = base64.b64decode(CREDS_B64).decode("utf-8")
-        logger.info("CREDS_B64 прочитано і декодовано у GOOGLE_CREDENTIALS_JSON.")
+        logger.info("CREDS_B64 decoded")
     except Exception as e:
-        logger.exception("Не вдалося декодувати CREDS_B64: %s", e)
-
-if not GOOGLE_CREDENTIALS_JSON:
-    logger.warning("Немає GOOGLE_CREDENTIALS_JSON або CREDS_B64. Доступ до Google Sheets буде неможливим.")
-
-# Додаткові змінні (опціонально)
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # наприклад для логів/повідомлень адміну
-MIN_DELIVERY_AMOUNT = os.getenv("MIN_DELIVERY_AMOUNT")  # можна зчитувати з env як fallback
-
-# Типові версії/флаги
-ENV = os.getenv("ENV", "production")
+        logger.error(f"Failed to decode CREDS_B64: {e}")
+        raise ValueError("Invalid CREDS_B64")
 
 def get_google_creds_dict():
-    """
-    Повертає dict з креденшелів для gspread.service_account_from_dict
-    або None, якщо немає налаштованих креденшелів.
-    """
     if not GOOGLE_CREDENTIALS_JSON:
         return None
     try:
         return json.loads(GOOGLE_CREDENTIALS_JSON)
     except Exception as e:
-        logger.exception("Помилка при парсингу GOOGLE_CREDENTIALS_JSON: %s", e)
+        logger.error(f"Failed to parse GOOGLE_CREDENTIALS_JSON: {e}")
         return None

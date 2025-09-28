@@ -5,8 +5,9 @@ import re
 from flask import Flask, request, jsonify
 import requests
 from handlers.cart import show_cart, add_item_to_cart
-from handlers.order import start_checkout_process
-from handlers.geo import check_delivery_availability
+# Закоментуємо тимчасово, доки файли не будуть додані
+# from handlers.order import start_checkout_process
+# from handlers.geo import check_delivery_availability
 from services.sheets import init_gspread_client, get_menu_from_sheet, get_item_by_id
 from services.gemini import get_gemini_recommendation
 from models.user import init_db, get_state, set_state, get_cart, set_cart, get_or_create_user, add_chat_history
@@ -33,7 +34,6 @@ logger = logging.getLogger("ferrik")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123").strip()
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
 OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID", "").strip()
 DEFAULT_CITY = os.environ.get("DEFAULT_CITY", "Kyiv").strip()
 TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Europe/Kiev").strip()
@@ -136,7 +136,7 @@ with app.app_context():
             MENU_CACHE = get_menu_from_sheet(force=True)
             logger.info(f"✅ Menu cached: {len(MENU_CACHE)} items")
         else:
-            logger.error("❌ Google Sheets connection failed")
+            logger.warning("⚠️ Google Sheets connection not initialized. Some features may be unavailable.")
             
         # Ініціалізація Gemini
         from services.gemini import init_gemini_client
@@ -170,7 +170,6 @@ def telegram_webhook():
             user_id = update["message"]["from"]["id"]
             user_name = update["message"]["from"].get("first_name", "")
             
-            from models.user import get_or_create_user, add_chat_history
             user = get_or_create_user(user_id, chat_id, user_name)
             if 'text' in update['message']:
                 add_chat_history(user_id, 'user', update['message']['text'])
@@ -184,11 +183,11 @@ def telegram_webhook():
             elif text == "/menu":
                 tg_send_message(chat_id, "Ось наше **Меню**! Виберіть категорію.")
             elif text == "/cart":
-                from handlers.cart import show_cart
                 show_cart(chat_id, user_id)
             elif text == "/checkout":
-                from handlers.order import start_checkout_process
-                start_checkout_process(chat_id, user_id)
+                # Закоментуємо, доки handlers.order не буде додано
+                # start_checkout_process(chat_id, user_id)
+                tg_send_message(chat_id, "Оформлення замовлення тимчасово недоступне.")
             elif text == "/contacts":
                 contacts_text = """
 📞 **Контакти**
@@ -199,9 +198,10 @@ def telegram_webhook():
 """
                 tg_send_message(chat_id, contacts_text)
             else:
-                from handlers.message_processor import process_text_message
-                # Використовуємо глобальні змінні
-                process_text_message(chat_id, user_id, user_name, text, MENU_CACHE, GEMINI_CLIENT)
+                # Закоментуємо, доки handlers.message_processor не буде додано
+                # from handlers.message_processor import process_text_message
+                # process_text_message(chat_id, user_id, user_name, text, MENU_CACHE, GEMINI_CLIENT)
+                tg_send_message(chat_id, "Вибачте, я можу допомогти лише з питаннями щодо нашого меню. Чим можу вас почастувати?")
 
         elif "callback_query" in update:
             # Обробка натискань inline кнопок
@@ -214,13 +214,12 @@ def telegram_webhook():
             # Обробка кнопок
             if data.startswith("add_"):
                 item_id = data.split("_")[1]
-                from handlers.cart import add_item_to_cart
                 add_item_to_cart(chat_id, user_id, item_id)
                 tg_answer_callback(callback_id, "Товар додано до кошика!")
             elif data == "checkout":
-                from handlers.order import start_checkout_process
-                start_checkout_process(chat_id, user_id)
-                tg_answer_callback(callback_id, "Починаємо оформлення замовлення")
+                # Закоментуємо, доки handlers.order не буде додано
+                # start_checkout_process(chat_id, user_id)
+                tg_answer_callback(callback_id, "Оформлення замовлення тимчасово недоступне.")
             else:
                 tg_answer_callback(callback_id, "Невідома дія.")
         
@@ -241,7 +240,6 @@ def set_webhook():
         if not webhook_url:
             return jsonify({"ok": False, "error": "WEBHOOK_URL environment variable is missing"}), 500
 
-        # Використовуємо BOT_TOKEN
         response = requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", 
             params={
@@ -261,7 +259,6 @@ if __name__ == "__main__":
     if debug_mode:
         app.run(host="0.0.0.0", port=port, debug=True)
     else:
-        # Установка вебхука при запуску в production
         webhook_url = os.environ.get("WEBHOOK_URL", "")
         if webhook_url:
             try:

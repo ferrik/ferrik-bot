@@ -12,5 +12,4 @@ google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 python-dotenv==1.0.0
-sqlite3  # Built-in, але для ясності
-cachetools==5.5.0  # Для кешу
+cachetools==5.5.0

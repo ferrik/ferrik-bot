@@ -1,17 +1,14 @@
 import os
 import logging
 import json
-from google import genai
-from google.generativeai.errors import APIError
+import google.generativeai as genai  # Виправлено імпорт
 from config import GEMINI_API_KEY, GEMINI_MODEL_NAME, ENABLE_AI_RECOMMENDATIONS, ERROR_MESSAGES
-# Припускаємо, що get_menu_from_sheet знаходиться в services/sheets.py
 from services.sheets import get_menu_from_sheet 
 
 logger = logging.getLogger("ferrik")
 client = None
 
 # --- Configuration for System Instruction ---
-# Це інструкції для AI-бота, які ви були вказані у файлі 23.09 ("варіант 2")
 SYSTEM_INSTRUCTION = (
     "Ти є чат-ботом для кафе. Твоє ім'я FerrikFootBot. "
     "Твоя головна мета — допомагати клієнтам, надаючи інформацію про меню та відповідаючи на їхні запитання. "
@@ -31,11 +28,13 @@ def init_gemini_client():
     """Ініціалізація клієнта Gemini API."""
     global client
     if not ENABLE_AI_RECOMMENDATIONS:
+        logger.warning("AI recommendations disabled")
         return False
         
     if client is None and GEMINI_API_KEY:
         try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
+            genai.configure(api_key=GEMINI_API_KEY)  # Налаштування API ключа
+            client = genai  # Використовуємо модуль як клієнт
             logger.info(f"✅ Gemini client initialized. Using model: {GEMINI_MODEL_NAME}")
             return True
         except Exception as e:
@@ -74,23 +73,21 @@ def get_gemini_recommendation(user_prompt: str, chat_history: list = None) -> st
         )
         
         # Налаштування генерації
-        config = genai.types.GenerateContentConfig(
-            temperature=0.7 
+        model = client.GenerativeModel(
+            model_name=GEMINI_MODEL_NAME,
+            system_instruction=SYSTEM_INSTRUCTION
         )
-
-        # Виклик API з коректною назвою моделі (gemini-2.5-flash)
-        response = client.models.generate_content(
-            model=GEMINI_MODEL_NAME, 
-            contents=full_prompt, 
-            system_instruction=SYSTEM_INSTRUCTION,
-            config=config
+        
+        # Виклик API
+        response = model.generate_content(
+            contents=full_prompt,
+            generation_config={
+                "temperature": 0.7
+            }
         )
 
         return response.text
 
-    except APIError as e:
-        logger.error(f"❌ Error in get_gemini_recommendation (Gemini API) - Model: {GEMINI_MODEL_NAME}: {e}")
-        return ERROR_MESSAGES['ai_unavailable']
     except Exception as e:
-        logger.error(f"❌ Critical error in get_gemini_recommendation: {e}")
-        return ERROR_MESSAGES['generic']
+        logger.error(f"❌ Error in get_gemini_recommendation: {e}")
+        return ERROR_MESSAGES['ai_unavailable']

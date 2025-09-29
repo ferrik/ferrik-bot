@@ -35,6 +35,7 @@ def get_menu_from_sheet():
             logger.error("Cannot fetch menu: Google Sheets client not initialized")
             return {}
         
+        logger.info(f"Attempting to access spreadsheet with ID: {SPREADSHEET_ID}")
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         try:
             sheet = spreadsheet.worksheet("Меню")
@@ -70,7 +71,10 @@ def get_menu_from_sheet():
         logger.info(f"Fetched {len(menu)} active menu items from Google Sheets")
         return menu
     except gspread.exceptions.APIError as e:
-        logger.error(f"Google Sheets API error: {str(e)}")
+        logger.error(f"Google Sheets API error: {str(e)} (HTTP {e.response.status_code if e.response else 'unknown'})")
+        return {}
+    except gspread.exceptions.SpreadsheetNotFound:
+        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible")
         return {}
     except Exception as e:
         logger.error(f"Error fetching menu from Google Sheets: {str(e)}")
@@ -93,6 +97,7 @@ def get_config():
             logger.error("Cannot fetch config: Google Sheets client not initialized")
             return {}
         
+        logger.info(f"Attempting to access spreadsheet with ID: {SPREADSHEET_ID}")
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         try:
             sheet = spreadsheet.worksheet("Конфіг")
@@ -119,7 +124,10 @@ def get_config():
         logger.info(f"Fetched {len(config)} config entries from Google Sheets")
         return config
     except gspread.exceptions.APIError as e:
-        logger.error(f"Google Sheets API error: {str(e)}")
+        logger.error(f"Google Sheets API error: {str(e)} (HTTP {e.response.status_code if e.response else 'unknown'})")
+        return {}
+    except gspread.exceptions.SpreadsheetNotFound:
+        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible")
         return {}
     except Exception as e:
         logger.error(f"Error fetching config from Google Sheets: {str(e)}")
@@ -133,6 +141,7 @@ def save_order(order_data: dict):
             logger.error("Cannot save order: Google Sheets client not initialized")
             return False
         
+        logger.info(f"Attempting to access spreadsheet with ID: {SPREADSHEET_ID}")
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         try:
             sheet = spreadsheet.worksheet("Замовлення")
@@ -162,7 +171,10 @@ def save_order(order_data: dict):
         logger.info(f"Saved order {order_data.get('order_id')} to Google Sheets")
         return True
     except gspread.exceptions.APIError as e:
-        logger.error(f"Google Sheets API error when saving order: {str(e)}")
+        logger.error(f"Google Sheets API error when saving order: {str(e)} (HTTP {e.response.status_code if e.response else 'unknown'})")
+        return False
+    except gspread.exceptions.SpreadsheetNotFound:
+        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible")
         return False
     except Exception as e:
         logger.error(f"Error saving order to Google Sheets: {str(e)}")

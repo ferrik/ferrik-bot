@@ -28,4 +28,4 @@ services:
         value: true
       - key: GEMINI_MODEL_NAME
         value: gemini-1.5-flash
-      # Видалено PYTHON_VERSION, щоб використовувати runtime.txt (Python 3.12.3)
+      # Видалено PYTHON_VERSION, щоб використовувати runtime.txt (Python 3.12.3) 

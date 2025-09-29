@@ -147,7 +147,7 @@ with app.app_context():
             logger.info("✅ Google Sheets connected")
             
             # Завантажуємо меню для кешування
-            MENU_CACHE = get_menu_from_sheet(cache=True)
+            MENU_CACHE = get_menu_from_sheet()  # Видалено параметр cache
             logger.info(f"✅ Menu cached: {len(MENU_CACHE)} items")
             
             # Завантажуємо конфігурацію

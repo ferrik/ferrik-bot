@@ -114,6 +114,7 @@ def is_restaurant_open():
         break  # Беремо перший запис конфігурації
     
     current_hour = datetime.now().hour if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME)).hour
+    logger.info(f"Checking restaurant hours: open={open_hour}, close={close_hour}, current={current_hour}")
     return open_hour <= current_hour < close_hour
 
 # Health check endpoint
@@ -123,12 +124,22 @@ def health_check():
     status = {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
-        "db_status": "ok" if init_db() else "error", 
+        "db_status": "ok" if init_db() else "error",
         "sheets_status": "ok" if GSPREAD_CLIENT else "error",
         "menu_cached_items": len(MENU_CACHE),
-        "bot_token_present": bool(BOT_TOKEN)
+        "config_entries": len(CONFIG),
+        "bot_token_present": bool(BOT_TOKEN),
+        "gemini_client_status": "ok" if GEMINI_CLIENT else "error"
     }
+    logger.info(f"Health check: {status}")
     return jsonify(status)
+
+# Keep-alive endpoint
+@app.route("/keep-alive", methods=["GET"])
+def keep_alive():
+    """Ендпоінт для перевірки доступності сервісу."""
+    logger.info("Received keep-alive request")
+    return jsonify({"status": "ok", "message": "Service is running", "timestamp": datetime.now().isoformat()})
 
 # Ініціалізація додатку
 with app.app_context():
@@ -147,20 +158,20 @@ with app.app_context():
             logger.info("✅ Google Sheets connected")
             
             # Завантажуємо меню для кешування
-            MENU_CACHE = get_menu_from_sheet()  # Видалено параметр cache
+            MENU_CACHE = get_menu_from_sheet()
             logger.info(f"✅ Menu cached: {len(MENU_CACHE)} items")
             
             # Завантажуємо конфігурацію
             CONFIG = get_config()
             logger.info(f"✅ Config loaded: {len(CONFIG)} entries")
         else:
-            logger.warning("⚠️ Google Sheets connection not initialized. Some features may be unavailable.")
+            logger.error("❌ Google Sheets connection not initialized. Some features may be unavailable.")
             
         # Ініціалізація Gemini
         from services.gemini import init_gemini_client
-        GEMINI_CLIENT = init_gemini_client() 
+        GEMINI_CLIENT = init_gemini_client()
         if not GEMINI_CLIENT:
-            logger.warning("⚠️ Gemini client not initialized. AI recommendations will be unavailable.")
+            logger.error("❌ Gemini client not initialized. AI recommendations will be unavailable.")
         else:
             logger.info("✅ Gemini client initialized.")
 
@@ -168,16 +179,19 @@ with app.app_context():
         
     except Exception as e:
         logger.exception(f"❌ Critical startup error: {e}")
+        raise  # Піднімаємо помилку для Gunicorn
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
     """Основний обробник для Telegram вебхуків."""
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        logger.error("Invalid secret token received")
         return jsonify({"status": "error", "message": "Invalid secret token"}), 403
 
     try:
         update = request.get_json(force=True)
         if not update:
+            logger.info("Received empty update")
             return jsonify({"status": "ok"})
 
         logger.info(f"Received update: {update.keys()}")
@@ -193,16 +207,21 @@ def telegram_webhook():
                 add_chat_history(user_id, 'user', update['message']['text'])
                 
             text = update["message"]["text"]
+            logger.info(f"Processing message from user {user_id}: {text}")
             
             # Обробка команд
             if text == "/start":
                 greeting = generate_personalized_greeting(user_name)
-                tg_send_message(chat_id, greeting) 
+                tg_send_message(chat_id, greeting)
             elif text == "/menu":
                 menu_text = "Ось наше **Меню**! Виберіть категорію:\n"
                 categories = set(item["category"] for item in MENU_CACHE.values())
-                for category in sorted(categories):
-                    menu_text += f"- {category}\n"
+                if not categories:
+                    logger.warning("No categories found in menu cache")
+                    menu_text = "На жаль, меню порожнє. Спробуйте пізніше."
+                else:
+                    for category in sorted(categories):
+                        menu_text += f"- {category}\n"
                 tg_send_message(chat_id, menu_text)
             elif text == "/cart":
                 show_cart(chat_id, user_id)
@@ -228,6 +247,7 @@ def telegram_webhook():
             user_id = callback_query["from"]["id"]
             data = callback_query["data"]
             callback_id = callback_query["id"]
+            logger.info(f"Processing callback query from user {user_id}: {data}")
 
             # Обробка кнопок
             if data.startswith("add_"):
@@ -255,18 +275,21 @@ def set_webhook():
     try:
         webhook_url = os.environ.get("WEBHOOK_URL")
         if not webhook_url:
+            logger.error("WEBHOOK_URL environment variable is missing")
             return jsonify({"ok": False, "error": "WEBHOOK_URL environment variable is missing"}), 500
 
         response = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", 
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
             params={
                 "url": webhook_url,
                 "secret_token": WEBHOOK_SECRET
             },
             timeout=10
         )
+        logger.info(f"Webhook set response: {response.json()}")
         return jsonify(response.json())
     except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 if __name__ == "__main__":

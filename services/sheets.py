@@ -39,8 +39,8 @@ def get_menu_from_sheet():
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         try:
             sheet = spreadsheet.worksheet("Меню")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.error(f"Worksheet 'Меню' not found in spreadsheet {SPREADSHEET_ID}")
+        except gspread.exceptions.WorksheetNotFound as e:
+            logger.error(f"Worksheet 'Меню' not found in spreadsheet {SPREADSHEET_ID}: {str(e)}")
             return {}
         
         records = sheet.get_all_records()
@@ -73,8 +73,8 @@ def get_menu_from_sheet():
     except gspread.exceptions.APIError as e:
         logger.error(f"Google Sheets API error: {str(e)} (HTTP {e.response.status_code if e.response else 'unknown'})")
         return {}
-    except gspread.exceptions.SpreadsheetNotFound:
-        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible")
+    except gspread.exceptions.SpreadsheetNotFound as e:
+        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible: {str(e)}")
         return {}
     except Exception as e:
         logger.error(f"Error fetching menu from Google Sheets: {str(e)}")
@@ -101,8 +101,8 @@ def get_config():
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         try:
             sheet = spreadsheet.worksheet("Конфіг")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.error(f"Worksheet 'Конфіг' not found in spreadsheet {SPREADSHEET_ID}")
+        except gspread.exceptions.WorksheetNotFound as e:
+            logger.error(f"Worksheet 'Конфіг' not found in spreadsheet {SPREADSHEET_ID}: {str(e)}")
             return {}
         
         records = sheet.get_all_records()
@@ -126,8 +126,8 @@ def get_config():
     except gspread.exceptions.APIError as e:
         logger.error(f"Google Sheets API error: {str(e)} (HTTP {e.response.status_code if e.response else 'unknown'})")
         return {}
-    except gspread.exceptions.SpreadsheetNotFound:
-        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible")
+    except gspread.exceptions.SpreadsheetNotFound as e:
+        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible: {str(e)}")
         return {}
     except Exception as e:
         logger.error(f"Error fetching config from Google Sheets: {str(e)}")
@@ -145,8 +145,8 @@ def save_order(order_data: dict):
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         try:
             sheet = spreadsheet.worksheet("Замовлення")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.error(f"Worksheet 'Замовлення' not found in spreadsheet {SPREADSHEET_ID}")
+        except gspread.exceptions.WorksheetNotFound as e:
+            logger.error(f"Worksheet 'Замовлення' not found in spreadsheet {SPREADSHEET_ID}: {str(e)}")
             return False
         
         row = [
@@ -173,9 +173,9 @@ def save_order(order_data: dict):
     except gspread.exceptions.APIError as e:
         logger.error(f"Google Sheets API error when saving order: {str(e)} (HTTP {e.response.status_code if e.response else 'unknown'})")
         return False
-    except gspread.exceptions.SpreadsheetNotFound:
-        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible")
+    except gspread.exceptions.SpreadsheetNotFound as e:
+        logger.error(f"Spreadsheet with ID {SPREADSHEET_ID} not found or inaccessible: {str(e)}")
         return False
     except Exception as e:
         logger.error(f"Error saving order to Google Sheets: {str(e)}")
-        return False 
+        return False

@@ -1,275 +1,229 @@
 import os
 import logging
-import json
-import re
 from flask import Flask, request, jsonify
-import requests
-from handlers.cart import show_cart, add_item_to_cart
-# Закоментуємо тимчасово, доки файли не будуть додані
-# from handlers.order import start_checkout_process
-# from handlers.geo import check_delivery_availability
-from services.sheets import init_gspread_client, get_menu_from_sheet, get_item_by_id
-from services.gemini import get_gemini_recommendation
-from models.user import init_db, get_state, set_state, get_cart, set_cart, get_or_create_user, add_chat_history
 from datetime import datetime
-from werkzeug.exceptions import BadRequest
 
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    logging.warning("zoneinfo not found. Using naive datetime.")
-    ZoneInfo = None
-
-app = Flask(__name__)
-
-# Налаштування логів
+# Ініціалізація логування
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler('bot.log')]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("ferrik")
+logger = logging.getLogger('ferrik')
 
-# Змінні середовища
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "Ferrik123").strip()
-API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID", "").strip()
-DEFAULT_CITY = os.environ.get("DEFAULT_CITY", "Kyiv").strip()
-TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Europe/Kiev").strip()
+# Ініціалізація Flask
+app = Flask(__name__)
 
-# Глобальні об'єкти
-MENU_CACHE = {} 
-GSPREAD_CLIENT = None
-GEMINI_CLIENT = None
+# Імпорт сервісів та обробників
+try:
+    from services.sheets import init_gspread_client, is_sheets_connected
+    from services.gemini import init_gemini_client, is_gemini_connected
+    from handlers.commands import handle_start, handle_help, handle_menu, handle_order
+    from handlers.messages import handle_text_message
+except ImportError as e:
+    logger.error(f"❌ Помилка імпорту модулів: {e}")
+    raise
 
-def tg_send_message(chat_id, text, keyboard=None, parse_mode="Markdown"):
-    """Надсилає повідомлення через Telegram API."""
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN not set. Cannot send message.")
-        return
+# Конфігурація
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://ferrik-bot-zvev.onrender.com')
+
+if not TELEGRAM_BOT_TOKEN:
+    logger.error("❌ TELEGRAM_BOT_TOKEN не знайдено!")
+    raise ValueError("TELEGRAM_BOT_TOKEN is required")
+
+
+# Ініціалізація сервісів при запуску
+def init_services():
+    """Ініціалізує всі сервіси"""
+    logger.info("🚀 Ініціалізація FerrikFootBot...")
     
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    # Google Sheets
+    sheets_ok = init_gspread_client()
+    if sheets_ok:
+        logger.info("✅ Google Sheets підключено")
+    else:
+        logger.warning("⚠️ Google Sheets не підключено. Деякі функції будуть недоступні.")
+    
+    # Gemini AI
+    gemini_ok = init_gemini_client()
+    if gemini_ok:
+        logger.info("✅ Gemini AI підключено")
+    else:
+        logger.warning("⚠️ Gemini AI не підключено")
+    
+    logger.info("🎉 FerrikFootBot готовий до роботи!")
+    return sheets_ok, gemini_ok
+
+
+# Ініціалізуємо сервіси
+init_services()
+
+
+# ============= ROUTES =============
+
+@app.route('/')
+def home():
+    """Головна сторінка - показує статус бота"""
+    return jsonify({
+        "status": "running",
+        "bot": "FerrikFootBot",
+        "version": "1.0",
+        "services": {
+            "google_sheets": is_sheets_connected(),
+            "gemini_ai": is_gemini_connected()
+        },
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+@app.route('/health')
+def health():
+    """Health check для Render"""
+    sheets_status = is_sheets_connected()
+    gemini_status = is_gemini_connected()
+    
+    status_code = 200 if (sheets_status or gemini_status) else 503
+    
+    return jsonify({
+        "status": "healthy" if status_code == 200 else "degraded",
+        "services": {
+            "google_sheets": sheets_status,
+            "gemini_ai": gemini_status
+        }
+    }), status_code
+
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """
+    Обробник webhook від Telegram
+    """
+    try:
+        update = request.get_json()
+        
+        if not update:
+            logger.warning("⚠️ Отримано порожній update")
+            return jsonify({"ok": True}), 200
+        
+        logger.info(f"📨 Received update: {update.keys()}")
+        
+        # Обробка різних типів оновлень
+        if 'message' in update:
+            handle_message(update['message'])
+        elif 'callback_query' in update:
+            handle_callback_query(update['callback_query'])
+        else:
+            logger.warning(f"⚠️ Невідомий тип update: {update.keys()}")
+        
+        return jsonify({"ok": True}), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Помилка обробки webhook: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def handle_message(message):
+    """Обробляє вхідне повідомлення"""
+    try:
+        chat_id = message.get('chat', {}).get('id')
+        text = message.get('text', '')
+        user = message.get('from', {})
+        
+        logger.info(f"👤 Message from {user.get('username', 'unknown')}: {text}")
+        
+        # Обробка команд
+        if text.startswith('/'):
+            handle_command(chat_id, text, user)
+        else:
+            # Обробка звичайних повідомлень (через AI)
+            handle_text_message(chat_id, text, user)
+            
+    except Exception as e:
+        logger.error(f"❌ Помилка обробки повідомлення: {e}", exc_info=True)
+
+
+def handle_command(chat_id, command, user):
+    """Розподіляє команди по обробникам"""
+    try:
+        cmd = command.split()[0].lower()
+        
+        handlers = {
+            '/start': handle_start,
+            '/help': handle_help,
+            '/menu': handle_menu,
+            '/order': handle_order
+        }
+        
+        handler = handlers.get(cmd)
+        if handler:
+            handler(chat_id, user)
+        else:
+            send_message(chat_id, f"❓ Невідома команда: {cmd}\nВикористайте /help")
+            
+    except Exception as e:
+        logger.error(f"❌ Помилка обробки команди: {e}", exc_info=True)
+        send_message(chat_id, "⚠️ Виникла помилка при обробці команди")
+
+
+def handle_callback_query(callback_query):
+    """Обробляє callback від inline кнопок"""
+    try:
+        callback_id = callback_query.get('id')
+        chat_id = callback_query.get('message', {}).get('chat', {}).get('id')
+        data = callback_query.get('data')
+        
+        logger.info(f"🔘 Callback: {data}")
+        
+        # Тут додайте логіку обробки callback
+        # Наприклад, вибір страв з меню
+        
+        # Відповідь на callback
+        answer_callback_query(callback_id, "✅ Прийнято!")
+        
+    except Exception as e:
+        logger.error(f"❌ Помилка обробки callback: {e}", exc_info=True)
+
+
+def send_message(chat_id, text, reply_markup=None):
+    """Відправляє повідомлення в Telegram"""
+    import requests
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True
+        "parse_mode": "HTML"
     }
     
-    if keyboard:
-        payload["reply_markup"] = json.dumps(keyboard)
-        
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    
     try:
-        response = requests.post(url, data=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error sending message to {chat_id}: {e}")
+    except Exception as e:
+        logger.error(f"❌ Помилка відправки повідомлення: {e}")
         return None
 
-def tg_answer_callback(callback_id, text, show_alert=False):
-    """Надсилає відповідь на callback запит."""
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN not set. Cannot answer callback.")
-        return
-        
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+
+def answer_callback_query(callback_id, text):
+    """Відповідає на callback query"""
+    import requests
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
     payload = {
         "callback_query_id": callback_id,
-        "text": text,
-        "show_alert": show_alert
+        "text": text
     }
-    try:
-        response = requests.post(url, data=payload, timeout=5)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error answering callback {callback_id}: {e}")
-        return None
-
-def generate_personalized_greeting(user_name="Друже"):
-    user_name = (user_name or '').strip() or 'Друже'
-    current = datetime.now() if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME))
-    hour = current.hour
-
-    greeting = f"Доброго {'ранку' if 6 <= hour < 12 else 'дня' if 12 <= hour < 18 else 'вечора'}, {user_name}! 😊"
-    status = "Ресторан відкритий! 🍽️ Готові прийняти ваше замовлення." if is_restaurant_open() else "Ресторан закритий. 😔 Працюємо з 9:00 до 22:00."
-    return f"{greeting}\n\n{status}\n\nЯ ваш помічник для замовлення їжі! 🍔🍕"
-
-def is_restaurant_open():
-    current_hour = datetime.now().hour if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME)).hour
-    return 9 <= current_hour < 22
-    
-# Health check endpoint
-@app.route("/health", methods=["GET"])
-def health_check():
-    """Перевірка стану програми та зовнішніх сервісів."""
-    status = {
-        "status": "ok",
-        "timestamp": datetime.now().isoformat(),
-        "db_status": "ok" if init_db() else "error", 
-        "sheets_status": "ok" if GSPREAD_CLIENT else "error",
-        "menu_cached_items": len(MENU_CACHE),
-        "bot_token_present": bool(BOT_TOKEN)
-    }
-    return jsonify(status)
-
-# Ініціалізація додатку
-with app.app_context():
-    logger.info("🚀 FerrikFootBot starting initialization...")
     
     try:
-        # Ініціалізація бази даних
-        from models.user import init_db
-        if init_db():
-            logger.info("✅ Database initialized")
-        else:
-            logger.error("❌ Database initialization failed")
-        
-        # Підключення до Google Sheets
-        GSPREAD_CLIENT = init_gspread_client()
-        if GSPREAD_CLIENT:
-            logger.info("✅ Google Sheets connected")
-            
-            # Завантажуємо меню для кешування
-            MENU_CACHE = get_menu_from_sheet(force=True)
-            logger.info(f"✅ Menu cached: {len(MENU_CACHE)} items")
-        else:
-            logger.warning("⚠️ Google Sheets connection not initialized. Some features may be unavailable.")
-            
-        # Ініціалізація Gemini
-        from services.gemini import init_gemini_client
-        GEMINI_CLIENT = init_gemini_client() 
-        if not GEMINI_CLIENT:
-            logger.warning("⚠️ Gemini client not initialized. AI recommendations will be unavailable.")
-        else:
-            logger.info("✅ Gemini client initialized.")
-
-        logger.info("🎉 FerrikFootBot initialization completed!")
-        
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        logger.exception(f"❌ Critical startup error: {e}")
+        logger.error(f"❌ Помилка відповіді на callback: {e}")
 
-@app.route("/webhook", methods=["POST"])
-def telegram_webhook():
-    """Основний обробник для Telegram вебхуків."""
-    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
-        return jsonify({"status": "error", "message": "Invalid secret token"}), 403
 
-    try:
-        update = request.get_json(force=True)
-        if not update:
-            return jsonify({"status": "ok"})
-
-        logger.info(f"Received update: {update.keys()}")
-
-        if "message" in update:
-            # Обробка текстових повідомлень та команд
-            chat_id = update["message"]["chat"]["id"]
-            user_id = update["message"]["from"]["id"]
-            user_name = update["message"]["from"].get("first_name", "")
-            
-            user = get_or_create_user(user_id, chat_id, user_name)
-            if 'text' in update['message']:
-                add_chat_history(user_id, 'user', update['message']['text'])
-                
-            text = update["message"]["text"]
-            
-            # Обробка команд
-            if text == "/start":
-                greeting = generate_personalized_greeting(user_name)
-                tg_send_message(chat_id, greeting) 
-            elif text == "/menu":
-                tg_send_message(chat_id, "Ось наше **Меню**! Виберіть категорію.")
-            elif text == "/cart":
-                show_cart(chat_id, user_id)
-            elif text == "/checkout":
-                # Закоментуємо, доки handlers.order не буде додано
-                # start_checkout_process(chat_id, user_id)
-                tg_send_message(chat_id, "Оформлення замовлення тимчасово недоступне.")
-            elif text == "/contacts":
-                contacts_text = """
-📞 **Контакти**
-
-📱 Телефон: +380XX XXX XX XX
-📧 Email: info@ferrikfoot.com
-📍 Адреса: м. Київ, вул. Прикладна, 1
-"""
-                tg_send_message(chat_id, contacts_text)
-            else:
-                # Закоментуємо, доки handlers.message_processor не буде додано
-                # from handlers.message_processor import process_text_message
-                # process_text_message(chat_id, user_id, user_name, text, MENU_CACHE, GEMINI_CLIENT)
-                tg_send_message(chat_id, "Вибачте, я можу допомогти лише з питаннями щодо нашого меню. Чим можу вас почастувати?")
-
-        elif "callback_query" in update:
-            # Обробка натискань inline кнопок
-            callback_query = update["callback_query"]
-            chat_id = callback_query["message"]["chat"]["id"]
-            user_id = callback_query["from"]["id"]
-            data = callback_query["data"]
-            callback_id = callback_query["id"]
-
-            # Обробка кнопок
-            if data.startswith("add_"):
-                item_id = data.split("_")[1]
-                add_item_to_cart(chat_id, user_id, item_id)
-                tg_answer_callback(callback_id, "Товар додано до кошика!")
-            elif data == "checkout":
-                # Закоментуємо, доки handlers.order не буде додано
-                # start_checkout_process(chat_id, user_id)
-                tg_answer_callback(callback_id, "Оформлення замовлення тимчасово недоступне.")
-            else:
-                tg_answer_callback(callback_id, "Невідома дія.")
-        
-        return jsonify({"status": "ok"})
-
-    except BadRequest as e:
-        logger.error(f"Invalid JSON request: {e}")
-        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
-    except Exception as e:
-        logger.exception(f"Unhandled error in webhook: {e}")
-        return jsonify({"status": "error", "message": "Internal error"}), 500
-
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    """Встановлення Telegram вебхука."""
-    try:
-        webhook_url = os.environ.get("WEBHOOK_URL")
-        if not webhook_url:
-            return jsonify({"ok": False, "error": "WEBHOOK_URL environment variable is missing"}), 500
-
-        response = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", 
-            params={
-                "url": webhook_url,
-                "secret_token": WEBHOOK_SECRET
-            },
-            timeout=10
-        )
-        return jsonify(response.json())
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
-    
-    if debug_mode:
-        app.run(host="0.0.0.0", port=port, debug=True)
-    else:
-        webhook_url = os.environ.get("WEBHOOK_URL", "")
-        if webhook_url:
-            try:
-                response = requests.get(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                    params={
-                        "url": webhook_url,
-                        "secret_token": WEBHOOK_SECRET
-                    },
-                    timeout=10
-                )
-                logger.info(f"Webhook set response: {response.json()}")
-            except Exception as e:
-                logger.error(f"Failed to set webhook: {e}")
+# Запуск додатку
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)

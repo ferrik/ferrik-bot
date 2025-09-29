@@ -69,6 +69,9 @@ def get_menu_from_sheet():
         
         logger.info(f"Fetched {len(menu)} active menu items from Google Sheets")
         return menu
+    except gspread.exceptions.APIError as e:
+        logger.error(f"Google Sheets API error: {str(e)}")
+        return {}
     except Exception as e:
         logger.error(f"Error fetching menu from Google Sheets: {str(e)}")
         return {}
@@ -115,6 +118,9 @@ def get_config():
         
         logger.info(f"Fetched {len(config)} config entries from Google Sheets")
         return config
+    except gspread.exceptions.APIError as e:
+        logger.error(f"Google Sheets API error: {str(e)}")
+        return {}
     except Exception as e:
         logger.error(f"Error fetching config from Google Sheets: {str(e)}")
         return {}
@@ -155,6 +161,9 @@ def save_order(order_data: dict):
         sheet.append_row(row)
         logger.info(f"Saved order {order_data.get('order_id')} to Google Sheets")
         return True
+    except gspread.exceptions.APIError as e:
+        logger.error(f"Google Sheets API error when saving order: {str(e)}")
+        return False
     except Exception as e:
         logger.error(f"Error saving order to Google Sheets: {str(e)}")
         return False

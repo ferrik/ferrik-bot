@@ -1,125 +1,134 @@
-import os
 import logging
+import json
 import gspread
 from google.oauth2.service_account import Credentials
-import json
+from config import SPREADSHEET_ID, get_google_creds_dict, MIN_DELIVERY_AMOUNT
 
-logger = logging.getLogger('ferrik')
-
-# Конфігурація
-SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
-GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')  # JSON як string
-
-# Глобальні змінні
-_gc = None
-_worksheet = None
+logger = logging.getLogger("ferrik")
+logging.basicConfig(level=logging.INFO)
 
 def init_gspread_client():
-    """
-    Ініціалізує клієнт Google Sheets
-    """
-    global _gc, _worksheet
-    
+    """Ініціалізація клієнта Google Sheets."""
     try:
-        if not GOOGLE_CREDENTIALS:
-            logger.error("❌ GOOGLE_CREDENTIALS не знайдено в змінних середовища")
-            return False
-            
-        if not SPREADSHEET_ID:
-            logger.error("❌ SPREADSHEET_ID не знайдено в змінних середовища")
-            return False
+        creds_dict = get_google_creds_dict()
+        if not creds_dict:
+            logger.error("Failed to initialize Google Sheets client: No credentials provided")
+            return None
         
-        # Парсимо JSON credentials
-        try:
-            creds_dict = json.loads(GOOGLE_CREDENTIALS)
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Помилка парсингу GOOGLE_CREDENTIALS: {e}")
-            return False
-        
-        # Налаштування scope для Google Sheets API
-        scope = [
-            'https://spreadsheets.google.com/feeds',
-            'https://www.googleapis.com/auth/drive'
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
         ]
-        
-        # Створюємо credentials
-        credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
-        
-        # Авторизуємось в gspread
-        _gc = gspread.authorize(credentials)
-        
-        # Відкриваємо таблицю
-        try:
-            wb = _gc.open_by_key(SPREADSHEET_ID)
-            _worksheet = wb.sheet1  # Перший аркуш
-            logger.info(f"✅ Google Sheets підключено: {wb.title}")
-            return True
-        except gspread.exceptions.APIError as e:
-            if e.response.status_code == 403:
-                logger.error(f"❌ Немає доступу до таблиці. Надайте доступ для: {creds_dict.get('client_email')}")
-            else:
-                logger.error(f"❌ API помилка: {e}")
-            return False
-            
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        logger.info("Google Sheets client initialized successfully")
+        return client
     except Exception as e:
-        logger.error(f"❌ Помилка ініціалізації Google Sheets: {e}", exc_info=True)
-        return False
+        logger.error(f"Failed to initialize Google Sheets client: {e}")
+        return None
 
-
-def get_worksheet():
-    """Повертає worksheet або None"""
-    return _worksheet
-
-
-def is_sheets_connected():
-    """Перевіряє, чи підключено Google Sheets"""
-    return _worksheet is not None
-
-
-def add_order(user_data: dict):
-    """
-    Додає замовлення в Google Sheets
-    """
-    if not _worksheet:
-        logger.warning("⚠️ Google Sheets не підключено, замовлення не збережено")
-        return False
-    
+def get_menu_from_sheet(force=False):
+    """Отримує меню з аркуша 'Меню' Google Sheets."""
     try:
-        # Приклад структури даних для запису
+        client = init_gspread_client()
+        if not client:
+            logger.error("Cannot fetch menu: Google Sheets client not initialized")
+            return {}
+        
+        sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Меню")
+        records = sheet.get_all_records()
+        
+        menu = {}
+        for record in records:
+            if record.get("Активний", "").lower() in ["так", "true", "1"]:  # Фільтруємо активні страви
+                item_id = str(record.get("ID", ""))
+                if item_id:
+                    menu[item_id] = {
+                        "id": item_id,
+                        "category": record.get("Категорія", ""),
+                        "name": record.get("Страви", ""),
+                        "description": record.get("Опис", ""),
+                        "price": float(record.get("Ціна", 0)),
+                        "restaurant": record.get("Ресторан", ""),
+                        "delivery_time_min": int(record.get("Час Доставки (хв)", 0)),
+                        "photo_url": record.get("Фото URL", ""),
+                        "prep_time_min": int(record.get("Час_приготування", 0)),
+                        "allergens": record.get("Аллергени", ""),
+                        "rating": float(record.get("Рейтинг", 0))
+                    }
+        
+        logger.info(f"Fetched {len(menu)} active menu items from Google Sheets")
+        return menu if not cache else {}  # Повертаємо порожній словник, якщо cache=True
+    except Exception as e:
+        logger.error(f"Error fetching menu from Google Sheets: {e}")
+        return {}
+
+def get_item_by_id(item_id: str):
+    """Отримує елемент меню за ID."""
+    menu = get_menu_from_sheet()
+    return menu.get(item_id)
+
+def get_min_delivery_amount():
+    """Повертає мінімальну суму доставки з конфігурації."""
+    return float(MIN_DELIVERY_AMOUNT)
+
+def get_config():
+    """Отримує конфігурацію з аркуша 'Конфіг'."""
+    try:
+        client = init_gspread_client()
+        if not client:
+            logger.error("Cannot fetch config: Google Sheets client not initialized")
+            return {}
+        
+        sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Конфіг")
+        records = sheet.get_all_records()
+        
+        config = {}
+        for record in records:
+            key = record.get("Ключ", "")
+            if key:
+                config[key] = {
+                    "value": record.get("Значення", ""),
+                    "open_hour": int(record.get("OPEN_HOUR", 9)),
+                    "close_hour": int(record.get("CLOSE_HOUR", 22))
+                }
+        
+        logger.info(f"Fetched {len(config)} config entries from Google Sheets")
+        return config
+    except Exception as e:
+        logger.error(f"Error fetching config from Google Sheets: {e}")
+        return {}
+
+def save_order(order_data: dict):
+    """Зберігає замовлення в аркуш 'Замовлення'."""
+    try:
+        client = init_gspread_client()
+        if not client:
+            logger.error("Cannot save order: Google Sheets client not initialized")
+            return False
+        
+        sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Замовлення")
         row = [
-            user_data.get('timestamp', ''),
-            user_data.get('user_id', ''),
-            user_data.get('username', ''),
-            user_data.get('order', ''),
-            user_data.get('status', 'pending')
+            order_data.get("order_id", ""),
+            order_data.get("user_id", ""),
+            order_data.get("order_time", ""),
+            json.dumps(order_data.get("items", []), ensure_ascii=False),
+            order_data.get("total_amount", 0.0),
+            order_data.get("address", ""),
+            order_data.get("phone", ""),
+            order_data.get("payment_method", ""),
+            order_data.get("status", "Нове"),
+            order_data.get("channel", "Telegram"),
+            order_data.get("delivery_cost", 0.0),
+            order_data.get("total_with_delivery", 0.0),
+            order_data.get("delivery_type", ""),
+            order_data.get("delivery_time", ""),
+            order_data.get("operator", ""),
+            order_data.get("notes", "")
         ]
-        
-        _worksheet.append_row(row)
-        logger.info(f"✅ Замовлення додано в Google Sheets для користувача {user_data.get('username')}")
+        sheet.append_row(row)
+        logger.info(f"Saved order {order_data.get('order_id')} to Google Sheets")
         return True
-        
     except Exception as e:
-        logger.error(f"❌ Помилка при додаванні замовлення: {e}", exc_info=True)
+        logger.error(f"Error saving order to Google Sheets: {e}")
         return False
-
-
-def get_menu():
-    """
-    Отримує меню з Google Sheets
-    Припускаємо, що меню знаходиться на другому аркуші
-    """
-    if not _gc:
-        return None
-    
-    try:
-        wb = _gc.open_by_key(SPREADSHEET_ID)
-        menu_sheet = wb.worksheet("Меню")  # Або sheet1, залежно від структури
-        
-        # Отримуємо всі записи
-        records = menu_sheet.get_all_records()
-        logger.info(f"✅ Отримано меню: {len(records)} позицій")
-        return records
-        
-    except Exception as e:
-        logger.error(f"❌ Помилка при отриманні меню: {e}", exc_info=True)
-        return None

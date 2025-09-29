@@ -24,10 +24,10 @@ def init_gspread_client():
         logger.info("Google Sheets client initialized successfully")
         return client
     except Exception as e:
-        logger.error(f"Failed to initialize Google Sheets client: {e}")
+        logger.error(f"Failed to initialize Google Sheets client: {str(e)}")
         return None
 
-def get_menu_from_sheet(force=False):
+def get_menu_from_sheet():
     """Отримує меню з аркуша 'Меню' Google Sheets."""
     try:
         client = init_gspread_client()
@@ -35,8 +35,16 @@ def get_menu_from_sheet(force=False):
             logger.error("Cannot fetch menu: Google Sheets client not initialized")
             return {}
         
-        sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Меню")
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        try:
+            sheet = spreadsheet.worksheet("Меню")
+        except gspread.exceptions.WorksheetNotFound:
+            logger.error(f"Worksheet 'Меню' not found in spreadsheet {SPREADSHEET_ID}")
+            return {}
+        
         records = sheet.get_all_records()
+        if not records:
+            logger.warning(f"No records found in 'Меню' worksheet")
         
         menu = {}
         for record in records:
@@ -56,11 +64,13 @@ def get_menu_from_sheet(force=False):
                         "allergens": record.get("Аллергени", ""),
                         "rating": float(record.get("Рейтинг", 0))
                     }
+                else:
+                    logger.warning(f"Skipping menu item with missing ID: {record}")
         
         logger.info(f"Fetched {len(menu)} active menu items from Google Sheets")
-        return menu if not cache else {}  # Повертаємо порожній словник, якщо cache=True
+        return menu
     except Exception as e:
-        logger.error(f"Error fetching menu from Google Sheets: {e}")
+        logger.error(f"Error fetching menu from Google Sheets: {str(e)}")
         return {}
 
 def get_item_by_id(item_id: str):
@@ -80,8 +90,16 @@ def get_config():
             logger.error("Cannot fetch config: Google Sheets client not initialized")
             return {}
         
-        sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Конфіг")
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        try:
+            sheet = spreadsheet.worksheet("Конфіг")
+        except gspread.exceptions.WorksheetNotFound:
+            logger.error(f"Worksheet 'Конфіг' not found in spreadsheet {SPREADSHEET_ID}")
+            return {}
+        
         records = sheet.get_all_records()
+        if not records:
+            logger.warning(f"No records found in 'Конфіг' worksheet")
         
         config = {}
         for record in records:
@@ -92,11 +110,13 @@ def get_config():
                     "open_hour": int(record.get("OPEN_HOUR", 9)),
                     "close_hour": int(record.get("CLOSE_HOUR", 22))
                 }
+            else:
+                logger.warning(f"Skipping config entry with missing key: {record}")
         
         logger.info(f"Fetched {len(config)} config entries from Google Sheets")
         return config
     except Exception as e:
-        logger.error(f"Error fetching config from Google Sheets: {e}")
+        logger.error(f"Error fetching config from Google Sheets: {str(e)}")
         return {}
 
 def save_order(order_data: dict):
@@ -107,7 +127,13 @@ def save_order(order_data: dict):
             logger.error("Cannot save order: Google Sheets client not initialized")
             return False
         
-        sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Замовлення")
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        try:
+            sheet = spreadsheet.worksheet("Замовлення")
+        except gspread.exceptions.WorksheetNotFound:
+            logger.error(f"Worksheet 'Замовлення' not found in spreadsheet {SPREADSHEET_ID}")
+            return False
+        
         row = [
             order_data.get("order_id", ""),
             order_data.get("user_id", ""),
@@ -130,5 +156,5 @@ def save_order(order_data: dict):
         logger.info(f"Saved order {order_data.get('order_id')} to Google Sheets")
         return True
     except Exception as e:
-        logger.error(f"Error saving order to Google Sheets: {e}")
+        logger.error(f"Error saving order to Google Sheets: {str(e)}")
         return False

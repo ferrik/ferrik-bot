@@ -43,33 +43,47 @@ def get_gemini_recommendation(user_input: str, chat_history: list):
 
     try:
         # Отримуємо меню з Google Sheets
-        menu = get_menu_from_sheet()  # Видалено параметр force
+        menu = get_menu_from_sheet()
         if not menu:
             logger.warning("No menu items available for recommendation")
-            return "На жаль, меню порожнє. Спробуйте пізніше."
+            # Альтернативна відповідь, якщо меню порожнє
+            prompt = f"""
+            Ви - дружній помічник у ресторані FerrikFootBot, який допомагає користувачам вибрати їжу. 
+            На жаль, меню зараз недоступне, але ви можете запропонувати популярні категорії або страви.
+            
+            Історія чату:
+            { "\n".join([f"{msg['role']}: {msg['text']}" for msg in chat_history[-5:]]) }
 
-        # Формуємо список страв для Gemini
-        menu_items = [f"{item['name']} ({item['category']}, {item['price']} грн): {item['description']}" for item in menu.values()]
-        menu_text = "\n".join(menu_items)
+            Запит користувача: {user_input}
 
-        # Формуємо історію чату для контексту
-        history_text = "\n".join([f"{msg['role']}: {msg['text']}" for msg in chat_history[-5:]])
+            Запропонуйте популярні категорії (наприклад, піца, бургери, суші) або страви, які можуть сподобатися користувачу. 
+            Відповідь має бути короткою (до 2 речень), дружньою, українською мовою та відповідати стилю ресторану.
+            """
+        else:
+            # Формуємо список страв для Gemini
+            menu_items = [f"{item['name']} ({item['category']}, {item['price']} грн): {item['description']}" for item in menu.values()]
+            menu_text = "\n".join(menu_items)
 
-        # Формуємо запит до Gemini
-        prompt = f"""
-        Ви - помічник у ресторані, який допомагає користувачам вибрати їжу з меню. 
-        Ось доступне меню:
-        {menu_text}
+            # Формуємо історію чату для контексту
+            history_text = "\n".join([f"{msg['role']}: {msg['text']}" for msg in chat_history[-5:]])
 
-        Історія чату:
-        {history_text}
+            prompt = f"""
+            Ви - дружній помічник у ресторані FerrikFootBot, який допомагає користувачам вибрати їжу з меню. 
+            Ваша мета - запропонувати страву або категорію, яка відповідає запиту користувача, у неформальному та апетитному стилі.
+            
+            Доступне меню:
+            {menu_text}
 
-        Запит користувача: {user_input}
+            Історія чату:
+            {history_text}
 
-        На основі запиту користувача та історії чату порекомендуйте страву або категорію з меню. 
-        Відповідь має бути короткою, дружньою та українською мовою.
-        """
+            Запит користувача: {user_input}
 
+            Запропонуйте одну страву або категорію з меню, яка найкраще відповідає запиту. 
+            Якщо запит нечіткий, виберіть популярну страву або категорію (наприклад, піцу чи бургери).
+            Відповідь має бути короткою (1-2 речення), дружньою, українською мовою та в стилі ресторану.
+            """
+        
         response = gemini_client.generate_content(prompt)
         recommendation = response.text.strip()
 

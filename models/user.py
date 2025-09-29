@@ -130,3 +130,16 @@ def add_chat_history(user_id, role, text):
     except Exception as e:
         logger.error(f"Error in add_chat_history: {e}")
         return False
+
+def get_chat_history(user_id):
+    """Отримує історію чату користувача."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_history FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return json.loads(result[0]) if result else []
+    except Exception as e:
+        logger.error(f"Error in get_chat_history: {e}")
+        return []

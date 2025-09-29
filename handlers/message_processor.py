@@ -27,6 +27,18 @@ def process_text_message(chat_id, user_id, user_name, text, menu_cache, gemini_c
         show_cart(chat_id, user_id)
         return
     
+    if text == "🍔 Замовити їжу":
+        response = "Ось наше **Меню**! Виберіть категорію:\n"
+        categories = set(item["category"] for item in menu_cache.values())
+        if not categories:
+            logger.warning("No categories found in menu cache")
+            response = "На жаль, меню порожнє. Спробуйте пізніше."
+        else:
+            for category in sorted(categories):
+                response += f"- {category}\n"
+        tg_send_message(chat_id, response)
+        return
+    
     # Перевіряємо, чи текст відповідає категорії меню
     categories = set(item["category"] for item in menu_cache.values())
     text_lower = text.lower().strip()
@@ -47,7 +59,11 @@ def process_text_message(chat_id, user_id, user_name, text, menu_cache, gemini_c
     if gemini_client:
         from models.user import get_chat_history
         chat_history = get_chat_history(user_id)
-        response = get_gemini_recommendation(text, chat_history)
-        tg_send_message(chat_id, response)
+        try:
+            response = get_gemini_recommendation(text, chat_history)
+            tg_send_message(chat_id, response)
+        except Exception as e:
+            logger.error(f"Error in get_gemini_recommendation: {str(e)}")
+            tg_send_message(chat_id, "Вибачте, виникла помилка при обробці вашого запиту. Спробуйте ще раз.")
     else:
         tg_send_message(chat_id, "Вибачте, я можу допомогти лише з питаннями щодо нашого меню. Чим можу вас почастувати?")

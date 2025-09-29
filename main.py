@@ -5,10 +5,9 @@ import re
 from flask import Flask, request, jsonify
 import requests
 from handlers.cart import show_cart, add_item_to_cart
-# Закоментуємо тимчасово, доки файли не будуть додані
-# from handlers.order import start_checkout_process
-# from handlers.geo import check_delivery_availability
-from services.sheets import init_gspread_client, get_menu_from_sheet, get_item_by_id
+from handlers.order import start_checkout_process
+from handlers.geo import check_delivery_availability
+from services.sheets import init_gspread_client, get_menu_from_sheet, get_item_by_id, get_config
 from services.gemini import get_gemini_recommendation
 from models.user import init_db, get_state, set_state, get_cart, set_cart, get_or_create_user, add_chat_history
 from datetime import datetime
@@ -42,6 +41,7 @@ TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Europe/Kiev").strip()
 MENU_CACHE = {} 
 GSPREAD_CLIENT = None
 GEMINI_CLIENT = None
+CONFIG = {}
 
 def tg_send_message(chat_id, text, keyboard=None, parse_mode="Markdown"):
     """Надсилає повідомлення через Telegram API."""
@@ -94,13 +94,28 @@ def generate_personalized_greeting(user_name="Друже"):
     hour = current.hour
 
     greeting = f"Доброго {'ранку' if 6 <= hour < 12 else 'дня' if 12 <= hour < 18 else 'вечора'}, {user_name}! 😊"
-    status = "Ресторан відкритий! 🍽️ Готові прийняти ваше замовлення." if is_restaurant_open() else "Ресторан закритий. 😔 Працюємо з 9:00 до 22:00."
+    status = "Ресторан відкритий! 🍽️ Готові прийняти ваше замовлення." if is_restaurant_open() else "Ресторан закритий. 😔 Перевірте години роботи."
     return f"{greeting}\n\n{status}\n\nЯ ваш помічник для замовлення їжі! 🍔🍕"
 
 def is_restaurant_open():
-    current_hour = datetime.now().hour if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME)).hour
-    return 9 <= current_hour < 22
+    """Перевіряє, чи ресторан відкритий, використовуючи конфігурацію з Google Sheets."""
+    global CONFIG
+    if not CONFIG:
+        CONFIG = get_config()
     
+    # За замовчуванням: 9:00-22:00
+    open_hour = 9
+    close_hour = 22
+    
+    # Оновлюємо години з конфігурації
+    for key, value in CONFIG.items():
+        open_hour = value.get("open_hour", open_hour)
+        close_hour = value.get("close_hour", close_hour)
+        break  # Беремо перший запис конфігурації
+    
+    current_hour = datetime.now().hour if not ZoneInfo else datetime.now(ZoneInfo(TIMEZONE_NAME)).hour
+    return open_hour <= current_hour < close_hour
+
 # Health check endpoint
 @app.route("/health", methods=["GET"])
 def health_check():
@@ -121,7 +136,6 @@ with app.app_context():
     
     try:
         # Ініціалізація бази даних
-        from models.user import init_db
         if init_db():
             logger.info("✅ Database initialized")
         else:
@@ -133,8 +147,12 @@ with app.app_context():
             logger.info("✅ Google Sheets connected")
             
             # Завантажуємо меню для кешування
-            MENU_CACHE = get_menu_from_sheet(force=True)
+            MENU_CACHE = get_menu_from_sheet(cache=True)
             logger.info(f"✅ Menu cached: {len(MENU_CACHE)} items")
+            
+            # Завантажуємо конфігурацію
+            CONFIG = get_config()
+            logger.info(f"✅ Config loaded: {len(CONFIG)} entries")
         else:
             logger.warning("⚠️ Google Sheets connection not initialized. Some features may be unavailable.")
             
@@ -181,13 +199,15 @@ def telegram_webhook():
                 greeting = generate_personalized_greeting(user_name)
                 tg_send_message(chat_id, greeting) 
             elif text == "/menu":
-                tg_send_message(chat_id, "Ось наше **Меню**! Виберіть категорію.")
+                menu_text = "Ось наше **Меню**! Виберіть категорію:\n"
+                categories = set(item["category"] for item in MENU_CACHE.values())
+                for category in sorted(categories):
+                    menu_text += f"- {category}\n"
+                tg_send_message(chat_id, menu_text)
             elif text == "/cart":
                 show_cart(chat_id, user_id)
             elif text == "/checkout":
-                # Закоментуємо, доки handlers.order не буде додано
-                # start_checkout_process(chat_id, user_id)
-                tg_send_message(chat_id, "Оформлення замовлення тимчасово недоступне.")
+                start_checkout_process(chat_id, user_id)
             elif text == "/contacts":
                 contacts_text = """
 📞 **Контакти**
@@ -198,10 +218,8 @@ def telegram_webhook():
 """
                 tg_send_message(chat_id, contacts_text)
             else:
-                # Закоментуємо, доки handlers.message_processor не буде додано
-                # from handlers.message_processor import process_text_message
-                # process_text_message(chat_id, user_id, user_name, text, MENU_CACHE, GEMINI_CLIENT)
-                tg_send_message(chat_id, "Вибачте, я можу допомогти лише з питаннями щодо нашого меню. Чим можу вас почастувати?")
+                from handlers.message_processor import process_text_message
+                process_text_message(chat_id, user_id, user_name, text, MENU_CACHE, GEMINI_CLIENT)
 
         elif "callback_query" in update:
             # Обробка натискань inline кнопок
@@ -217,9 +235,8 @@ def telegram_webhook():
                 add_item_to_cart(chat_id, user_id, item_id)
                 tg_answer_callback(callback_id, "Товар додано до кошика!")
             elif data == "checkout":
-                # Закоментуємо, доки handlers.order не буде додано
-                # start_checkout_process(chat_id, user_id)
-                tg_answer_callback(callback_id, "Оформлення замовлення тимчасово недоступне.")
+                start_checkout_process(chat_id, user_id)
+                tg_answer_callback(callback_id, "Починаємо оформлення замовлення")
             else:
                 tg_answer_callback(callback_id, "Невідома дія.")
         

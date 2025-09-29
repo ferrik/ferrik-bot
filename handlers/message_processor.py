@@ -11,6 +11,22 @@ def process_text_message(chat_id, user_id, user_name, text, menu_cache, gemini_c
     """
     logger.info(f"Processing message from {user_id}: {text}")
     
+    # Перевірка спеціальних команд
+    if text == "📅 Забронювати столик":
+        response = "Вибачте, бронювання столиків поки недоступне. Зв’яжіться з нами за телефоном: +380XX XXX XX XX."
+        tg_send_message(chat_id, response)
+        return
+    
+    if text == "💸 Акції":
+        response = "Наразі акцій немає. Слідкуйте за оновленнями в нашому Telegram-каналі! 😊"
+        tg_send_message(chat_id, response)
+        return
+    
+    if text == "📦 Мій кошик":
+        from handlers.cart import show_cart
+        show_cart(chat_id, user_id)
+        return
+    
     # Перевіряємо, чи текст відповідає категорії меню
     categories = set(item["category"] for item in menu_cache.values())
     text_lower = text.lower().strip()
@@ -18,9 +34,12 @@ def process_text_message(chat_id, user_id, user_name, text, menu_cache, gemini_c
     for category in categories:
         if category.lower() in text_lower:
             items = [item for item in menu_cache.values() if item["category"].lower() == category.lower()]
-            response = f"Ось доступні страви в категорії **{category}**:\n"
-            for item in items:
-                response += f"- **{item['name']}** ({item['price']:.2f} грн): {item['description']}\n"
+            if not items:
+                response = f"На жаль, у категорії **{category}** немає доступних страв."
+            else:
+                response = f"Ось доступні страви в категорії **{category}**:\n"
+                for item in items:
+                    response += f"- **{item['name']}** ({item['price']:.2f} грн): {item['description']}\n"
             tg_send_message(chat_id, response)
             return
     

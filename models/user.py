@@ -114,6 +114,21 @@ def set_cart(user_id, cart):
         logger.error(f"Error in set_cart: {e}")
         return False
 
+def clear_cart(user_id):
+    """Очищає корзину користувача."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        empty_cart = {"items": [], "total": 0.0}
+        cursor.execute("UPDATE users SET cart = ? WHERE user_id = ?", (json.dumps(empty_cart), user_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Cart cleared for user {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error in clear_cart: {e}")
+        return False
+
 def add_chat_history(user_id, role, text):
     """Додає повідомлення до історії чату."""
     try:

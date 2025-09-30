@@ -1,20 +1,18 @@
-FerrikFootBot
-Це Telegram-бот для замовлення їжі з інтеграцією AI (Gemini) та Google Sheets. Проєкт розгорнуто на Render з використанням GitHub.
-Структура
+# BonApp Telegram Bot
 
-main.py — основний файл із логікою Flask.
-handlers/ — обробники команд.
-services/ — сервіси (Gemini, Google Sheets).
-requirements.txt — залежності.
-Procfile, runtime.txt, render.yaml — конфігурація для Render.
+BonApp is a Telegram bot for ordering food, integrated with Google Sheets for menu management, Gemini AI for recommendations, and deployed on Render.
 
-Налаштування
+## Features
+- 📋 View menu with photos and descriptions
+- 🛒 Add items to cart
+- 📍 Check delivery availability
+- 🤖 Get AI-powered dish recommendations
+- 💳 Place orders with payment options
+- ⭐ Leave feedback
 
-Створіть репозиторій на GitHub.
-Додайте файли та задеплойте на Render.
-Налаштуйте змінні середовища в Render (TELEGRAM_BOT_TOKEN, GEMINI_API_KEY тощо).
+## Setup
 
-Запуск
-
-Використовуйте /start у Telegram (@ferrikfoot_bot).
-
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/ferrik/ferrik-bot.git
+   cd bonapp

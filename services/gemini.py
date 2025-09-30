@@ -224,27 +224,15 @@ def analyze_order_text(text: str):
 def get_gemini_recommendation(prompt):
     """
     Загальна функція для отримання рекомендацій від Gemini
-    Використовується для сумісності зі старим кодом
+    Використовується для зворотної сумісності зі старим кодом
     """
     if not _model:
         logger.warning("⚠️ Gemini не підключено")
-        return "Сервіс рекомендацій тимчасово недоступний"
+        return "AI-асистент тимчасово недоступний"
     
     try:
         response = _model.generate_content(prompt)
         return response.text
     except Exception as e:
-        logger.error(f"❌ Помилка Gemini recommendation: {e}")
+        logger.error(f"❌ Помилка Gemini: {e}")
         return "Виникла помилка при обробці запиту"
-
-
-def test_gemini_connection():
-    """Тестує з'єднання з Gemini"""
-    try:
-        if not GEMINI_API_KEY:
-            return False
-        
-        test_response = get_gemini_recommendation("Відповідь одним словом: OK")
-        return "OK" in test_response or "ok" in test_response.lower()
-    except:
-        return False

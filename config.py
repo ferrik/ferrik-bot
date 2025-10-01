@@ -35,7 +35,8 @@ OPERATOR_CHAT_ID = os.environ.get('OPERATOR_CHAT_ID', '')
 
 # Webhook Configuration
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://ferrik-bot-zvev.onrender.com/webhook')
-WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', '')
+# ДОДАНО: Секретний токен для перевірки вебхука
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'Ferrik123').strip()
 
 # App Configuration
 DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
@@ -54,11 +55,6 @@ MENU_CACHE_TTL = int(os.environ.get('MENU_CACHE_TTL', 3600))  # 1 hour
 # Rate Limiting
 MAX_REQUESTS_PER_MINUTE = int(os.environ.get('MAX_REQUESTS_PER_MINUTE', 60))
 
-# Delivery Configuration
-MIN_DELIVERY_AMOUNT = float(os.environ.get('MIN_DELIVERY_AMOUNT', 200))
-DELIVERY_COST = float(os.environ.get('DELIVERY_COST', 50))
-DELIVERY_RADIUS_KM = float(os.environ.get('DELIVERY_RADIUS_KM', 7))
-
 # Error Messages
 ERROR_MESSAGES = {
     'generic': 'Виникла помилка. Спробуйте пізніше.',
@@ -73,22 +69,12 @@ SUCCESS_MESSAGES = {
     'user_registered': 'Ви успішно зареєстровані!'
 }
 
-# Валідація конфігурації
+# Validate configuration
 def validate_config():
     """Валідація конфігурації при запуску"""
     issues = []
-    
     if not BOT_TOKEN:
-        issues.append("BOT_TOKEN is missing - bot will not function")
-    
-    if not GEMINI_API_KEY:
-        issues.append("GEMINI_API_KEY is missing - AI features disabled")
-    
-    if not SPREADSHEET_ID:
-        issues.append("SPREADSHEET_ID is missing - Google Sheets features disabled")
-    
-    if not GOOGLE_CREDENTIALS_JSON and not CREDS_B64:
-        issues.append("Google credentials missing - cannot access Google Sheets")
+        issues.append("BOT_TOKEN is missing - Bot cannot communicate with Telegram")
     
     if issues:
         logger.warning("Configuration issues detected:")
@@ -105,18 +91,14 @@ def log_config():
     logger.info("=" * 50)
     logger.info("Configuration Summary:")
     logger.info(f"  BOT_TOKEN: {'✅ Set' if BOT_TOKEN else '❌ Missing'}")
+    logger.info(f"  WEBHOOK_SECRET: {'✅ Set' if WEBHOOK_SECRET else '❌ Missing'}")
+    logger.info(f"  WEBHOOK_URL: {WEBHOOK_URL}")
     logger.info(f"  GEMINI_API_KEY: {'✅ Set' if GEMINI_API_KEY else '❌ Missing'}")
     logger.info(f"  SPREADSHEET_ID: {'✅ Set' if SPREADSHEET_ID else '❌ Missing'}")
     logger.info(f"  CREDS_B64: {'✅ Set' if CREDS_B64 else '❌ Missing'}")
-    logger.info(f"  OPERATOR_CHAT_ID: {'✅ Set' if OPERATOR_CHAT_ID else '⚠️ Not set'}")
-    logger.info(f"  WEBHOOK_URL: {WEBHOOK_URL}")
+    logger.info(f"""  OPERATOR_CHAT_ID: {'✅ Set' if OPERATOR_CHAT_ID else '⚠️ Not set'}""")
     logger.info(f"  DEBUG: {DEBUG}")
     logger.info(f"  PORT: {PORT}")
+    logger.info(f"  ENABLE_AI_RECOMMENDATIONS: {ENABLE_AI_RECOMMENDATIONS}")
+    logger.info(f"  ENABLE_GOOGLE_SHEETS: {ENABLE_GOOGLE_SHEETS}")
     logger.info("=" * 50)
-
-# Запуск валідації та логування при імпорті
-try:
-    validate_config()
-    log_config()
-except Exception as e:
-    logger.error(f"Error during config validation: {e}")

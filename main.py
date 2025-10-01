@@ -2,7 +2,8 @@ import os
 import logging
 from flask import Flask, request, jsonify
 from datetime import datetime
-import requests # Використовується для встановлення вебхука та відправки повідомлень
+import json
+from werkzeug.exceptions import BadRequest
 
 # Налаштування логування
 logging.basicConfig(
@@ -14,206 +15,154 @@ logger = logging.getLogger('ferrik')
 # Ініціалізація Flask
 app = Flask(__name__)
 
-# Змінні для заглушок, якщо конфігурація не завантажилася
-WEBHOOK_SECRET = ""
-BOT_TOKEN = ""
-WEBHOOK_URL = ""
+# ====================================================================
+# Ініціалізація Конфігурації та Сервісів
+# ====================================================================
 
-# Імпорти з обробкою помилок
 logger.info("🚀 Starting FerrikFootBot...")
 
+# 1. Спроба імпорту конфігурації
 try:
-    # ВИПРАВЛЕННЯ: Додаємо WEBHOOK_SECRET, WEBHOOK_URL, та OPERATOR_CHAT_ID до імпорту
-    from config import (
-        BOT_TOKEN, WEBHOOK_SECRET, GEMINI_API_KEY, SPREADSHEET_ID,
-        OPERATOR_CHAT_ID, WEBHOOK_URL
-    )
+    from config import BOT_TOKEN, WEBHOOK_SECRET, RENDER_URL
+    from config import PORT, DEBUG # Імпортуємо DEBUG та PORT для запуску
     logger.info("✅ Config imported successfully")
 except Exception as e:
-    logger.error(f"❌ Config import error: {e}")
-    # Присвоєння порожніх значень, якщо config.py не зміг імпортувати
-    logger.warning("Using empty strings for critical configs due to import failure.")
-    
+    logger.error(f"❌ Config import error: {e}. Using fallback values. Check config.py for details.")
+    # Fallback placeholders to prevent startup crash if config fails to import
+    BOT_TOKEN = os.environ.get('BOT_TOKEN', 'fallback_token')
+    WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'fallback_secret')
+    RENDER_URL = os.environ.get('WEBHOOK_URL', 'https://fallback-url.com').replace('/webhook', '')
+    PORT = int(os.environ.get('PORT', 5000))
+    DEBUG = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
+
+# 2. Спроба імпорту Telegram сервісу
 try:
-    from services.sheets import init_gspread_client, get_menu_from_sheet, save_order_to_sheets, is_sheets_connected
-    logger.info("✅ Sheets service imported")
+    from services.telegram import tg_send_message, tg_answer_callback, tg_set_webhook
+    logger.info("✅ Telegram service imported")
 except Exception as e:
-    logger.error(f"❌ Sheets import error: {e}")
-    
-try:
-    from services.gemini import init_gemini_client, get_ai_response, is_gemini_connected
-    logger.info("✅ Gemini service imported")
-except Exception as e:
-    logger.error(f"❌ Gemini import error: {e}")
-
-try:
-    from models.user import init_user_db, get_user, create_user
-    logger.info("✅ User model imported")
-except Exception as e:
-    logger.error(f"❌ User model import error: {e}")
+    logger.error(f"❌ Telegram service import error: {e}")
+    # Fallback for core communication if import fails
+    def tg_send_message(*args, **kwargs): logger.error("Telegram send fallback called."); return None
+    def tg_answer_callback(*args, **kwargs): logger.error("Telegram answer fallback called.")
+    def tg_set_webhook(*args, **kwargs): logger.error("Telegram set webhook fallback called."); return {"ok": False, "error": "Telegram service import failed"}
 
 
-# ========== Telegram API Helpers (Використовують BOT_TOKEN) ==========
-
-def send_message(chat_id, text, reply_markup=None):
-    """Відправляє повідомлення через Telegram API."""
-    try:
-        if not BOT_TOKEN:
-            logger.error("BOT_TOKEN not found in send_message")
-            return None
-        
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML"
-        }
-        
-        if reply_markup:
-            import json
-            payload["reply_markup"] = json.dumps(reply_markup)
-        
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logger.error(f"❌ Send message error: {e}")
-        return None
-
-def answer_callback(callback_id, text):
-    """Відповідає на callback query."""
-    try:
-        if not BOT_TOKEN:
-            logger.error("BOT_TOKEN not found in answer_callback")
-            return
-            
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
-        
-        payload = {
-            "callback_query_id": callback_id,
-            "text": text
-        }
-        
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        logger.error(f"❌ Answer callback error: {e}")
-
-
-# ========== Webhook та Роути Flask ==========
+# ====================================================================
+# Health Check and Keep-Alive Endpoints
+# ====================================================================
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint for Render/uptime monitoring."""
-    # Перевірки наявності функцій, оскільки імпорт може бути невдалим
-    status = {
-        "status": "ok",
-        "timestamp": datetime.now().isoformat(),
-        "sheets_connected": is_sheets_connected() if 'is_sheets_connected' in locals() else False,
-        "gemini_connected": is_gemini_connected() if 'is_gemini_connected' in locals() else False,
-    }
-    return jsonify(status)
+    """Стандартний health check endpoint. Відповідає 200 OK."""
+    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()}), 200
 
 @app.route("/keep-alive", methods=["GET"])
 def keep_alive():
-    """Endpoint для підтримки активності бота (Render free plan)"""
-    return jsonify({"status": "i'm alive", "time": datetime.now().isoformat()})
+    """Спеціальний endpoint для Render/GitHub Actions для пробудження сервісу. Відповідає 200 OK."""
+    status = {
+        "status": "alive",
+        "timestamp": datetime.now().isoformat(),
+        "config_loaded": BOT_TOKEN != 'fallback_token' # Проста перевірка конфігурації
+    }
+    return jsonify(status), 200
 
-# Основний Webhook для Telegram
-@app.route("/webhook", methods=["POST"])
+# ====================================================================
+# Webhook Handling
+# ====================================================================
+
+@app.route(f"/{WEBHOOK_SECRET}", methods=["POST"])
 def webhook():
-    """Обробляє вхідні оновлення від Telegram"""
+    """Головний ендпоінт для обробки оновлень від Telegram."""
     
-    # 1. Перевірка секретного токену (Захист від сторонніх запитів)
-    # ВИПРАВЛЕНО: WEBHOOK_SECRET тепер імпортується і доступний тут.
-    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != WEBHOOK_SECRET:
+    # 1. Валідація секретного токена
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         logger.warning("❌ Webhook call with invalid secret token")
-        return jsonify({"status": "Invalid secret token"}), 403
+        return jsonify({"ok": False, "error": "Invalid secret token"}), 403
 
-    # 2. Обробка оновлення
     try:
-        data = request.get_json(force=True)
-        if not data:
-            raise ValueError("Empty or invalid JSON data")
+        update = request.get_json(force=True)
+        if not update:
+            raise BadRequest("Invalid or empty request body")
         
-        # Виклик функції-обробника
-        process_update(data)
+        logger.info(f"Received update from chat: {update.get('message', {}).get('chat', {}).get('id', 'N/A')}")
         
-        return jsonify({"status": "ok"}), 200
+        # --- Simplified Logic for demonstration/testing ---
         
-    except Exception as e:
-        logger.error(f"❌ Webhook processing error: {e}")
-        return jsonify({"status": "Internal Error"}), 500
-
-def process_update(update):
-    """Головний обробник оновлень Telegram (заглушка)"""
-    # Це спрощена логіка. Тут має бути виклик реальних хендлерів.
-    if 'message' in update:
-        message = update['message']
-        chat_id = message['chat']['id']
-        text = message.get('text')
-        user_name = message.get('from', {}).get('first_name', 'Друже')
-        
-        logger.info(f"➡️ Message from {chat_id} ({user_name}): {text}")
-
-        # ... (Логіка обробки повідомлень, що використовує send_message)
-        send_message(chat_id, f"Отримано: **{text}**")
+        if "message" in update and "text" in update["message"]:
+            chat_id = update["message"]["chat"]["id"]
+            user_text = update["message"]["text"]
+            # Заглушка: реальна логіка обробки повідомлень тут
+            tg_send_message(chat_id, f"Отримано ваше повідомлення: <b>{user_text}</b>. Webhook працює!")
             
-    elif 'callback_query' in update:
-        callback_query = update['callback_query']
-        callback_id = callback_query['id']
-        data = callback_query['data']
-        chat_id = callback_query['message']['chat']['id']
+        elif "callback_query" in update:
+            callback_query = update["callback_query"]
+            data = callback_query["data"]
+            # Заглушка: реальна логіка обробки callback-ів тут
+            tg_answer_callback(callback_query["id"], f"Обрано: {data}")
+
+        # --- End Simplified Logic ---
+
+    except BadRequest as e:
+        logger.error(f"❌ Bad request error: {e}")
+        return jsonify({"ok": False, "error": "Bad Request"}), 400
+    except Exception as e:
+        logger.exception(f"❌ Unhandled error during webhook processing: {e}")
+        return jsonify({"ok": False, "error": "Internal Server Error"}), 500
+
+    return jsonify({"ok": True}), 200
+
+# ====================================================================
+# Webhook Setup Endpoint (for manual setup or testing)
+# ====================================================================
+
+@app.route("/set-webhook", methods=["GET"])
+def set_webhook_route():
+    """Встановлює вебхук для бота, використовуючи функцію з сервісу."""
+    if not RENDER_URL:
+        return jsonify({"ok": False, "error": "RENDER_URL is not set in config"}), 500
         
-        logger.info(f"➡️ Callback from {chat_id}: {data}")
-        
-        answer_callback(callback_id, f"Вибрано: {data}")
-        send_message(chat_id, f"Вибрано: **{data}**")
-
-# ========== Обробка помилок Flask ==========
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Not found"}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"Internal error: {error}")
-    return jsonify({"error": "Internal server error"}), 500
+    logger.info(f"Attempting to set webhook to: {RENDER_URL}/{WEBHOOK_SECRET}")
+    response_data = tg_set_webhook(RENDER_URL)
+    return jsonify(response_data)
 
 
-# ========== Запуск і Ініціалізація ==========
+# ====================================================================
+# Initialization and Startup Logic
+# ====================================================================
 
-# Ініціалізація сервісів (заглушка)
 def init_services():
-    """Ініціалізує всі сервіси"""
+    """Ініціалізує всі необхідні сервіси (DB, Sheets, Gemini)"""
     logger.info("Running service initialization...")
-    # Тут мають бути реальні виклики ініціалізації БД, Sheets, Gemini
+    
+    # Тут має бути справжня логіка ініціалізації:
+    # 1. База даних: init_user_db()
+    # 2. Google Sheets: init_gspread_client()
+    # 3. Gemini AI: init_gemini_client()
+    
     logger.info("Services initialization finished.")
+    return True
 
 
 with app.app_context():
     try:
-        init_services() 
-        logger.info("✅ Services initialization completed.")
+        from config import log_config
+        log_config()
+    except Exception:
+        # У випадку, якщо навіть fallback config не спрацював
+        logger.error("❌ Failed to run log_config function.")
 
-        # Установка вебхука при запуску в production
-        if WEBHOOK_URL and BOT_TOKEN and WEBHOOK_SECRET:
-            response = requests.get(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                params={
-                    "url": WEBHOOK_URL,
-                    "secret_token": WEBHOOK_SECRET
-                },
-                timeout=10
-            )
-            logger.info(f"Webhook set response: {response.json()}")
-        
-    except Exception as e:
-        logger.exception(f"❌ Critical startup error: {e}")
+    logger.info("Starting up FerrikFootBot...")
+    
+    # Виконуємо ініціалізацію
+    if init_services():
+        logger.info("🎉 FerrikFootBot ready to handle webhooks!")
+    else:
+        logger.error("❌ FerrikFootBot startup failed!")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     
-    if debug_mode:
-        app.run(host="0.0.0.0", port=port, debug=True)
+    if DEBUG:
+        app.run(host="0.0.0.0", port=PORT, debug=True)
+    else:
+        # Установка вебхука при запуску в production
+        logger.info("Running in production mode. Relying on external webhook setup.")

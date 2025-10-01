@@ -1,56 +1,57 @@
 import os
 import logging
+import json
 from flask import Flask, request, jsonify
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_cors import CORS
 from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    logging.warning("zoneinfo not found. Using naive datetime.")
+    ZoneInfo = None
 
-# Налаштування логування
+# Імпорти сервісів
+try:
+    from services.sheets import init_gspread_client, get_menu_from_sheet, save_order_to_sheets, is_sheets_connected, search_menu_items
+    from services.gemini import init_gemini_client, get_ai_response, is_gemini_connected
+    from services.telegram import send_message, answer_callback, send_photo
+    from models.user import init_user_db
+except Exception as e:
+    logging.error(f"❌ Import error: {str(e)}", exc_info=True)
+
+# Налаштування логів
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(), logging.FileHandler('bonapp.log')]
 )
-logger = logging.getLogger('ferrik')
+logger = logging.getLogger("bonapp")
 
 # Ініціалізація Flask
 app = Flask(__name__)
+CORS(app)
+limiter = Limiter(app, key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
 
-# Імпорти з обробкою помилок
-logger.info("🚀 Starting FerrikFootBot...")
+# Змінні середовища
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "BonApp123!").strip()
+SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
+OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID", "").strip()
+TIMEZONE_NAME = os.environ.get("TIMEZONE", "Europe/Kyiv").strip()
 
-try:
-    from config import BOT_TOKEN, GEMINI_API_KEY, SPREADSHEET_ID
-    logger.info("✅ Config imported successfully")
-except Exception as e:
-    logger.error(f"❌ Config import error: {e}")
-
-try:
-    from services.sheets import init_gspread_client, get_menu_from_sheet, save_order_to_sheets, is_sheets_connected, search_menu_items
-    logger.info("✅ Sheets service imported")
-except Exception as e:
-    logger.error(f"❌ Sheets import error: {e}")
-
-try:
-    from services.gemini import init_gemini_client, get_ai_response, is_gemini_connected
-    logger.info("✅ Gemini service imported")
-except Exception as e:
-    logger.error(f"❌ Gemini import error: {e}")
-
-try:
-    from models.user import init_user_db
-    logger.info("✅ User model imported")
-except Exception as e:
-    logger.error(f"❌ User model import error: {e}")
-
+# Сховище кошиків
+user_carts = {}
 
 # Ініціалізація сервісів
 def init_services():
-    """Ініціалізує всі сервіси бота"""
-    logger.info("🔧 Initializing services...")
-    
+    logger.info("🔧 Initializing BonApp services...")
     try:
         init_user_db()
         logger.info("✅ User database initialized")
     except Exception as e:
-        logger.error(f"❌ User DB initialization failed: {e}")
+        logger.error(f"❌ User DB initialization failed: {str(e)}", exc_info=True)
     
     sheets_ok = False
     try:
@@ -60,7 +61,7 @@ def init_services():
         else:
             logger.warning("⚠️ Google Sheets connection failed")
     except Exception as e:
-        logger.error(f"❌ Sheets initialization error: {e}")
+        logger.error(f"❌ Sheets initialization error: {str(e)}", exc_info=True)
     
     gemini_ok = False
     try:
@@ -70,32 +71,24 @@ def init_services():
         else:
             logger.warning("⚠️ Gemini AI connection failed")
     except Exception as e:
-        logger.error(f"❌ Gemini initialization error: {e}")
+        logger.error(f"❌ Gemini initialization error: {str(e)}", exc_info=True)
     
-    logger.info("🎉 FerrikFootBot initialization completed!")
+    logger.info("🎉 BonApp initialization completed!")
     return sheets_ok, gemini_ok
 
-
-# Ініціалізуємо при старті
 init_services()
-
-# 🛒 Сховище кошиків користувачів (chat_id -> список страв)
-user_carts = {}
-
 
 # ============= ROUTES =============
 
 @app.route('/')
 def home():
-    """Головна сторінка - показує статус бота"""
     try:
         menu_count = len(get_menu_from_sheet()) if is_sheets_connected() else 0
     except:
         menu_count = 0
-    
     return jsonify({
         "status": "running",
-        "bot": "FerrikFootBot",
+        "bot": "BonApp",
         "version": "2.1",
         "services": {
             "google_sheets": is_sheets_connected(),
@@ -104,7 +97,6 @@ def home():
         "menu_items": menu_count,
         "timestamp": datetime.now().isoformat()
     })
-
 
 @app.route('/health')
 def health():
@@ -119,7 +111,6 @@ def health():
         }
     }), status_code
 
-
 @app.route('/keep-alive')
 def keep_alive():
     return jsonify({
@@ -128,72 +119,66 @@ def keep_alive():
         "uptime": "running"
     }), 200
 
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if WEBHOOK_SECRET and header_secret != WEBHOOK_SECRET:
+        logger.warning("Invalid webhook secret: %s", header_secret)
+        return jsonify({"ok": False, "error": "invalid secret"}), 403
+
+    update = request.get_json(silent=True)
+    if not update:
+        logger.warning("⚠️ Empty update received")
+        return jsonify({"ok": True}), 200
+    
     try:
-        update = request.get_json()
-        if not update:
-            logger.warning("⚠️ Empty update received")
-            return jsonify({"ok": True}), 200
-        
-        logger.info(f"📨 Received update: {update.get('update_id', 'unknown')}")
-        
+        logger.info(f"📨 Update {update.get('update_id', 'unknown')}")
         if 'message' in update:
             handle_message(update['message'])
         elif 'callback_query' in update:
             handle_callback_query(update['callback_query'])
         else:
             logger.warning(f"⚠️ Unknown update type: {list(update.keys())}")
-        
         return jsonify({"ok": True}), 200
-        
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        logger.error(f"❌ Webhook error: {str(e)}", exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
-
 
 # ============= HANDLERS =============
 
 def handle_message(message):
     try:
         chat_id = message.get('chat', {}).get('id')
-        text = message.get('text', '')
+        text = message.get('text', '').strip()
         user = message.get('from', {})
-        
         if not chat_id:
             logger.error("No chat_id in message")
             return
-        
-        username = user.get('first_name', 'User')
-        logger.info(f"👤 Message from {username} ({chat_id}): {text}")
+        username = user.get('first_name', 'Друже')
+        logger.info(f"👤 {username} ({chat_id}): {text}")
         
         if text.startswith('/'):
             handle_command(chat_id, text, user)
         else:
             handle_text_message(chat_id, text, user)
-            
     except Exception as e:
-        logger.error(f"❌ Error in handle_message: {e}", exc_info=True)
-        try:
-            send_message(chat_id, "⚠️ Виникла помилка. Спробуйте ще раз.")
-        except:
-            pass
-
+        logger.error(f"❌ Error in handle_message: {str(e)}", exc_info=True)
+        send_message(chat_id, "⚠️ Виникла помилка. Спробуйте ще раз. 😔")
 
 def handle_command(chat_id, command, user):
     try:
         cmd = command.split()[0].lower()
-        username = user.get('first_name', 'друже')
+        username = user.get('first_name', 'Друже')
         
         if cmd == '/start':
             welcome_text = f"""
 👋 <b>Вітаю, {username}!</b>
 
-Я <b>FerrikFootBot</b> - ваш помічник у замовленні їжі! 🍕
+Я <b>BonApp</b> - ваш помічник у замовленні їжі! 🍕
 
 <b>Що я вмію:</b>
 🍔 Показати меню
+📂 Показати категорії
 🛒 Додати страви у кошик
 📝 Оформити замовлення
 🤖 Допомогти з вибором через AI
@@ -205,16 +190,16 @@ def handle_command(chat_id, command, user):
 """
             keyboard = {
                 "keyboard": [
-                    [{"text": "🍕 Меню"}, {"text": "🛒 Кошик"}],
-                    [{"text": "ℹ️ Допомога"}]
+                    [{"text": "🍕 Меню"}, {"text": "📂 Категорії"}],
+                    [{"text": "🛒 Кошик"}, {"text": "ℹ️ Допомога"}]
                 ],
                 "resize_keyboard": True
             }
             send_message(chat_id, welcome_text, keyboard)
-            
+        
         elif cmd == '/menu':
-            show_menu_with_cart_buttons(chat_id)
-            
+            show_menu(chat_id)
+        
         elif cmd == '/cart':
             cart = user_carts.get(chat_id, [])
             if not cart:
@@ -223,17 +208,25 @@ def handle_command(chat_id, command, user):
                 text = "🛒 <b>Ваш кошик:</b>\n\n"
                 total = 0
                 for item in cart:
-                    name = item.get("Страви", "Без назви")
+                    name = item.get("Назва Страви", "Без назви")
                     price = int(item.get("Ціна", 0))
                     text += f"• {name} – {price} грн\n"
                     total += price
-                text += f"\n<b>Разом:</b> {total} грн\n\n" \
-                        f"Щоб оформити замовлення, натисніть /order"
+                text += f"\n<b>Разом:</b> {total} грн\n\nЩоб оформити замовлення, натисніть /order"
                 send_message(chat_id, text)
+        
+        elif cmd == '/order':
+            cart = user_carts.get(chat_id, [])
+            if not cart:
+                send_message(chat_id, "🛒 Ваш кошик порожній")
+            else:
+                save_order_to_sheets(chat_id, cart)
+                send_message(chat_id, "✅ Замовлення прийнято! Ми з вами зв'яжемось для підтвердження 📞")
+                user_carts[chat_id] = []
         
         elif cmd == '/help':
             help_text = """
-<b>📖 Довідка FerrikFootBot</b>
+<b>📖 Довідка BonApp</b>
 
 /start - Почати роботу
 /menu - Переглянути меню
@@ -243,71 +236,64 @@ def handle_command(chat_id, command, user):
 """
             send_message(chat_id, help_text)
         
-        elif cmd == '/order':
-            cart = user_carts.get(chat_id, [])
-            if not cart:
-                send_message(chat_id, "🛒 Ваш кошик порожній")
-            else:
-                send_message(chat_id, "✅ Замовлення прийнято! Ми з вами зв'яжемось для підтвердження 📞")
-                # TODO: тут можна додати save_order_to_sheets(cart)
-                user_carts[chat_id] = []  # очищаємо кошик після замовлення
-        
         else:
             send_message(chat_id, f"Невідома команда: {cmd}\nВикористайте /help")
     except Exception as e:
-        logger.error(f"❌ Error in handle_command: {e}", exc_info=True)
-
+        logger.error(f"❌ Error in handle_command: {str(e)}", exc_info=True)
+        send_message(chat_id, "⚠️ Виникла помилка. Спробуйте ще раз. 😔")
 
 def handle_text_message(chat_id, text, user):
     try:
         text_lower = text.lower()
         
-        if text in ['🍕 меню', 'меню']:
-            show_menu_with_cart_buttons(chat_id)
+        if text in ['🍕 Меню', 'меню']:
+            show_menu(chat_id)
             return
         
-        if text in ['🛒 кошик', 'кошик']:
+        if text in ['📂 Категорії', 'категорії']:
+            show_categories(chat_id)
+            return
+        
+        if text in ['🛒 Кошик', 'кошик']:
             handle_command(chat_id, '/cart', user)
             return
         
-        if text in ['ℹ️ допомога', 'допомога']:
+        if text in ['ℹ️ Допомога', 'допомога']:
             handle_command(chat_id, '/help', user)
             return
         
         if any(kw in text_lower for kw in ['піца', 'салат', 'бургер', 'напій']):
-            try:
-                results = search_menu_items(text)
-                if results:
-                    response = f"🔍 <b>Знайдено:</b>\n\n"
-                    for item in results[:5]:
-                        response += f"<b>{item.get('Страви')}</b>\n"
-                        response += f"💰 {item.get('Ціна')} грн\n\n"
-                    send_message(chat_id, response)
-                    return
-            except Exception as e:
-                logger.error(f"Search error: {e}")
+            results = search_menu_items(text)
+            if results:
+                response = f"🔍 <b>Знайдено:</b>\n\n"
+                for item in results[:5]:
+                    name = item.get('Назва Страви', 'Без назви')
+                    price = item.get('Ціна', '—')
+                    description = item.get('Опис', '')
+                    photo_url = item.get('Фото URL', '')
+                    response += f"<b>{name}</b>\n💰 {price} грн\n{description}\n\n"
+                    if photo_url:
+                        send_photo(chat_id, photo_url, f"{name} – {price} грн\n{description}")
+                send_message(chat_id, response)
+                return
         
         if is_gemini_connected():
-            try:
-                user_context = {
-                    'first_name': user.get('first_name', ''),
-                    'username': user.get('username', '')
-                }
-                ai_response = get_ai_response(text, user_context)
-                send_message(chat_id, ai_response)
-            except Exception as e:
-                logger.error(f"AI error: {e}")
-                send_message(chat_id, "Не зовсім зрозумів. Спробуйте /menu або /help")
+            user_context = {
+                'first_name': user.get('first_name', ''),
+                'username': user.get('username', '')
+            }
+            ai_response = get_ai_response(text, user_context)
+            send_message(chat_id, f"🤖 {ai_response}")
         else:
             send_message(chat_id, "Використовуйте кнопки меню або команду /help")
     except Exception as e:
-        logger.error(f"❌ Error in handle_text_message: {e}", exc_info=True)
+        logger.error(f"❌ Error in handle_text_message: {str(e)}", exc_info=True)
+        send_message(chat_id, "⚠️ Виникла помилка. Спробуйте ще раз. 😔")
 
-
-def show_menu_with_cart_buttons(chat_id):
+def show_menu(chat_id):
     try:
         if not is_sheets_connected():
-            send_message(chat_id, "❌ Меню тимчасово недоступне")
+            send_message(chat_id, "❌ Меню тимчасово недоступне 😔")
             return
         menu = get_menu_from_sheet()
         if not menu:
@@ -315,7 +301,7 @@ def show_menu_with_cart_buttons(chat_id):
             return
         buttons = []
         for idx, item in enumerate(menu[:10]):
-            name = item.get("Страви", "Без назви")
+            name = item.get("Назва Страви", "Без назви")
             price = item.get("Ціна", "—")
             buttons.append([{
                 "text": f"{name} – {price} грн 🛒",
@@ -324,9 +310,25 @@ def show_menu_with_cart_buttons(chat_id):
         keyboard = {"inline_keyboard": buttons}
         send_message(chat_id, "📖 Оберіть страву:", keyboard)
     except Exception as e:
-        logger.error(f"❌ Error in show_menu_with_cart_buttons: {e}")
-        send_message(chat_id, "Помилка показу меню")
+        logger.error(f"❌ Error in show_menu: {str(e)}", exc_info=True)
+        send_message(chat_id, "Помилка показу меню 😔 Спробуйте ще раз.")
 
+def show_categories(chat_id):
+    try:
+        if not is_sheets_connected():
+            send_message(chat_id, "❌ Категорії тимчасово недоступні 😔")
+            return
+        menu = get_menu_from_sheet()
+        categories = set(item.get("Категорія", "Без категорії") for item in menu if item.get("Активний", "Так").lower() == "так")
+        if not categories:
+            send_message(chat_id, "⚠️ Категорії відсутні. Спробуйте /menu")
+            return
+        buttons = [[{"text": cat, "callback_data": f"category_{cat}"}] for cat in sorted(categories)]
+        keyboard = {"inline_keyboard": buttons}
+        send_message(chat_id, "📂 Оберіть категорію:", keyboard)
+    except Exception as e:
+        logger.error(f"❌ Error in show_categories: {str(e)}", exc_info=True)
+        send_message(chat_id, "Помилка показу категорій 😔 Спробуйте ще раз.")
 
 def handle_callback_query(callback_query):
     try:
@@ -340,53 +342,40 @@ def handle_callback_query(callback_query):
             menu = get_menu_from_sheet()
             if 0 <= index < len(menu):
                 item = menu[index]
-                name = item.get("Страви", "Без назви")
+                name = item.get("Назва Страви", "Без назви")
                 price = item.get("Ціна", "—")
-
+                photo_url = item.get("Фото URL", "")
                 if chat_id not in user_carts:
                     user_carts[chat_id] = []
                 user_carts[chat_id].append(item)
+                if photo_url:
+                    send_photo(chat_id, photo_url, f"🛒 Додано: {name} ({price} грн)\n\nПереглянути кошик: /cart")
+                else:
+                    send_message(chat_id, f"🛒 Додано: {name} ({price} грн)\n\nПереглянути кошик: /cart")
+                answer_callback(callback_id, "✅ Додано до кошика")
+        
+        elif data.startswith("category_"):
+            category = data.replace("category_", "")
+            menu = get_menu_from_sheet()
+            items = [item for item in menu if item.get("Категорія", "Без категорії") == category and item.get("Активний", "Так").lower() == "так"]
+            if not items:
+                send_message(chat_id, f"⚠️ У категорії {category} немає страв")
+                return
+            buttons = []
+            for idx, item in enumerate(items[:10]):
+                name = item.get("Назва Страви", "Без назви")
+                price = item.get("Ціна", "—")
+                buttons.append([{
+                    "text": f"{name} – {price} грн 🛒",
+                    "callback_data": f"add_{idx}"
+                }])
+            keyboard = {"inline_keyboard": buttons}
+            send_message(chat_id, f"📖 Страви в категорії {category}:", keyboard)
+            answer_callback(callback_id, f"Категорія {category}")
 
-                send_message(chat_id, f"🛒 Додано: {name} ({price} грн)\n\n"
-                                      f"Переглянути кошик: /cart")
-
-        answer_callback(callback_id, "✅ Прийнято")
     except Exception as e:
-        logger.error(f"❌ Callback error: {e}", exc_info=True)
-
-
-# ============= HELPERS =============
-
-def send_message(chat_id, text, reply_markup=None):
-    import requests
-    try:
-        bot_token = os.getenv('BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN')
-        if not bot_token:
-            logger.error("No BOT_TOKEN")
-            return None
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-        if reply_markup:
-            import json
-            payload["reply_markup"] = json.dumps(reply_markup)
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logger.error(f"❌ Send message error: {e}")
-        return None
-
-
-def answer_callback(callback_id, text):
-    import requests
-    try:
-        bot_token = os.getenv('BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN')
-        url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
-        payload = {"callback_query_id": callback_id, "text": text}
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        logger.error(f"❌ Answer callback error: {e}")
-
+        logger.error(f"❌ Callback error: {str(e)}", exc_info=True)
+        send_message(chat_id, "⚠️ Виникла помилка. Спробуйте ще раз. 😔")
 
 # Обробка помилок
 @app.errorhandler(404)
@@ -395,11 +384,9 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    logger.error(f"Internal error: {error}")
+    logger.error(f"Internal error: {str(error)}", exc_info=True)
     return jsonify({"error": "Internal server error"}), 500
 
-
-# Запуск додатку
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)

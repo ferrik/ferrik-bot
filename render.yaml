@@ -1,31 +1,50 @@
 services:
+  # 1. Основний Web Service (Telegram Bot)
   - type: web
     name: ferrik-bot
     env: python
-    plan: free
+    plan: free # Можна змінити на starter або standard, якщо потрібна більша потужність або постійна робота
+    
+    # Виконується один раз при розгортанні
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    
+    # Команда запуску Gunicorn (з вашого Procfile)
     startCommand: gunicorn main:app --workers 4 --timeout 120 --bind 0.0.0.0:$PORT
+    
     envVars:
+      # Налаштування Python
+      # PYTHON_VERSION видалено, оскільки використовується runtime.txt
+      
+      # 2. Telegram та Gemini
       - key: BOT_TOKEN
-        sync: false
+        sync: false # Приховується у логах
       - key: WEBHOOK_SECRET
-        value: Ferrik123  # Рекомендується змінити на унікальний і безпечний секрет
+        value: Ferrik123 # Рекомендується змінити на унікальний і безпечний секрет
       - key: GEMINI_API_KEY
-        sync: false
-      - key: SERVICE_ACCOUNT_KEY_PATH
-        value: /tmp/creds.json
-      - key: SPREADSHEET_ID
-        value: 1Uz8T1E3_8eq8yt4SMh6Fd_KvGpW9Fe0PFI-mtcqSDJI
+        sync: false # Приховується у логах
       - key: OPERATOR_CHAT_ID
-        sync: false
-      - key: CREDS_B64
-        sync: false
+        sync: false # Приховується у логах
+        
+      # 3. Налаштування Google Sheets
+      - key: SPREADSHEET_ID
+        value: 1Uz8T1E3_8eq8yt4SMh6Fd_KvGpW9Fe0PFI-mtcqSDJI # Ваш ID таблиці
+        
+      # 4. Облікові дані Google (Для gspread)
+      # *** ВИКОРИСТАННЯ JSON-РЯДКА ***
       - key: GOOGLE_CREDENTIALS_JSON
-        sync: false
+        sync: false # ЦЕЙ JSON ВСТАНОВЛЮЄТЬСЯ НАПРУЖНУ В НАЛАШТУВАННЯХ RENDER
+        
+      # *** ЗАСТАРІЛЕ / ВИДАЛЕНЕ ***
+      # - key: CREDS_B64  # Видалено, оскільки ви використовуєте GOOGLE_CREDENTIALS_JSON
+      #   sync: false
+      - key: SERVICE_ACCOUNT_KEY_PATH # Цей шлях потрібен, якщо використовується локальний файл,
+        value: /tmp/creds.json      # але при використанні GOOGLE_CREDENTIALS_JSON він може не знадобитись
+                                     # (залежить від логіки services.sheets.py)
+      
+      # 5. Інші налаштування (якщо є)
       - key: MIN_DELIVERY_AMOUNT
         value: 300
       - key: ENABLE_AI_RECOMMENDATIONS
         value: true
       - key: GEMINI_MODEL_NAME
         value: gemini-1.5-flash
-      # Видалено PYTHON_VERSION, щоб використовувати runtime.txt (Python 3.12.3) 

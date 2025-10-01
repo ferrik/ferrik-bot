@@ -194,4 +194,42 @@ def manual_test_mode():
             
             input("\n⏸️ Натисніть Enter після виконання цього кроку...")
         
-        user_result = input(f"\n✅ Сценарій пройшов успішно
+        user_result = input(f"\n✅ Сценарій пройшов успішно? (y/n): ")
+        
+        if user_result.lower() != 'y':
+            print(f"❌ Зафіксовано проблему в сценарії {i}")
+
+
+if __name__ == "__main__":
+    print("🤖 FoodBot Automated Tester")
+    print("=" * 60)
+    
+    # Вибір режиму
+    print("\nОберіть режим тестування:")
+    print("1. Автоматичний (потрібен BOT_TOKEN)")
+    print("2. Ручний (показує кроки для перевірки)")
+    
+    choice = input("\nВаш вибір (1/2): ")
+    
+    if choice == "1":
+        # Автоматичний режим
+        bot_token = os.getenv('BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN')
+        test_chat_id = os.getenv('TEST_CHAT_ID')
+        
+        if not bot_token or not test_chat_id:
+            print("\n❌ Помилка: Встановіть змінні BOT_TOKEN та TEST_CHAT_ID")
+            print("export BOT_TOKEN='your_token'")
+            print("export TEST_CHAT_ID='your_chat_id'")
+            sys.exit(1)
+        
+        tester = BotTester(bot_token, test_chat_id)
+        tester.run_all_tests()
+        tester.export_report()
+        
+    elif choice == "2":
+        # Ручний режим
+        manual_test_mode()
+    
+    else:
+        print("❌ Невірний вибір")
+        sys.exit(1)

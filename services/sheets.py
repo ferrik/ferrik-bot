@@ -2,6 +2,7 @@ import os
 import gspread
 from google.oauth2.service_account import Credentials
 import logging
+import json
 
 logger = logging.getLogger("bonapp")
 menu_cache = []
@@ -12,7 +13,6 @@ def init_gspread_client():
         if not creds_json:
             logger.error("GOOGLE_CREDENTIALS_JSON is not set")
             return False
-        import json
         creds_dict = json.loads(creds_json)
         scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)

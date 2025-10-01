@@ -23,7 +23,7 @@ except Exception as e:
     logger.error(f"❌ Config import error: {e}")
 
 try:
-    from services.sheets import init_gspread_client, get_menu_from_sheet, save_order_to_sheets, is_sheets_connected
+    from services.sheets import init_gspread_client, get_menu_from_sheet, save_order_to_sheets, is_sheets_connected, search_menu_items
     logger.info("✅ Sheets service imported")
 except Exception as e:
     logger.error(f"❌ Sheets import error: {e}")
@@ -79,6 +79,9 @@ def init_services():
 # Ініціалізуємо при старті
 init_services()
 
+# 🛒 Сховище кошиків користувачів (chat_id -> список страв)
+user_carts = {}
+
 
 # ============= ROUTES =============
 
@@ -93,7 +96,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "FerrikFootBot",
-        "version": "2.0",
+        "version": "2.1",
         "services": {
             "google_sheets": is_sheets_connected(),
             "gemini_ai": is_gemini_connected()
@@ -191,17 +194,18 @@ def handle_command(chat_id, command, user):
 
 <b>Що я вмію:</b>
 🍔 Показати меню
-📝 Прийняти замовлення
-💬 Відповісти на ваші запитання
-🤖 Допомогти з вибором страв через AI
+🛒 Додати страви у кошик
+📝 Оформити замовлення
+🤖 Допомогти з вибором через AI
 
 <b>Доступні команди:</b>
 /menu - Переглянути меню
+/cart - Переглянути кошик
 /help - Допомога
 """
             keyboard = {
                 "keyboard": [
-                    [{"text": "🍕 Меню"}, {"text": "📝 Замовити"}],
+                    [{"text": "🍕 Меню"}, {"text": "🛒 Кошик"}],
                     [{"text": "ℹ️ Допомога"}]
                 ],
                 "resize_keyboard": True
@@ -211,20 +215,43 @@ def handle_command(chat_id, command, user):
         elif cmd == '/menu':
             show_menu_with_cart_buttons(chat_id)
             
+        elif cmd == '/cart':
+            cart = user_carts.get(chat_id, [])
+            if not cart:
+                send_message(chat_id, "🛒 Ваш кошик порожній")
+            else:
+                text = "🛒 <b>Ваш кошик:</b>\n\n"
+                total = 0
+                for item in cart:
+                    name = item.get("Страви", "Без назви")
+                    price = int(item.get("Ціна", 0))
+                    text += f"• {name} – {price} грн\n"
+                    total += price
+                text += f"\n<b>Разом:</b> {total} грн\n\n" \
+                        f"Щоб оформити замовлення, натисніть /order"
+                send_message(chat_id, text)
+        
         elif cmd == '/help':
             help_text = """
 <b>📖 Довідка FerrikFootBot</b>
 
 /start - Почати роботу
 /menu - Переглянути меню
+/cart - Переглянути кошик
+/order - Оформити замовлення
 /help - Ця довідка
-
-<b>Як замовити:</b>
-1️⃣ Натисніть /menu або "🍕 Меню"
-2️⃣ Оберіть страву
-3️⃣ Я допоможу оформити замовлення
 """
             send_message(chat_id, help_text)
+        
+        elif cmd == '/order':
+            cart = user_carts.get(chat_id, [])
+            if not cart:
+                send_message(chat_id, "🛒 Ваш кошик порожній")
+            else:
+                send_message(chat_id, "✅ Замовлення прийнято! Ми з вами зв'яжемось для підтвердження 📞")
+                # TODO: тут можна додати save_order_to_sheets(cart)
+                user_carts[chat_id] = []  # очищаємо кошик після замовлення
+        
         else:
             send_message(chat_id, f"Невідома команда: {cmd}\nВикористайте /help")
     except Exception as e:
@@ -235,21 +262,19 @@ def handle_text_message(chat_id, text, user):
     try:
         text_lower = text.lower()
         
-        if text in ['🍕 Меню', 'Меню']:
+        if text in ['🍕 меню', 'меню']:
             show_menu_with_cart_buttons(chat_id)
             return
         
-        if text in ['📝 Замовити', 'Замовити']:
-            send_message(chat_id, "Щоб замовити, оберіть страву через /menu")
+        if text in ['🛒 кошик', 'кошик']:
+            handle_command(chat_id, '/cart', user)
             return
         
-        if text in ['ℹ️ Допомога', 'Допомога']:
+        if text in ['ℹ️ допомога', 'допомога']:
             handle_command(chat_id, '/help', user)
             return
         
-        from services.sheets import search_menu_items
-        keywords = ['піца', 'паста', 'салат', 'напій', 'сік']
-        if any(kw in text_lower for kw in keywords):
+        if any(kw in text_lower for kw in ['піца', 'салат', 'бургер', 'напій']):
             try:
                 results = search_menu_items(text)
                 if results:
@@ -277,51 +302,6 @@ def handle_text_message(chat_id, text, user):
             send_message(chat_id, "Використовуйте кнопки меню або команду /help")
     except Exception as e:
         logger.error(f"❌ Error in handle_text_message: {e}", exc_info=True)
-
-
-def show_menu(chat_id):
-    try:
-        if not is_sheets_connected():
-            send_message(chat_id, "❌ Меню тимчасово недоступне")
-            return
-        menu = get_menu_from_sheet()
-        if not menu:
-            send_message(chat_id, "⚠️ Меню порожнє")
-            return
-        categories = {}
-        for item in menu:
-            cat = item.get('Категорія', 'Інше')
-            if cat not in categories:
-                categories[cat] = []
-            categories[cat].append(item)
-        menu_text = "<b>🍽 Наше меню:</b>\n\n"
-        for category, items in categories.items():
-            menu_text += f"<b>{category}:</b>\n"
-            for item in items[:5]:
-                menu_text += f"• {item.get('Страви')} - {item.get('Ціна')} грн\n"
-            menu_text += "\n"
-        send_message(chat_id, menu_text)
-    except Exception as e:
-        logger.error(f"❌ Error showing menu: {e}", exc_info=True)
-        send_message(chat_id, "Помилка завантаження меню")
-
-
-def show_categories(chat_id):
-    try:
-        if not is_sheets_connected():
-            send_message(chat_id, "❌ Категорії тимчасово недоступні")
-            return
-        menu = get_menu_from_sheet()
-        if not menu:
-            send_message(chat_id, "⚠️ Немає категорій")
-            return
-        categories = list({item.get("Категорія", "Інше") for item in menu})
-        buttons = [[{"text": cat, "callback_data": f"category_{i}"}] for i, cat in enumerate(categories)]
-        keyboard = {"inline_keyboard": buttons}
-        send_message(chat_id, "📂 Оберіть категорію:", keyboard)
-    except Exception as e:
-        logger.error(f"❌ Error in show_categories: {e}")
-        send_message(chat_id, "Помилка показу категорій")
 
 
 def show_menu_with_cart_buttons(chat_id):
@@ -354,10 +334,28 @@ def handle_callback_query(callback_query):
         callback_id = callback_query.get('id')
         data = callback_query.get('data', '')
         logger.info(f"🔘 Callback from {chat_id}: {data}")
+
+        if data.startswith("add_"):
+            index = int(data.split("_")[1])
+            menu = get_menu_from_sheet()
+            if 0 <= index < len(menu):
+                item = menu[index]
+                name = item.get("Страви", "Без назви")
+                price = item.get("Ціна", "—")
+
+                if chat_id not in user_carts:
+                    user_carts[chat_id] = []
+                user_carts[chat_id].append(item)
+
+                send_message(chat_id, f"🛒 Додано: {name} ({price} грн)\n\n"
+                                      f"Переглянути кошик: /cart")
+
         answer_callback(callback_id, "✅ Прийнято")
     except Exception as e:
         logger.error(f"❌ Callback error: {e}", exc_info=True)
 
+
+# ============= HELPERS =============
 
 def send_message(chat_id, text, reply_markup=None):
     import requests

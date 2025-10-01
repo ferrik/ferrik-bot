@@ -1,12 +1,19 @@
 import os
 import logging
-from dotenv import load_dotenv
-
-# Завантажуємо змінні з .env файлу (якщо є)
-load_dotenv()
 
 # Налаштування логування
 logger = logging.getLogger('config')
+
+# Зробимо dotenv необов'язковим для розгортання, де змінні встановлюються напряму.
+# Вирішує помилку 'No module named 'dotenv'' під час імпорту.
+try:
+    from dotenv import load_dotenv
+    # Завантажуємо змінні з .env файлу (якщо є). Тільки для локального запуску.
+    load_dotenv()
+    logger.info("✅ python-dotenv imported and .env loaded (if present).")
+except ImportError:
+    logger.warning("⚠️ python-dotenv not found. Relying solely on environment variables.")
+
 
 # Telegram Bot Token
 BOT_TOKEN = os.environ.get('BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -34,20 +41,21 @@ if not GOOGLE_CREDENTIALS_JSON and not CREDS_B64:
 OPERATOR_CHAT_ID = os.environ.get('OPERATOR_CHAT_ID', '')
 
 # Webhook Configuration
+# WEBHOOK_URL - це повний шлях до вебхука, включаючи /webhook.
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://ferrik-bot-zvev.onrender.com/webhook')
-# ДОДАНО: Секретний токен для перевірки вебхука
-WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'Ferrik123').strip()
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'Ferrik123')
+# RENDER_URL - це базова URL для health check та setWebhook
+RENDER_URL = WEBHOOK_URL.replace('/webhook', '')
 
 # App Configuration
 DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
 PORT = int(os.environ.get('PORT', 5000))
-
-# Logging Configuration
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+TIMEZONE_NAME = os.environ.get('TIMEZONE_NAME', 'Europe/Kiev') # Для коректного часу доби
 
 # Feature Flags
 ENABLE_AI_RECOMMENDATIONS = os.environ.get('ENABLE_AI_RECOMMENDATIONS', 'True').lower() == 'true'
-ENABLE_GOOGLE_SHEETS = os.environ.get('ENABLE_GOOGLE_SHEETS', 'True').lower() == 'true'
+GEMINI_MODEL_NAME = os.environ.get('GEMINI_MODEL_NAME', 'gemini-1.5-flash')
+MIN_DELIVERY_AMOUNT = int(os.environ.get('MIN_DELIVERY_AMOUNT', 300))
 
 # Cache Configuration
 MENU_CACHE_TTL = int(os.environ.get('MENU_CACHE_TTL', 3600))  # 1 hour
@@ -73,8 +81,19 @@ SUCCESS_MESSAGES = {
 def validate_config():
     """Валідація конфігурації при запуску"""
     issues = []
+    
     if not BOT_TOKEN:
         issues.append("BOT_TOKEN is missing - Bot cannot communicate with Telegram")
+    
+    # AI/Sheets validation is soft (features are disabled if missing)
+    if not GEMINI_API_KEY and ENABLE_AI_RECOMMENDATIONS:
+        issues.append("GEMINI_API_KEY is missing, but ENABLE_AI_RECOMMENDATIONS=True - AI features will fail")
+    
+    if not SPREADSHEET_ID:
+        issues.append("SPREADSHEET_ID is missing - Google Sheets features disabled")
+    
+    if not GOOGLE_CREDENTIALS_JSON and not CREDS_B64:
+        issues.append("Google credentials missing - cannot access Google Sheets")
     
     if issues:
         logger.warning("Configuration issues detected:")
@@ -91,14 +110,12 @@ def log_config():
     logger.info("=" * 50)
     logger.info("Configuration Summary:")
     logger.info(f"  BOT_TOKEN: {'✅ Set' if BOT_TOKEN else '❌ Missing'}")
-    logger.info(f"  WEBHOOK_SECRET: {'✅ Set' if WEBHOOK_SECRET else '❌ Missing'}")
-    logger.info(f"  WEBHOOK_URL: {WEBHOOK_URL}")
     logger.info(f"  GEMINI_API_KEY: {'✅ Set' if GEMINI_API_KEY else '❌ Missing'}")
     logger.info(f"  SPREADSHEET_ID: {'✅ Set' if SPREADSHEET_ID else '❌ Missing'}")
     logger.info(f"  CREDS_B64: {'✅ Set' if CREDS_B64 else '❌ Missing'}")
-    logger.info(f"""  OPERATOR_CHAT_ID: {'✅ Set' if OPERATOR_CHAT_ID else '⚠️ Not set'}""")
-    logger.info(f"  DEBUG: {DEBUG}")
-    logger.info(f"  PORT: {PORT}")
+    logger.info(f"  OPERATOR_CHAT_ID: {'✅ Set' if OPERATOR_CHAT_ID else '⚠️ Not set'}")
+    logger.info(f"  WEBHOOK_URL (Base): {RENDER_URL}")
+    logger.info(f"  TIMEZONE_NAME: {TIMEZONE_NAME}")
+    logger.info(f"  MIN_DELIVERY_AMOUNT: {MIN_DELIVERY_AMOUNT}")
     logger.info(f"  ENABLE_AI_RECOMMENDATIONS: {ENABLE_AI_RECOMMENDATIONS}")
-    logger.info(f"  ENABLE_GOOGLE_SHEETS: {ENABLE_GOOGLE_SHEETS}")
     logger.info("=" * 50)

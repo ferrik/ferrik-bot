@@ -115,8 +115,8 @@ def init_services():
             if is_sheets_connected():
                 logger.info("✅ Google Sheets client initialized.")
                 
-                # ВИПРАВЛЕННЯ: викликаємо без force=True
-                menu_data = get_menu_from_sheet(sheets_client)
+                # ВИПРАВЛЕННЯ: викликаємо без аргументів
+                menu_data = get_menu_from_sheet()
                 menu_cache = menu_data if menu_data is not None else {}
                 logger.info(f"✅ Menu cached: {len(menu_cache)} items.")
             else:
@@ -321,17 +321,16 @@ def index():
     })
 
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
+@app.route('/<path:secret>', methods=['POST'])
+def webhook(secret):
     """Обробка вхідних вебхуків від Telegram"""
+    # Перевірка secret token через URL path
+    if secret != WEBHOOK_SECRET:
+        logger.warning(f"Invalid webhook path: {secret}")
+        return jsonify({'status': 'unauthorized'}), 401
+    
     if request.method != 'POST':
         return jsonify({'status': 'method not allowed'}), 405
-    
-    # Перевірка secret token (якщо використовується)
-    secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-    if secret_token != WEBHOOK_SECRET:
-        logger.warning(f"Invalid secret token: {secret_token}")
-        return jsonify({'status': 'unauthorized'}), 401
     
     try:
         update = request.get_json()

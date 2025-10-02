@@ -515,6 +515,30 @@ def index():
         'timestamp': datetime.now().isoformat()
     })
 
+@app.route('/test-menu', methods=['GET'])
+def test_menu():
+    """Тестовий endpoint для перевірки меню"""
+    try:
+        # Перевірка підключення
+        is_connected = is_sheets_connected()
+        
+        # Спроба завантажити меню
+        menu = get_menu_from_sheet()
+        
+        return jsonify({
+            'sheets_connected': is_connected,
+            'menu_items_count': len(menu),
+            'menu_cached': len(menu_cache),
+            'sample_items': menu[:3] if menu else [],
+            'spreadsheet_id': os.environ.get('GOOGLE_SHEET_ID') or os.environ.get('SPREADSHEET_ID'),
+            'has_credentials': bool(os.environ.get('GOOGLE_CREDENTIALS_JSON'))
+        })
+    except Exception as e:
+        return jsonify({
+            'error': str(e),
+            'error_type': type(e).__name__
+        }), 500
+
 @app.route('/<path:secret>', methods=['POST'])
 def webhook(secret):
     if secret != WEBHOOK_SECRET:

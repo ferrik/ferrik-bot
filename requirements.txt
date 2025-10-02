@@ -1,14 +1,26 @@
-Flask==3.0.3
-requests==2.31.0
+# Web framework
+Flask==3.0.0
 gunicorn==22.0.0
-gspread==6.1.4
-google-generativeai==0.8.3
-google-auth==2.35.0
-google-auth-oauthlib==1.2.1
-google-auth-httplib2==0.2.0
-google-api-python-client==2.183.0
-geopy==2.4.1
-flask-limiter==3.11.0
-flask-cors==4.0.1
-flask-jwt-extended==4.6.0
-python-telegram-bot==20.7
+
+# Telegram
+requests==2.31.0
+
+# Google Sheets
+gspread==5.12.0
+google-auth==2.25.2
+google-auth-oauthlib==1.2.0
+
+# AI
+google-generativeai==0.3.1
+
+# Retry logic
+tenacity==8.2.3
+
+# Environment variables (optional for local dev)
+python-dotenv==1.0.0
+
+# Database (optional, якщо додасте SQLite)
+# sqlalchemy==2.0.23
+
+# Redis (optional, для масштабування)
+# redis==5.0.1

@@ -47,7 +47,13 @@ if not OPERATOR_CHAT_ID:
 # Webhook Configuration
 # WEBHOOK_URL - це повний шлях до вебхука, включаючи /webhook або таємний шлях
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://ferrik-bot-zvev.onrender.com/webhook')
-WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'Ferrik123')
+
+# CRITICAL: WEBHOOK_SECRET має бути складним і унікальним
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
+if not WEBHOOK_SECRET:
+    logger.critical("WEBHOOK_SECRET not set - this is a security risk!")
+    # В production не використовуйте fallback!
+    raise RuntimeError("WEBHOOK_SECRET must be set in environment variables")
 
 # RENDER_URL - це базова URL для health check та setWebhook
 # Більш безпечний спосіб отримати базову URL

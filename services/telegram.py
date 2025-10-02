@@ -63,6 +63,7 @@ def tg_set_webhook(url):
             logger.error("❌ BOT_TOKEN not set for webhook setup.")
             return {"ok": False, "error": "BOT_TOKEN not set"}
         
+        # ВИПРАВЛЕННЯ: webhook URL має включати WEBHOOK_SECRET в шляху
         webhook_url_full = f"{url}/{WEBHOOK_SECRET}" 
         
         # Використовуємо POST замість GET для setWebhook

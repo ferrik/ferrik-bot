@@ -542,4 +542,4 @@ with app.app_context():
 if __name__ == "__main__":
     logger.warning("Use gunicorn for production: gunicorn -w 4 main:app")
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False) 

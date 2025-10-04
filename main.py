@@ -69,13 +69,15 @@ menu_cache = []
 user_carts = defaultdict(list)
 user_states = {}
 
-# Константи
-KEY_NAME = "Назва Страви"
+# Константи (адаптовані під вашу таблицю)
+KEY_NAME = "Назва Страви"  # В sheets.py конвертується з "Страви"
 KEY_PRICE = "Ціна"
 KEY_CATEGORY = "Категорія"
 KEY_DESCRIPTION = "Опис"
 KEY_WEIGHT = "Вага"
 KEY_ID = "ID"
+KEY_RESTAURANT = "Ресторан"
+KEY_RATING = "Рейтинг"
 
 MAX_CALLBACK_LENGTH = 64
 
@@ -181,12 +183,16 @@ def format_item(item, show_full=False):
     
     if show_full:
         desc = html_escape(item.get(KEY_DESCRIPTION, ""))
-        weight = html_escape(item.get(KEY_WEIGHT, ""))
+        restaurant = html_escape(item.get(KEY_RESTAURANT, ""))
+        rating = item.get(KEY_RATING, "")
+        
         text = f"<b>{name}</b>\n"
         if desc:
             text += f"{desc}\n"
-        if weight:
-            text += f"⚖️ {weight}\n"
+        if restaurant:
+            text += f"🏪 {restaurant}\n"
+        if rating:
+            text += f"⭐ {rating}\n"
         text += f"💰 <b>{price} грн</b>"
         return text
     else:

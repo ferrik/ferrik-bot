@@ -6,7 +6,6 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape as html_escape
 from threading import RLock
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Налаштування логування
 logging.basicConfig(
@@ -15,14 +14,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Ініціалізація Flask
 app = Flask(__name__)
 
 # Thread-safe locks
 carts_lock = RLock()
 states_lock = RLock()
 
-# Імпорти з обробкою помилок
+# Імпорти
 logger.info("Starting Hubsy Bot...")
 
 try:
@@ -31,54 +29,47 @@ try:
         WEBHOOK_SECRET, validate_config, log_config
     )
     
-    # Критична перевірка конфігурації
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN not set")
         raise RuntimeError("BOT_TOKEN is required")
     
-    if not WEBHOOK_SECRET or WEBHOOK_SECRET == 'Ferrik123':
-        logger.critical("WEBHOOK_SECRET not set or using default")
-        raise RuntimeError("WEBHOOK_SECRET must be set to secure value")
+    if not WEBHOOK_SECRET:
+        logger.critical("WEBHOOK_SECRET not set")
+        raise RuntimeError("WEBHOOK_SECRET must be set")
     
     logger.info("Config imported successfully")
     
-except ImportError as e:
-    logger.exception("Config import error")
-    raise RuntimeError(f"Failed to import config: {e}")
 except Exception as e:
-    logger.exception("Config validation error")
+    logger.exception("Config error")
     raise
 
 try:
-    from services.sheets import (
-        init_gspread_client, get_menu_from_sheet, 
-        save_order_to_sheets, is_sheets_connected, search_menu_items
-    )
+    from services.sheets import get_menu_from_sheet, save_order_to_sheets, search_menu_items
     logger.info("Sheets service imported")
-except ImportError as e:
+except Exception as e:
     logger.exception("Sheets import error")
-    raise RuntimeError(f"Failed to import sheets service: {e}")
+    raise
 
 try:
     from services.gemini import init_gemini_client, get_ai_response, is_gemini_connected
     logger.info("Gemini service imported")
-except ImportError as e:
+except Exception as e:
     logger.exception("Gemini import error")
-    raise RuntimeError(f"Failed to import gemini service: {e}")
+    raise
 
 try:
     from services.telegram import tg_send_message, tg_answer_callback, tg_set_webhook
     logger.info("Telegram service imported")
-except ImportError as e:
+except Exception as e:
     logger.exception("Telegram service import error")
-    raise RuntimeError(f"Failed to import telegram service: {e}")
+    raise
 
 # Глобальні змінні
 menu_cache = []
 user_carts = defaultdict(list)
 user_states = {}
 
-# Константи для ключів меню
+# Константи
 KEY_NAME = "Назва Страви"
 KEY_PRICE = "Ціна"
 KEY_CATEGORY = "Категорія"
@@ -86,22 +77,16 @@ KEY_DESCRIPTION = "Опис"
 KEY_WEIGHT = "Вага"
 KEY_ID = "ID"
 
-# Максимальна довжина callback_data
 MAX_CALLBACK_LENGTH = 64
 
 def safe_callback_data(prefix: str, value: str) -> str:
-    """Створює безпечний callback_data обмеженої довжини"""
-    # Видаляємо спецсимволи та обмежуємо довжину
+    """Безпечний callback_data"""
     safe_value = "".join(c for c in str(value) if c.isalnum() or c in "-_")
     callback = f"{prefix}_{safe_value}"
-    
-    if len(callback) > MAX_CALLBACK_LENGTH:
-        callback = callback[:MAX_CALLBACK_LENGTH]
-    
-    return callback
+    return callback[:MAX_CALLBACK_LENGTH]
 
 def parse_price(price_str) -> Decimal:
-    """Безпечний парсинг ціни в Decimal"""
+    """Парсинг ціни в Decimal"""
     try:
         clean_price = str(price_str).replace(",", ".").strip()
         return Decimal(clean_price).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
@@ -109,90 +94,75 @@ def parse_price(price_str) -> Decimal:
         logger.warning(f"Failed to parse price '{price_str}': {e}")
         return Decimal('0.00')
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10)
-)
 def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
-    """Відправка повідомлення з retry та HTML escaping"""
+    """Відправка повідомлення"""
     try:
-        # HTML escaping для безпеки
-        # Зберігаємо дозволені теги
         safe_text = text.replace("&", "&amp;")
         safe_text = safe_text.replace("<", "&lt;").replace(">", "&gt;")
-        
-        # Відновлюємо дозволені теги
         safe_text = safe_text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>")
         safe_text = safe_text.replace("&lt;i&gt;", "<i>").replace("&lt;/i&gt;", "</i>")
-        safe_text = safe_text.replace("&lt;code&gt;", "<code>").replace("&lt;/code&gt;", "</code>")
         
         result = tg_send_message(chat_id, safe_text, reply_markup, parse_mode)
         
         if not result or not result.get('ok'):
-            logger.error(f"Send message failed: {result}")
+            logger.error(f"Send failed: {result}")
             raise RuntimeError("Failed to send message")
         
         return result
         
     except Exception as e:
-        logger.exception(f"Send message error for chat {chat_id}")
+        logger.exception(f"Send error for chat {chat_id}")
         raise
 
 def answer_callback(callback_id, text="", show_alert=False):
-    """Відповідь на callback з обробкою помилок"""
+    """Відповідь на callback"""
     try:
         return tg_answer_callback(callback_id, text, show_alert)
     except Exception as e:
-        logger.exception(f"Callback answer error: {e}")
+        logger.exception(f"Callback answer error")
         return None
 
 def init_services():
-    """Ініціалізація сервісів з proper error handling"""
+    """Ініціалізація сервісів"""
     global menu_cache
     
-    logger.info("Initializing Hubsy services...")
+    logger.info("Initializing services...")
     
     try:
         log_config()
-        if not validate_config():
-            logger.error("Config validation failed")
+        validate_config()
     except Exception as e:
-        logger.exception(f"Config logging error: {e}")
+        logger.exception(f"Config error: {e}")
     
-    # Завантаження меню
     try:
         menu_cache = get_menu_from_sheet()
-        if not menu_cache:
-            logger.warning("Menu is empty")
-        else:
+        if menu_cache:
             logger.info(f"Menu cached: {len(menu_cache)} items")
+        else:
+            logger.warning("Menu is empty")
     except Exception as e:
         logger.exception(f"Menu loading error: {e}")
         menu_cache = []
     
-    # Ініціалізація AI
     try:
         init_gemini_client()
         if is_gemini_connected():
             logger.info("Gemini initialized")
-        else:
-            logger.warning("Gemini not connected")
     except Exception as e:
-        logger.exception(f"Gemini initialization error: {e}")
+        logger.exception(f"Gemini error: {e}")
     
-    # Встановлення webhook
     try:
         from config import RENDER_URL
         result = tg_set_webhook(RENDER_URL)
         if result and result.get('ok'):
             logger.info("Webhook set successfully")
         else:
-            logger.error(f"Webhook setup failed: {result}")
+            logger.error(f"Webhook failed: {result}")
     except Exception as e:
-        logger.exception(f"Webhook setup error: {e}")
+        logger.exception(f"Webhook error: {e}")
 
 def get_categories():
-    """Отримати унікальні категорії"""
+    """Унікальні категорії"""
     categories = set()
     for item in menu_cache:
         cat = item.get(KEY_CATEGORY, "")
@@ -201,11 +171,11 @@ def get_categories():
     return sorted(list(categories))
 
 def get_items_by_category(category):
-    """Отримати страви за категорією"""
+    """Страви за категорією"""
     return [item for item in menu_cache if item.get(KEY_CATEGORY) == category]
 
 def format_item(item, show_full=False):
-    """Форматування страви з екрануванням"""
+    """Форматування страви"""
     name = html_escape(item.get(KEY_NAME, "Без назви"))
     price = item.get(KEY_PRICE, "?")
     
@@ -226,7 +196,7 @@ def handle_start(chat_id):
     """Головне меню"""
     text = (
         "👋 Вітаємо в <b>Hubsy</b>!\n\n"
-        "🍕 Ваш помічник для швидкого замовлення смачної їжі.\n\n"
+        "🍕 Ваш помічник для замовлення їжі.\n\n"
         "Оберіть дію:"
     )
     
@@ -276,11 +246,11 @@ def show_categories(chat_id):
     send_message(chat_id, text, reply_markup=keyboard)
 
 def show_category_items(chat_id, category):
-    """Показати страви категорії"""
+    """Показати страви"""
     items = get_items_by_category(category)
     
     if not items:
-        send_message(chat_id, f"В категорії <b>{html_escape(category)}</b> поки немає страв")
+        send_message(chat_id, f"В категорії <b>{html_escape(category)}</b> немає страв")
         return
     
     text = f"📋 <b>{html_escape(category)}</b>\n\n"
@@ -305,7 +275,7 @@ def show_category_items(chat_id, category):
     send_message(chat_id, text, reply_markup=keyboard)
 
 def add_to_cart(chat_id, item_id):
-    """Додати страву в корзину (thread-safe)"""
+    """Додати в корзину"""
     item = None
     for menu_item in menu_cache:
         if str(menu_item.get(KEY_ID, "")) == str(item_id) or menu_item.get(KEY_NAME) == item_id:
@@ -319,7 +289,7 @@ def add_to_cart(chat_id, item_id):
         user_carts[chat_id].append(item)
     
     name = html_escape(item.get(KEY_NAME, "Страва"))
-    return f"✅ <b>{name}</b> додано в корзину!"
+    return f"✅ <b>{name}</b> додано!"
 
 def show_cart(chat_id):
     """Показати корзину"""
@@ -327,7 +297,7 @@ def show_cart(chat_id):
         cart = list(user_carts.get(chat_id, []))
     
     if not cart:
-        text = "🛒 Ваша корзина порожня\n\nПерегляньте меню та додайте страви!"
+        text = "🛒 Корзина порожня\n\nДодайте страви з меню!"
         keyboard = {
             "inline_keyboard": [[
                 {"text": "📖 Меню", "callback_data": "show_categories"}
@@ -355,8 +325,8 @@ def show_cart(chat_id):
     
     keyboard = {
         "inline_keyboard": [
-            [{"text": "✅ Оформити замовлення", "callback_data": "checkout"}],
-            [{"text": "🗑️ Очистити корзину", "callback_data": "clear_cart"}],
+            [{"text": "✅ Оформити", "callback_data": "checkout"}],
+            [{"text": "🗑️ Очистити", "callback_data": "clear_cart"}],
             [{"text": "➕ Додати ще", "callback_data": "show_categories"}],
             [{"text": "🔙 Назад", "callback_data": "start"}]
         ]
@@ -371,7 +341,7 @@ def clear_cart(chat_id):
     return "🗑️ Корзину очищено"
 
 def checkout(chat_id):
-    """Оформлення замовлення"""
+    """Оформлення"""
     with carts_lock:
         cart = list(user_carts.get(chat_id, []))
     
@@ -386,8 +356,8 @@ def checkout(chat_id):
         
         text = (
             "✅ <b>Замовлення прийнято!</b>\n\n"
-            "📞 Наш менеджер зв'яжеться з вами найближчим часом.\n\n"
-            "Дякуємо що обрали Hubsy! 💙"
+            "📞 Менеджер зв'яжеться з вами.\n\n"
+            "Дякуємо! 💙"
         )
         
         keyboard = {
@@ -401,18 +371,123 @@ def checkout(chat_id):
         
     except Exception as e:
         logger.exception(f"Checkout error: {e}")
-        return "❌ Помилка оформлення. Спробуйте пізніше."
+        return "❌ Помилка. Спробуйте пізніше."
+
+def show_contacts(chat_id):
+    """Контакти"""
+    text = """
+📞 <b>Контакти Hubsy</b>
+
+📱 Телефон: +380 XX XXX XX XX
+📧 Email: hello@hubsy.com
+📍 м. Київ
+
+🕐 Щодня 9:00-23:00
+"""
+    
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "🔙 Назад", "callback_data": "start"}
+        ]]
+    }
+    
+    send_message(chat_id, text, reply_markup=keyboard)
+
+def ai_recommend(chat_id):
+    """AI рекомендації"""
+    if not is_gemini_connected():
+        text = "❌ AI недоступний"
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "🔙 Назад", "callback_data": "start"}
+            ]]
+        }
+        send_message(chat_id, text, reply_markup=keyboard)
+        return
+    
+    try:
+        categories = get_categories()
+        prompt = f"Ти помічник ресторану Hubsy. Порекомендуй 2-3 страви. Категорії: {', '.join(categories)}. Коротко 2-3 речення."
+        
+        recommendation = get_ai_response(prompt)
+        
+        text = f"✨ <b>AI-Рекомендація:</b>\n\n{recommendation}"
+        
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "📖 Меню", "callback_data": "show_categories"}],
+                [{"text": "🔄 Інша порада", "callback_data": "ai_recommend"}],
+                [{"text": "🔙 Назад", "callback_data": "start"}]
+            ]
+        }
+        
+        send_message(chat_id, text, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.exception(f"AI error: {e}")
+        send_message(chat_id, "❌ Помилка AI")
+
+def search_mode(chat_id):
+    """Пошук"""
+    with states_lock:
+        user_states[chat_id] = 'searching'
+    
+    text = "🔍 <b>Пошук</b>\n\nНапишіть назву страви:"
+    
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "❌ Скасувати", "callback_data": "start"}
+        ]]
+    }
+    
+    send_message(chat_id, text, reply_markup=keyboard)
+
+def process_search(chat_id, query):
+    """Обробка пошуку"""
+    results = search_menu_items(query)
+    
+    if not results:
+        text = f"❌ Нічого не знайдено: '<b>{html_escape(query)}</b>'"
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "📖 Все меню", "callback_data": "show_categories"}
+            ]]
+        }
+        send_message(chat_id, text, reply_markup=keyboard)
+        return
+    
+    text = f"🔍 Результати '<b>{html_escape(query)}</b>':\n\n"
+    keyboard = {"inline_keyboard": []}
+    
+    for item in results[:10]:
+        item_text = format_item(item)
+        text += f"• {item_text}\n"
+        
+        item_id = str(item.get(KEY_ID, item.get(KEY_NAME, "")))
+        safe_id = safe_callback_data("add", item_id)
+        
+        keyboard["inline_keyboard"].append([
+            {"text": f"➕ {item.get(KEY_NAME, '')[:25]}", "callback_data": safe_id}
+        ])
+    
+    keyboard["inline_keyboard"].append([
+        {"text": "🔍 Новий пошук", "callback_data": "search_mode"},
+        {"text": "🏠 Головна", "callback_data": "start"}
+    ])
+    
+    send_message(chat_id, text, reply_markup=keyboard)
+    
+    with states_lock:
+        user_states[chat_id] = None
 
 def process_callback_query(callback_query):
-    """Обробка callback з валідацією"""
+    """Обробка callback"""
     try:
         chat_id = callback_query["message"]["chat"]["id"]
         callback_id = callback_query["id"]
         data = callback_query["data"]
-        user_id = callback_query["from"]["id"]
         
-        # Логування для безпеки
-        logger.info(f"Callback from user {user_id}, chat {chat_id}: {data}")
+        logger.info(f"Callback {data} from chat {chat_id}")
         
         answer_callback(callback_id, "⏳")
         
@@ -437,22 +512,34 @@ def process_callback_query(callback_query):
             msg = checkout(chat_id)
             if msg:
                 answer_callback(callback_id, msg, show_alert=True)
+        elif data == "ai_recommend":
+            ai_recommend(chat_id)
+        elif data == "contacts":
+            show_contacts(chat_id)
+        elif data == "search_mode":
+            search_mode(chat_id)
         else:
-            logger.warning(f"Unknown callback data: {data}")
+            logger.warning(f"Unknown callback: {data}")
             
     except KeyError as e:
         logger.exception(f"Callback structure error: {e}")
     except Exception as e:
-        logger.exception(f"Callback processing error: {e}")
+        logger.exception(f"Callback error: {e}")
 
 def process_message(message):
-    """Обробка повідомлень з валідацією"""
+    """Обробка повідомлень"""
     try:
         chat_id = message["chat"]["id"]
         text = message.get("text", "")
-        user_id = message["from"]["id"]
         
-        logger.info(f"Message from user {user_id}, chat {chat_id}")
+        logger.info(f"Message from chat {chat_id}")
+        
+        with states_lock:
+            state = user_states.get(chat_id)
+        
+        if state == 'searching':
+            process_search(chat_id, text)
+            return
         
         if text == "/start":
             handle_start(chat_id)
@@ -461,17 +548,16 @@ def process_message(message):
         elif text == "/cart":
             show_cart(chat_id)
         else:
-            send_message(chat_id, "Спробуйте /start для перегляду меню")
+            send_message(chat_id, "Спробуйте /start")
                 
     except KeyError as e:
         logger.exception(f"Message structure error: {e}")
     except Exception as e:
-        logger.exception(f"Message processing error: {e}")
+        logger.exception(f"Message error: {e}")
 
-# Flask routes
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
+    """Health check"""
     return jsonify({
         'status': 'healthy',
         'menu_items': len(menu_cache),
@@ -480,51 +566,43 @@ def health():
 
 @app.route('/', methods=['GET'])
 def index():
-    """Index endpoint"""
+    """Index"""
     return jsonify({
         'status': 'ok',
         'bot': 'Hubsy',
-        'version': '2.0-secure'
+        'version': '2.0'
     })
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Secure webhook endpoint"""
-    # Перевірка X-Telegram-Bot-Api-Secret-Token
+    """Webhook"""
     header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     
     if not header_secret or header_secret != WEBHOOK_SECRET:
-        logger.warning(
-            f"Unauthorized webhook attempt from {request.remote_addr}, "
-            f"User-Agent: {request.headers.get('User-Agent')}"
-        )
+        logger.warning(f"Unauthorized from {request.remote_addr}")
         return jsonify({'status': 'unauthorized'}), 401
     
     try:
-        update = request.get_json(force=False, silent=False)
+        update = request.get_json(force=False)
         
         if not update:
-            logger.warning("Empty update received")
             return jsonify({'status': 'ok'})
         
-        update_id = update.get('update_id', 'unknown')
-        logger.info(f"Processing update {update_id}")
+        logger.info(f"Update {update.get('update_id', '?')}")
         
         if 'message' in update:
             process_message(update['message'])
         elif 'callback_query' in update:
             process_callback_query(update['callback_query'])
-        else:
-            logger.warning(f"Unknown update type: {list(update.keys())}")
         
         return jsonify({'status': 'ok'})
         
     except ValueError as e:
-        logger.exception("Invalid JSON in webhook")
-        return jsonify({'status': 'bad request', 'error': 'invalid json'}), 400
+        logger.exception("Invalid JSON")
+        return jsonify({'error': 'invalid json'}), 400
     except Exception as e:
-        logger.exception(f"Webhook processing error: {e}")
-        return jsonify({'status': 'error'}), 500
+        logger.exception(f"Webhook error: {e}")
+        return jsonify({'error': 'server error'}), 500
 
 @app.errorhandler(404)
 def not_found(error):
@@ -532,14 +610,13 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    logger.exception("Internal server error")
-    return jsonify({"error": "Internal server error"}), 500
+    logger.exception("Internal error")
+    return jsonify({"error": "Internal error"}), 500
 
-# Ініціалізація
 with app.app_context():
     init_services()
 
 if __name__ == "__main__":
-    logger.warning("Use gunicorn for production: gunicorn -w 4 main:app")
+    logger.warning("Use gunicorn for production")
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False) 
+    app.run(host="0.0.0.0", port=port, debug=False)

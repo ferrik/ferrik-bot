@@ -7,13 +7,12 @@ from datetime import datetime
 
 logger = logging.getLogger("hubsy_sheets")
 
-# Глобальний кеш
 _sheets_client = None
 _menu_cache = []
 _cache_timestamp = None
 
 def init_gspread_client():
-    """Ініціалізація Google Sheets клієнта"""
+    """Ініціалізація Google Sheets"""
     global _sheets_client
     
     if _sheets_client:
@@ -22,7 +21,7 @@ def init_gspread_client():
     try:
         creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
         if not creds_json:
-            logger.error("❌ GOOGLE_CREDENTIALS_JSON is not set")
+            logger.error("❌ GOOGLE_CREDENTIALS_JSON not set")
             return None
         
         creds_dict = json.loads(creds_json)
@@ -34,40 +33,68 @@ def init_gspread_client():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         _sheets_client = gspread.authorize(creds)
         
-        logger.info("✅ Google Sheets client initialized")
+        logger.info("✅ Google Sheets initialized")
         return _sheets_client
         
     except Exception as e:
-        logger.error(f"❌ Error initializing Google Sheets: {str(e)}", exc_info=True)
+        logger.error(f"❌ Sheets init error: {e}", exc_info=True)
         return None
 
 def get_menu_from_sheet(force_reload=False):
     """Отримати меню з кешем"""
     global _menu_cache, _cache_timestamp
     
-    # Повертаємо кеш якщо актуальний (5 хвилин)
+    # Кеш на 5 хвилин
     if not force_reload and _menu_cache and _cache_timestamp:
         age = (datetime.now() - _cache_timestamp).total_seconds()
-        if age < 300:  # 5 хвилин
-            logger.info(f"📦 Using cached menu ({len(_menu_cache)} items)")
+        if age < 300:
+            logger.info(f"📦 Using cache ({len(_menu_cache)} items)")
             return _menu_cache
     
     try:
         client = init_gspread_client()
         if not client:
-            logger.warning("⚠️ No client, returning cached menu")
+            logger.warning("⚠️ No client")
             return _menu_cache
         
         sheet_id = os.environ.get("GOOGLE_SHEET_ID") or os.environ.get("SPREADSHEET_ID")
         if not sheet_id:
-            logger.error("❌ GOOGLE_SHEET_ID not set")
+            logger.error("❌ SHEET_ID not set")
             return _menu_cache
         
-        sheet = client.open_by_key(sheet_id).sheet1
-        menu = sheet.get_all_records()
+        # Відкриваємо аркуш "Меню"
+        spreadsheet = client.open_by_key(sheet_id)
+        menu_sheet = spreadsheet.worksheet("Меню")
         
-        # Фільтруємо порожні рядки
-        menu = [item for item in menu if item.get("Назва Страви")]
+        # Отримуємо всі записи
+        raw_menu = menu_sheet.get_all_records()
+        
+        # Адаптуємо структуру під ваші колонки
+        menu = []
+        for item in raw_menu:
+            # Перевіряємо чи активна страва
+            active = str(item.get('Активний', '')).lower()
+            if active not in ['так', 'yes', 'true', '1']:
+                continue  # Пропускаємо неактивні
+            
+            # Конвертуємо під стандартну структуру
+            adapted_item = {
+                'ID': item.get('ID', ''),
+                'Назва Страви': item.get('Страви', ''),  # ← КЛЮЧОВА ЗМІНА
+                'Категорія': item.get('Категорія', ''),
+                'Ціна': item.get('Ціна', 0),
+                'Опис': item.get('Опис', ''),
+                'Вага': '',  # У вас немає цієї колонки
+                'Ресторан': item.get('Ресторан', ''),
+                'Час Доставки': item.get('Час Доставки (хв)', ''),
+                'Фото': item.get('Фото URL', ''),
+                'Рейтинг': item.get('Рейтинг', ''),
+                'Аллергени': item.get('Аллергени', '')
+            }
+            
+            # Додаємо тільки якщо є назва страви
+            if adapted_item['Назва Страви']:
+                menu.append(adapted_item)
         
         _menu_cache = menu
         _cache_timestamp = datetime.now()
@@ -75,30 +102,37 @@ def get_menu_from_sheet(force_reload=False):
         logger.info(f"✅ Menu loaded: {len(menu)} items")
         return menu
         
+    except gspread.exceptions.WorksheetNotFound:
+        logger.error("❌ Worksheet 'Меню' not found")
+        return _menu_cache
     except Exception as e:
-        logger.error(f"❌ Error loading menu: {str(e)}", exc_info=True)
-        return _menu_cache  # Повертаємо старий кеш
+        logger.error(f"❌ Menu loading error: {e}", exc_info=True)
+        return _menu_cache
 
 def save_order_to_sheets(chat_id, cart):
-    """Зберегти замовлення в Google Sheets"""
+    """Зберегти замовлення"""
     try:
         client = init_gspread_client()
         if not client:
-            logger.error("❌ Cannot save order: no client")
+            logger.error("❌ Cannot save: no client")
             return False
         
         sheet_id = os.environ.get("GOOGLE_SHEET_ID") or os.environ.get("SPREADSHEET_ID")
         spreadsheet = client.open_by_key(sheet_id)
         
-        # Спроба отримати або створити аркуш Orders
+        # Відкриваємо аркуш "Замовлення"
         try:
-            orders_sheet = spreadsheet.worksheet("Orders")
+            orders_sheet = spreadsheet.worksheet("Замовлення")
         except gspread.exceptions.WorksheetNotFound:
-            logger.warning("⚠️ Orders sheet not found, creating...")
-            orders_sheet = spreadsheet.add_worksheet(title="Orders", rows="100", cols="10")
-            # Додаємо заголовки
+            logger.warning("⚠️ 'Замовлення' not found, creating...")
+            orders_sheet = spreadsheet.add_worksheet(title="Замовлення", rows="100", cols="15")
+            # Додаємо заголовки як у вашій таблиці
             orders_sheet.append_row([
-                "Chat ID", "Дата", "Замовлення", "Сума", "Статус"
+                "ID Замовлення", "Telegram User ID", "Час Замовлення", 
+                "Товари (JSON)", "Загальна Сума", "Адреса", "Телефон",
+                "Спосіб Оплати", "Статус", "Канал", "Вартість доставки",
+                "Загальна сума", "Тип доставки", "Час доставки/самовивозу",
+                "Оператор", "Примітки"
             ])
         
         # Формуємо дані замовлення
@@ -106,38 +140,58 @@ def save_order_to_sheets(chat_id, cart):
         total = 0
         
         for item in cart:
-            name = item.get("Назва Страви", "")
-            price = item.get("Ціна", 0)
+            name = item.get('Назва Страви', '')
+            item_id = item.get('ID', '')
+            price = float(str(item.get('Ціна', 0)).replace(',', '.'))
             
-            try:
-                price_float = float(str(price).replace(",", "."))
-                total += price_float
-            except:
-                pass
-            
-            order_items.append(name)
+            order_items.append({
+                "id": item_id,
+                "name": name,
+                "price": price,
+                "qty": 1
+            })
+            total += price
         
-        order_text = ", ".join(order_items)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # ID замовлення
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        order_id = f"ORD-{timestamp}-{chat_id}"
         
+        # Час замовлення
+        order_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # JSON товарів
+        items_json = json.dumps(order_items, ensure_ascii=False)
+        
+        # Рядок для таблиці
         order_data = [
+            order_id,
             str(chat_id),
-            timestamp,
-            order_text,
+            order_time,
+            items_json,
             f"{total:.2f}",
-            "Нове"
+            "",  # Адреса (додайте якщо потрібно)
+            "",  # Телефон
+            "Готівка при отриманні",
+            "Нове",
+            "Telegram Bot",
+            "0.0",
+            "",
+            "",
+            "",
+            "",
+            ""
         ]
         
         orders_sheet.append_row(order_data)
-        logger.info(f"✅ Order saved for {chat_id}: {total:.2f} грн")
+        logger.info(f"✅ Order saved: {order_id}, {total:.2f} грн")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Error saving order: {str(e)}", exc_info=True)
+        logger.error(f"❌ Save order error: {e}", exc_info=True)
         return False
 
 def is_sheets_connected():
-    """Перевірка підключення до Sheets"""
+    """Перевірка підключення"""
     try:
         client = init_gspread_client()
         return client is not None
@@ -145,16 +199,16 @@ def is_sheets_connected():
         return False
 
 def search_menu_items(query):
-    """Пошук страв у меню"""
+    """Пошук страв"""
     try:
         menu = get_menu_from_sheet()
         query_lower = query.lower()
         
         results = []
         for item in menu:
-            name = item.get("Назва Страви", "").lower()
-            category = item.get("Категорія", "").lower()
-            description = item.get("Опис", "").lower()
+            name = item.get('Назва Страви', '').lower()
+            category = item.get('Категорія', '').lower()
+            description = item.get('Опис', '').lower()
             
             if query_lower in name or query_lower in category or query_lower in description:
                 results.append(item)
@@ -163,18 +217,10 @@ def search_menu_items(query):
         return results
         
     except Exception as e:
-        logger.error(f"❌ Error searching menu: {str(e)}", exc_info=True)
+        logger.error(f"❌ Search error: {e}", exc_info=True)
         return []
 
-def get_item_by_id(item_id):
-    """Отримати страву за ID"""
-    menu = get_menu_from_sheet()
-    for item in menu:
-        if str(item.get("ID", "")) == str(item_id):
-            return item
-    return None
-
 def reload_menu():
-    """Примусове перезавантаження меню"""
-    logger.info("🔄 Force reloading menu...")
+    """Примусове перезавантаження"""
+    logger.info("🔄 Force reload...")
     return get_menu_from_sheet(force_reload=True)

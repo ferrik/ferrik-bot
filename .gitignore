@@ -5,6 +5,7 @@ creds.json
 .env
 .env.local
 .env.production
+config.local.py
 
 # Бази даних
 bot_data.db
@@ -33,6 +34,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual environments
 venv/
@@ -47,6 +49,8 @@ env/
 *.swo
 *~
 .DS_Store
+*.sublime-project
+*.sublime-workspace
 
 # Logs
 *.log
@@ -57,7 +61,7 @@ logs/
 .coverage
 htmlcov/
 .tox/
+.cache
 
 # Local config
 instance/
-config.local.py

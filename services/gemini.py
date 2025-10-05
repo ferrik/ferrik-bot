@@ -1,238 +1,129 @@
 import os
 import logging
 import google.generativeai as genai
-from services.sheets import get_menu_from_sheet  # ← ВИПРАВЛЕНО: без "s" на кінці!
 
-logger = logging.getLogger('ferrik')
+logger = logging.getLogger("gemini_service")
 
-# Конфігурація
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
-
-# Глобальні змінні
+_gemini_client = None
 _model = None
-_chat = None
 
 def init_gemini_client():
-    """Ініціалізує клієнт Gemini AI"""
-    global _model, _chat
+    """Ініціалізація Gemini AI"""
+    global _gemini_client, _model
     
     try:
-        if not GEMINI_API_KEY:
-            logger.error("❌ GEMINI_API_KEY не знайдено в змінних середовища")
-            return False
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            logger.error("❌ GEMINI_API_KEY not set")
+            return None
         
-        # Конфігуруємо Gemini
-        genai.configure(api_key=GEMINI_API_KEY)
+        genai.configure(api_key=api_key)
         
-        # Створюємо модель
-        _model = genai.GenerativeModel(GEMINI_MODEL)
+        # Використовуємо безкоштовну модель
+        model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
         
-        logger.info(f"✅ Gemini client initialized. Using model: {GEMINI_MODEL}")
-        return True
+        _model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config={
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 40,
+                "max_output_tokens": 500,
+            }
+        )
+        
+        logger.info(f"✅ Gemini initialized: {model_name}")
+        return _model
         
     except Exception as e:
-        logger.error(f"❌ Помилка ініціалізації Gemini: {e}", exc_info=True)
-        return False
-
+        logger.error(f"❌ Gemini init error: {e}", exc_info=True)
+        return None
 
 def is_gemini_connected():
-    """Перевіряє, чи підключено Gemini"""
+    """Перевірка підключення"""
     return _model is not None
 
-
-def get_ai_response(user_message: str, user_context: dict = None):
-    """
-    Отримує відповідь від Gemini AI на основі повідомлення користувача
-    """
-    if not _model:
-        logger.warning("⚠️ Gemini не підключено")
-        return "Вибачте, AI-асистент тимчасово недоступний. Спробуйте скористатися командами /menu або /help"
+def get_ai_response(prompt, max_retries=2):
+    """Отримати відповідь від AI"""
+    global _model
     
-    try:
-        # Отримуємо меню для контексту
-        menu = get_menu_from_sheet()
-        
-        # Формуємо prompt з контекстом
-        system_prompt = f"""
-Ти - дружній асистент ресторану FerrikFoot. Твоя задача - допомогти клієнту з замовленням їжі.
-
-ПРАВИЛА:
-1. Завжди відповідай українською мовою
-2. Будь ввічливим та дружнім
-3. Допомагай вибрати страви з меню
-4. Якщо користувач питає про страву, якої немає в меню - запропонуй альтернативи
-5. Можеш порадити страви на основі побажань клієнта
-6. Не вигадуй інформацію про страви - використовуй лише дані з меню
-
-ДОСТУПНЕ МЕНЮ:
-"""
-        
-        if menu:
-            for item in menu[:20]:  # Обмежуємо до 20 позицій для оптимізації
-                system_prompt += f"\n- {item.get('Страви')}: {item.get('Опис', '')} ({item.get('Ціна')} грн, категорія: {item.get('Категорія', 'Інше')})"
-        else:
-            system_prompt += "\nМеню тимчасово недоступне. Вибач за незручності."
-        
-        # Додаємо контекст користувача якщо є
-        if user_context:
-            system_prompt += f"\n\nІНФОРМАЦІЯ ПРО КОРИСТУВАЧА:\n"
-            system_prompt += f"Ім'я: {user_context.get('first_name', 'Клієнт')}\n"
-            if user_context.get('username'):
-                system_prompt += f"Username: @{user_context.get('username')}\n"
-        
-        # Повний prompt
-        full_prompt = f"{system_prompt}\n\nПОВІДОМЛЕННЯ КОРИСТУВАЧА: {user_message}\n\nТВОЯ ВІДПОВІДЬ:"
-        
-        # Генеруємо відповідь
-        response = _model.generate_content(full_prompt)
-        
-        logger.info(f"✅ AI відповідь згенеровано для повідомлення: '{user_message[:50]}...'")
-        return response.text
-        
-    except Exception as e:
-        logger.error(f"❌ Помилка при генерації AI відповіді: {e}", exc_info=True)
-        return "Вибачте, виникла помилка при обробці вашого запиту. Спробуйте ще раз або скористайтеся командою /menu"
-
-
-def generate_order_summary(items: list):
-    """Генерує резюме замовлення за допомогою AI"""
     if not _model:
-        return None
+        _model = init_gemini_client()
+        if not _model:
+            raise RuntimeError("Gemini not available")
     
-    try:
-        prompt = f"""
-Створи коротке та зрозуміле резюме замовлення українською мовою.
-
-ЗАМОВЛЕНІ СТРАВИ:
-{items}
-
-Напиши резюме у форматі:
-"Ваше замовлення: [список страв]. Загальна вартість: [сума] грн. Приблизний час приготування: [час] хв."
-
-Будь лаконічним та дружнім.
-"""
-        
-        response = _model.generate_content(prompt)
-        return response.text
-        
-    except Exception as e:
-        logger.error(f"❌ Помилка генерації резюме замовлення: {e}", exc_info=True)
-        return None
-
-
-def suggest_dishes(preferences: str):
-    """
-    Пропонує страви на основі побажань користувача
-    """
-    if not _model:
-        return []
+    for attempt in range(max_retries):
+        try:
+            # Системний промпт для контексту
+            system_prompt = """Ти - помічник ресторану Hubsy. 
+Твоя мета: допомогти користувачу обрати страви.
+Відповідай коротко (2-3 речення), дружньо, українською мовою.
+Будь конкретним та корисним."""
+            
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+            
+            response = _model.generate_content(full_prompt)
+            
+            if not response or not response.text:
+                logger.warning(f"Empty response on attempt {attempt + 1}")
+                continue
+            
+            return response.text.strip()
+            
+        except Exception as e:
+            logger.error(f"❌ AI error (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            raise
     
-    try:
-        menu = get_menu_from_sheet()
-        
-        if not menu:
-            return []
-        
-        # Формуємо список страв для AI
-        menu_text = "\n".join([
-            f"- {item.get('Страви')}: {item.get('Опис', '')} ({item.get('Ціна')} грн)"
-            for item in menu[:30]
-        ])
-        
-        prompt = f"""
-На основі побажань користувача "{preferences}", обери 3-5 найкращих страв з меню.
+    raise RuntimeError("AI failed after retries")
 
-МЕНЮ:
-{menu_text}
+def analyze_user_query(query, menu_context):
+    """Аналіз запиту користувача для пошуку"""
+    prompt = f"""Проаналізуй запит користувача: "{query}"
 
-Відповідь надай у форматі JSON array з назвами страв, наприклад:
-["Піца Маргарита", "Салат Цезар", "Coca-Cola"]
+Контекст меню: {menu_context}
 
-Тільки JSON, без пояснень.
-"""
-        
-        response = _model.generate_content(prompt)
-        
-        # Парсимо відповідь
-        import json
-        suggestions = json.loads(response.text.strip())
-        
-        logger.info(f"✅ AI запропонував {len(suggestions)} страв для запиту: '{preferences}'")
-        return suggestions
-        
-    except Exception as e:
-        logger.error(f"❌ Помилка при генерації пропозицій: {e}", exc_info=True)
-        return []
+Визнач:
+1. Чи це запит про категорію їжі (піца, суші, десерти тощо)?
+2. Чи це запит про конкретну страву?
+3. Чи це запит про характеристики (солодке, м'ясне, вегетаріанське)?
 
-
-def analyze_order_text(text: str):
-    """
-    Аналізує текст замовлення та витягує список страв
-    """
-    if not _model:
-        return []
+Поверни ТІЛЬКИ одне слово - назву категорії або страви."""
     
-    try:
-        menu = get_menu_from_sheet()
-        
-        if not menu:
-            return []
-        
-        # Список доступних страв
-        available_dishes = [item.get('Страви') for item in menu]
-        
-        prompt = f"""
-Проаналізуй текст замовлення та визнач, які страви хоче замовити користувач.
+    return get_ai_response(prompt)
 
-ТЕКСТ ЗАМОВЛЕННЯ:
-"{text}"
-
-ДОСТУПНІ СТРАВИ:
-{', '.join(available_dishes)}
-
-Відповідь надай у форматі JSON array з об'єктами, наприклад:
-[
-  {{"name": "Піца Маргарита", "quantity": 1}},
-  {{"name": "Салат Цезар", "quantity": 2}}
-]
-
-Якщо страви немає в доступному списку - не додавай її.
-Тільки JSON, без пояснень.
-"""
-        
-        response = _model.generate_content(prompt)
-        
-        # Парсимо відповідь
-        import json
-        import re
-        
-        # Витягуємо JSON з відповіді
-        json_match = re.search(r'\[.*\]', response.text, re.DOTALL)
-        if json_match:
-            orders = json.loads(json_match.group())
-            logger.info(f"✅ AI розпізнав {len(orders)} позицій у замовленні")
-            return orders
-        
-        return []
-        
-    except Exception as e:
-        logger.error(f"❌ Помилка при аналізі тексту замовлення: {e}", exc_info=True)
-        return []
-
-
-def get_gemini_recommendation(prompt):
-    """
-    Загальна функція для отримання рекомендацій від Gemini
-    Використовується для зворотної сумісності зі старим кодом
-    """
-    if not _model:
-        logger.warning("⚠️ Gemini не підключено")
-        return "AI-асистент тимчасово недоступний"
+def generate_recommendation(user_preferences=None, menu_items=None):
+    """Генерація персональної рекомендації"""
+    context = ""
     
-    try:
-        response = _model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        logger.error(f"❌ Помилка Gemini: {e}")
-        return "Виникла помилка при обробці запиту"
+    if user_preferences:
+        context += f"Користувач часто замовляє: {user_preferences}. "
+    
+    if menu_items:
+        context += f"Доступні страви: {', '.join(menu_items[:10])}. "
+    
+    prompt = f"""{context}
+
+Порекомендуй 2-3 найкращі страви для користувача.
+Поясни чому саме ці страви підійдуть.
+Будь дружнім та переконливим."""
+    
+    return get_ai_response(prompt)
+
+def chat_with_user(user_message, conversation_history=None):
+    """Діалог з користувачем"""
+    context = ""
+    
+    if conversation_history:
+        context = "Попередні повідомлення:\n"
+        for msg in conversation_history[-3:]:  # Останні 3
+            context += f"- {msg}\n"
+    
+    prompt = f"""{context}
+
+Користувач пише: "{user_message}"
+
+Відповідь як помічник ресторану (коротко, дружньо):"""
+    
+    return get_ai_response(prompt)

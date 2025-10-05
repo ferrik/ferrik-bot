@@ -58,19 +58,26 @@ def tg_answer_callback(callback_id, text, show_alert=False):
         return None
 
 def tg_set_webhook(url):
-    """Встановлення webhook"""
+    """Встановлення webhook з secret_token"""
     try:
         if not BOT_TOKEN:
             logger.error("❌ BOT_TOKEN not set")
             return {"ok": False, "error": "BOT_TOKEN not set"}
         
+        if not WEBHOOK_SECRET:
+            logger.error("❌ WEBHOOK_SECRET not set")
+            return {"ok": False, "error": "WEBHOOK_SECRET not set"}
+        
         webhook_url_full = f"{url}/webhook"
         
+        # Встановлюємо webhook з secret_token (Telegram буде відправляти в header)
         response = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
             json={
                 "url": webhook_url_full,
-                "secret_token": WEBHOOK_SECRET
+                "secret_token": WEBHOOK_SECRET,  # Telegram відправить в X-Telegram-Bot-Api-Secret-Token
+                "drop_pending_updates": False,
+                "max_connections": 40
             },
             timeout=10
         )
@@ -78,7 +85,7 @@ def tg_set_webhook(url):
         result = response.json()
         
         if result.get("ok"):
-            logger.info(f"✅ Webhook set: {webhook_url_full}")
+            logger.info(f"✅ Webhook set: {webhook_url_full} (with secret_token)")
         else:
             logger.error(f"❌ Webhook failed: {result}")
             

@@ -649,4 +649,143 @@ def checkout(chat_id):
         
     except Exception as e:
         logger.exception(f"Checkout error: {e}")
+return "❌ Помилка. Спробуй пізніше"
+
+def process_callback_query(callback_query):
+    try:
+        chat_id = callback_query["message"]["chat"]["id"]
+        callback_id = callback_query["id"]
+        data = callback_query["data"]
+        user = callback_query["from"]
+        user_name = user.get("first_name", "")
+        
+        logger.info(f"Callback: {data} from {chat_id}")
+        
+        answer_callback(callback_id, "")
+        
+        if data == "noop":
+            return
+        elif data == "start":
+            handle_start(chat_id, user_name)
+        elif data == "menu":
+            show_menu(chat_id)
+        elif data == "popular":
+            show_popular(chat_id)
+        elif data == "cart":
+            show_cart(chat_id)
+        elif data == "history":
+            show_history(chat_id)
+        elif data == "search":
+            start_search(chat_id)
+        elif data == "ai_recommend":
+            show_ai_recommendation(chat_id)
+        elif data.startswith("cat_"):
+            category = data[4:]
+            show_category_items(chat_id, category)
+        elif data.startswith("add_"):
+            item_id = data[4:]
+            msg = add_to_cart(chat_id, item_id)
+            answer_callback(callback_id, msg, show_alert=True)
+        elif data.startswith("next_") or data.startswith("prev_"):
+            direction = 'next' if data.startswith("next") else 'prev'
+            navigate_items(chat_id, direction)
+        elif data == "clear_cart":
+            msg = clear_cart(chat_id)
+            answer_callback(callback_id, msg, show_alert=True)
+            show_cart(chat_id)
+        elif data == "checkout":
+            msg = checkout(chat_id)
+            if msg:
+                answer_callback(callback_id, msg, show_alert=True)
+        else:
+            logger.warning(f"Unknown: {data}")
+            
+    except Exception as e:
+        logger.exception(f"Callback error: {e}")
+
+def process_message(message):
+    try:
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "")
+        user = message["from"]
+        user_name = user.get("first_name", "")
+        
+        logger.info(f"Message from {chat_id}")
+        
+        state = get_user_state(chat_id)
+        
+        # Якщо режим пошуку
+        if state['state'] == 'searching':
+            process_search(chat_id, text)
+            return
+        
+        if text == "/start":
+            handle_start(chat_id, user_name)
+        elif text == "/menu":
+            show_menu(chat_id)
+        elif text == "/cart":
+            show_cart(chat_id)
+        elif text == "/help":
+            handle_start(chat_id, user_name)
+        else:
+            # Пробуємо обробити як пошук
+            if is_gemini_connected():
+                process_search(chat_id, text)
+            else:
+                send_message(chat_id, "Використай /start для меню")
+                
+    except Exception as e:
+        logger.exception(f"Message error: {e}")
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({
+        'status': 'healthy',
+        'menu_items': len(menu_cache),
+        'popular_tracked': len(menu_analytics),
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({'status': 'ok', 'bot': 'Hubsy', 'version': '2.5-AI'})
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    
+    if not header_secret or header_secret != WEBHOOK_SECRET:
+        logger.warning(f"Unauthorized from {request.remote_addr}")
+        return jsonify({'status': 'unauthorized'}), 401
+    
+    try:
+        update = request.get_json(force=False)
+        if not update:
+            return jsonify({'status': 'ok'})
+        
+        if 'message' in update:
+            process_message(update['message'])
+        elif 'callback_query' in update:
+            process_callback_query(update['callback_query'])
+        
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        logger.exception(f"Webhook error: {e}")
+        return jsonify({'error': 'error'}), 500
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    logger.exception("Internal error")
+    return jsonify({"error": "Internal error"}), 500
+
+with app.app_context():
+    init_services()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
     

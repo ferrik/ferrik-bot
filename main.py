@@ -6,7 +6,6 @@ from collections import defaultdict, Counter
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape as html_escape
 from threading import RLock
-import json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,12 +45,11 @@ except Exception as e:
     logger.exception("Import error")
     raise
 
-# Глобальні змінні
 menu_cache = []
 user_carts = defaultdict(list)
 user_states = defaultdict(lambda: {'state': 'main', 'data': {}})
-user_history = defaultdict(list)  # Історія замовлень
-menu_analytics = Counter()  # Статистика популярності
+user_history = defaultdict(list)
+menu_analytics = Counter()
 
 KEY_NAME = "Назва Страви"
 KEY_PRICE = "Ціна"
@@ -140,30 +138,22 @@ def get_user_state(chat_id):
 
 def set_user_state(chat_id, state, data=None):
     with states_lock:
-        user_states[chat_id] = {
-            'state': state,
-            'data': data or {}
-        }
+        user_states[chat_id] = {'state': state, 'data': data or {}}
 
 def add_to_history(chat_id, item):
-    """Додати в історію замовлень"""
     with history_lock:
         user_history[chat_id].append({
             'item': item,
             'timestamp': datetime.now().isoformat()
         })
-        # Зберігаємо тільки останні 20
         if len(user_history[chat_id]) > 20:
             user_history[chat_id] = user_history[chat_id][-20:]
 
 def track_popularity(item_id):
-    """Трекінг популярності"""
     menu_analytics[item_id] += 1
 
 def get_popular_items(limit=3):
-    """Отримати топ популярних страв"""
     if not menu_analytics:
-        # Якщо немає статистики - повертаємо перші з найвищим рейтингом
         sorted_menu = sorted(
             menu_cache, 
             key=lambda x: float(str(x.get(KEY_RATING, 0)).replace(',', '.')), 
@@ -175,7 +165,6 @@ def get_popular_items(limit=3):
     return [item for item in menu_cache if item.get(KEY_ID) in popular_ids]
 
 def get_user_preferences(chat_id):
-    """Аналіз уподобань користувача"""
     with history_lock:
         history = user_history.get(chat_id, [])
     
@@ -192,33 +181,26 @@ def get_user_preferences(chat_id):
     return categories.most_common(1)[0][0] if categories else None
 
 def ai_search(query, chat_id):
-    """AI пошук страв за запитом"""
     if not is_gemini_connected():
-        return search_menu_items(query)
+        return search_menu_items(query), None
     
     try:
-        # Отримуємо категорії та список страв
         categories = get_categories()
         menu_list = [f"{item[KEY_NAME]} ({item[KEY_CATEGORY]})" for item in menu_cache[:20]]
         
         prompt = f"""Користувач шукає: "{query}"
 
 Доступні категорії: {', '.join(categories)}
-Деякі страви з меню: {', '.join(menu_list)}
+Деякі страви: {', '.join(menu_list)}
 
-Проаналізуй запит та поверни ТІЛЬКИ назву категорії або назву страви, яка найкраще підходить.
-Якщо це запит про тип їжі (солодке, м'ясне тощо) - поверни категорію.
-Якщо це конкретна страва - поверни її назву.
-
+Проаналізуй та поверни ТІЛЬКИ назву категорії або страви.
 Відповідь (одне слово):"""
 
         ai_result = get_ai_response(prompt).strip()
         
-        # Перевіряємо чи це категорія
         if ai_result in categories:
             return get_items_by_category(ai_result), ai_result
         
-        # Або шукаємо по назві
         results = [item for item in menu_cache if ai_result.lower() in item[KEY_NAME].lower()]
         return results, None
         
@@ -227,9 +209,8 @@ def ai_search(query, chat_id):
         return search_menu_items(query), None
 
 def get_ai_recommendation(chat_id):
-    """AI рекомендація на основі історії"""
     if not is_gemini_connected():
-        return "AI недоступний зараз. Спробуйте пізніше."
+        return "AI недоступний. Спробуйте пізніше."
     
     try:
         preferred_category = get_user_preferences(chat_id)
@@ -239,16 +220,16 @@ def get_ai_recommendation(chat_id):
         if preferred_category:
             context = f"Користувач часто замовляє: {preferred_category}. "
         
-        prompt = f"""{context}Порекомендуй 2-3 страви з меню.
+        prompt = f"""{context}Порекомендуй 2-3 страви.
 
 Категорії: {', '.join(categories)}
 
-Дай короткі, дружні рекомендації (2-3 речення). Назви конкретні страви якщо можеш здогадатись."""
+Коротко (2-3 речення), дружньо."""
 
         return get_ai_response(prompt)
         
     except Exception as e:
-        logger.error(f"AI recommendation error: {e}")
+        logger.error(f"AI error: {e}")
         return "Спробуйте наше популярне меню!"
 
 def get_categories():
@@ -262,7 +243,7 @@ def get_categories():
 def get_items_by_category(category):
     return [item for item in menu_cache if item.get(KEY_CATEGORY) == category]
 
-def format_item(item, show_full=True, show_photo=False):
+def format_item(item, show_full=True):
     name = html_escape(item.get(KEY_NAME, "Без назви"))
     price = item.get(KEY_PRICE, "?")
     
@@ -304,7 +285,6 @@ def get_cart_summary(chat_id):
 def handle_start(chat_id, user_name=None):
     set_user_state(chat_id, 'main')
     
-    # Персоналізація
     preferred = get_user_preferences(chat_id)
     greeting = f"Привіт, {user_name}! 👋\n\n" if user_name else "Привіт! 👋\n\n"
     
@@ -313,13 +293,13 @@ def handle_start(chat_id, user_name=None):
     
     text = (
         f"{greeting}"
-        "Я <b>Hubsy</b> — твій розумний помічник для замовлення.\n\n"
+        "Я <b>Hubsy</b> — твій розумний помічник.\n\n"
         "Що хочеш зробити?"
     )
     
     keyboard = {
         "inline_keyboard": [
-            [{"text": "🍽️ Меню страв", "callback_data": "menu"}],
+            [{"text": "🍽️ Меню", "callback_data": "menu"}],
             [{"text": "🔥 Популярне", "callback_data": "popular"}],
             [
                 {"text": "🔍 Пошук", "callback_data": "search"},
@@ -423,12 +403,11 @@ def add_to_cart(chat_id, item_id):
             break
     
     if not item:
-        return "❌ Страву не знайдено"
+        return "❌ Не знайдено"
     
     with carts_lock:
         user_carts[chat_id].append(item)
     
-    # Трекінг
     track_popularity(item_id)
     add_to_history(chat_id, item)
     
@@ -442,11 +421,7 @@ def show_cart(chat_id):
     
     if not items_count:
         text = "🛒 <b>Кошик порожній</b>\n\nДодай щось смачне!"
-        keyboard = {
-            "inline_keyboard": [[
-                {"text": "🍽️ До меню", "callback_data": "menu"}
-            ]]
-        }
+        keyboard = {"inline_keyboard": [[{"text": "🍽️ До меню", "callback_data": "menu"}]]}
         send_message(chat_id, text, reply_markup=keyboard)
         return
     
@@ -500,19 +475,15 @@ def show_popular(chat_id):
     send_message(chat_id, text, reply_markup=keyboard)
 
 def show_history(chat_id):
-    """Показати історію"""
     with history_lock:
         history = user_history.get(chat_id, [])
     
     if not history:
         text = "📜 <b>Історія порожня</b>\n\nТи ще нічого не замовляв."
-        keyboard = {"inline_keyboard": [[
-            {"text": "🍽️ До меню", "callback_data": "menu"}
-        ]]}
+        keyboard = {"inline_keyboard": [[{"text": "🍽️ До меню", "callback_data": "menu"}]]}
         send_message(chat_id, text, reply_markup=keyboard)
         return
     
-    # Беремо останні 5 унікальних
     recent_items = []
     seen = set()
     for entry in reversed(history):
@@ -536,26 +507,20 @@ def show_history(chat_id):
             {"text": f"🔄 {name[:20]}", "callback_data": safe_callback_data("add", item_id)}
         ])
     
-    keyboard["inline_keyboard"].append([
-        {"text": "🏠 Головна", "callback_data": "start"}
-    ])
+    keyboard["inline_keyboard"].append([{"text": "🏠 Головна", "callback_data": "start"}])
     
     send_message(chat_id, text, reply_markup=keyboard)
 
 def start_search(chat_id):
-    """Початок пошуку"""
     set_user_state(chat_id, 'searching')
     
-    text = "🔍 <b>Розумний пошук</b>\n\nНапиши що шукаєш:\n\n<i>Наприклад: \"щось солодке\", \"піца\", \"без м'яса\"</i>"
+    text = "🔍 <b>Розумний пошук</b>\n\nНапиши що шукаєш:\n\n<i>Наприклад: \"щось солодке\", \"піца\"</i>"
     
-    keyboard = {"inline_keyboard": [[
-        {"text": "❌ Скасувати", "callback_data": "start"}
-    ]]}
+    keyboard = {"inline_keyboard": [[{"text": "❌ Скасувати", "callback_data": "start"}]]}
     
     send_message(chat_id, text, reply_markup=keyboard)
 
 def process_search(chat_id, query):
-    """Обробка пошуку через AI"""
     results, category = ai_search(query, chat_id)
     
     if not results:
@@ -569,11 +534,9 @@ def process_search(chat_id, query):
         return
     
     if category:
-        # Знайдено категорію
-        send_message(chat_id, f"✅ Знайшов категорію: <b>{category}</b>")
+        send_message(chat_id, f"✅ Знайшов: <b>{category}</b>")
         show_category_items(chat_id, category)
     else:
-        # Знайдено страви
         text = f"🔍 Результати '<b>{html_escape(query)}</b>':\n\n"
         keyboard = {"inline_keyboard": []}
         
@@ -588,7 +551,7 @@ def process_search(chat_id, query):
             ])
         
         keyboard["inline_keyboard"].append([
-            {"text": "🔍 Новий пошук", "callback_data": "search"},
+            {"text": "🔍 Новий", "callback_data": "search"},
             {"text": "🏠 Головна", "callback_data": "start"}
         ])
         
@@ -597,9 +560,8 @@ def process_search(chat_id, query):
     set_user_state(chat_id, 'main')
 
 def show_ai_recommendation(chat_id):
-    """AI рекомендація"""
     text = "✨ <b>Думаю...</b>"
-    msg = send_message(chat_id, text)
+    send_message(chat_id, text)
     
     recommendation = get_ai_recommendation(chat_id)
     
@@ -607,7 +569,7 @@ def show_ai_recommendation(chat_id):
     
     keyboard = {"inline_keyboard": [
         [{"text": "🍽️ До меню", "callback_data": "menu"}],
-        [{"text": "🔄 Інша порада", "callback_data": "ai_recommend"}],
+        [{"text": "🔄 Інша", "callback_data": "ai_recommend"}],
         [{"text": "🏠 Головна", "callback_data": "start"}]
     ]}
     
@@ -636,20 +598,18 @@ def checkout(chat_id):
         text = (
             "✅ <b>Замовлення прийнято!</b>\n\n"
             f"📦 Сума: {total:.2f} грн\n"
-            "📞 Менеджер зателефонує протягом 5 хв\n\n"
+            "📞 Менеджер зателефонує за 5 хв\n\n"
             "Дякуємо! 💙"
         )
         
-        keyboard = {"inline_keyboard": [[
-            {"text": "🏠 Головна", "callback_data": "start"}
-        ]]}
+        keyboard = {"inline_keyboard": [[{"text": "🏠 Головна", "callback_data": "start"}]]}
         
         send_message(chat_id, text, reply_markup=keyboard)
         return None
         
     except Exception as e:
         logger.exception(f"Checkout error: {e}")
-return "❌ Помилка. Спробуй пізніше"
+        return "❌ Помилка"
 
 def process_callback_query(callback_query):
     try:
@@ -659,7 +619,7 @@ def process_callback_query(callback_query):
         user = callback_query["from"]
         user_name = user.get("first_name", "")
         
-        logger.info(f"Callback: {data} from {chat_id}")
+        logger.info(f"Callback: {data}")
         
         answer_callback(callback_id, "")
         
@@ -714,7 +674,6 @@ def process_message(message):
         
         state = get_user_state(chat_id)
         
-        # Якщо режим пошуку
         if state['state'] == 'searching':
             process_search(chat_id, text)
             return
@@ -728,11 +687,10 @@ def process_message(message):
         elif text == "/help":
             handle_start(chat_id, user_name)
         else:
-            # Пробуємо обробити як пошук
             if is_gemini_connected():
                 process_search(chat_id, text)
             else:
-                send_message(chat_id, "Використай /start для меню")
+                send_message(chat_id, "Використай /start")
                 
     except Exception as e:
         logger.exception(f"Message error: {e}")
@@ -788,4 +746,3 @@ with app.app_context():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-    

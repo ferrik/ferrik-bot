@@ -37,9 +37,17 @@ except Exception as e:
     raise
 
 try:
-    from services.sheets import get_menu_from_sheet, save_order_to_sheets, search_menu_items
+    from services.sheets import get_menu_from_sheet, save_order_to_sheets, search_menu_items, reload_menu
     from services.gemini import init_gemini_client, get_ai_response, is_gemini_connected
     from services.telegram import tg_send_message, tg_answer_callback, tg_set_webhook
+    from services.database import (
+        init_database, save_order as db_save_order, get_order, 
+        update_order_status, log_activity
+    )
+    from handlers.admin import (
+        is_admin, show_admin_menu, show_statistics, show_new_orders,
+        show_order_details, change_order_status, show_popular_items, reload_menu as admin_reload_menu
+    )
     logger.info("Services OK")
 except Exception as e:
     logger.exception("Import error")
@@ -104,6 +112,15 @@ def init_services():
     global menu_cache
     
     logger.info("Initializing...")
+    
+    # Ініціалізація бази даних
+    try:
+        if init_database():
+            logger.info("Database OK")
+        else:
+            logger.error("Database init failed")
+    except Exception as e:
+        logger.exception(f"Database error: {e}")
     
     try:
         log_config()
@@ -588,23 +605,59 @@ def checkout(chat_id):
         return "❌ Кошик порожній"
     
     try:
+        # Генеруємо ID замовлення
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        order_id = f"ORD-{timestamp}-{chat_id}"
+        
+        # Підготовка даних
+        items_for_db = []
+        total = Decimal('0.00')
+        
+        for item in cart:
+            name = item.get(KEY_NAME, "")
+            price_raw = item.get(KEY_PRICE, 0)
+            price = parse_price(price_raw)
+            total += price
+            
+            items_for_db.append({
+                'id': item.get(KEY_ID, ''),
+                'name': name,
+                'price': float(price)
+            })
+        
+        # Зберігаємо в БД
+        db_save_order(order_id, chat_id, "", items_for_db, float(total))
+        
+        # Зберігаємо в Sheets (як резерв)
         save_order_to_sheets(chat_id, cart)
         
-        _, total = get_cart_summary(chat_id)
+        # Логуємо активність
+        log_activity(chat_id, 'order_created', {'order_id': order_id, 'total': float(total)})
         
+        # Очищаємо корзину
         with carts_lock:
             user_carts[chat_id] = []
         
         text = (
             "✅ <b>Замовлення прийнято!</b>\n\n"
-            f"📦 Сума: {total:.2f} грн\n"
+            f"📦 Номер: <code>{order_id[-8:]}</code>\n"
+            f"💰 Сума: {total:.2f} грн\n\n"
             "📞 Менеджер зателефонує за 5 хв\n\n"
             "Дякуємо! 💙"
-        )
+       )
         
         keyboard = {"inline_keyboard": [[{"text": "🏠 Головна", "callback_data": "start"}]]}
         
         send_message(chat_id, text, reply_markup=keyboard)
+        
+        # Повідомлення оператору
+        try:
+            from config import OPERATOR_CHAT_ID
+            if OPERATOR_CHAT_ID:
+                notify_operator_new_order(OPERATOR_CHAT_ID, order_id, chat_id, items_for_db, total)
+        except:
+            pass
+        
         return None
         
     except Exception as e:

@@ -51,6 +51,15 @@ try:
     from services.sheets import get_menu_from_sheet, save_order_to_sheets, search_menu_items
     from services.gemini import init_gemini_client, get_ai_response, is_gemini_connected
     from services.telegram import tg_send_message, tg_answer_callback, tg_set_webhook
+    from services.database import (
+        init_database, save_order, get_order, update_order_status,
+        get_orders_by_status, log_activity, get_statistics, get_popular_items as db_get_popular
+    )
+    from handlers.admin import (
+        is_admin, show_admin_menu, show_statistics, show_new_orders,
+        show_order_details, change_order_status, show_popular_items as admin_show_popular,
+        reload_menu as admin_reload_menu
+    )
     logger.info("Services imported")
 except ImportError as e:
     logger.critical(f"Service import failed: {e}")
@@ -156,6 +165,15 @@ def init_services():
     global menu_cache
     
     logger.info("Initializing services...")
+    
+    # База даних
+    try:
+        if init_database():
+            logger.info("Database initialized")
+        else:
+            logger.error("Database init failed")
+    except Exception as e:
+        logger.exception(f"Database error: {e}")
     
     try:
         log_config()
@@ -734,12 +752,59 @@ def process_callback_query(callback_query):
         callback_id = callback_query["id"]
         data = callback_query["data"]
         user = callback_query.get("from", {})
+        user_id = user.get("id", chat_id)
         user_name = user.get("first_name", "")
         
         logger.info(f"Callback: {data[:20]}... from {chat_id}")
         
         answer_callback(callback_id, "")
         
+        # Перевірка admin команд
+        try:
+            from config import OPERATOR_CHAT_ID
+            if OPERATOR_CHAT_ID and is_admin(user_id, OPERATOR_CHAT_ID):
+                if data == "admin_menu":
+                    show_admin_menu(chat_id, send_message)
+                    return
+                elif data == "admin_stats":
+                    show_statistics(chat_id, send_message, days=1)
+                    return
+                elif data == "admin_stats_7":
+                    show_statistics(chat_id, send_message, days=7)
+                    return
+                elif data == "admin_stats_30":
+                    show_statistics(chat_id, send_message, days=30)
+                    return
+                elif data == "admin_orders_new":
+                    show_new_orders(chat_id, send_message)
+                    return
+                elif data.startswith("admin_order_"):
+                    order_id = data[12:]
+                    show_order_details(chat_id, order_id, send_message, get_order)
+                    return
+                elif data.startswith("admin_status_"):
+                    parts = data.split('_', 3)
+                    if len(parts) == 4:
+                        order_id = parts[2]
+                        new_status = parts[3]
+                        msg = change_order_status(order_id, new_status, update_order_status)
+                        answer_callback(callback_id, msg, show_alert=True)
+                        show_order_details(chat_id, order_id, send_message, get_order)
+                    return
+                elif data == "admin_popular":
+                    admin_show_popular(chat_id, send_message)
+                    return
+                elif data == "admin_reload_menu":
+                    def reload_func():
+                        global menu_cache
+                        menu_cache = get_menu_from_sheet()
+                        return len(menu_cache)
+                    admin_reload_menu(chat_id, send_message, reload_func)
+                    return
+        except Exception as e:
+            logger.exception(f"Admin command error: {e}")
+        
+        # Звичайні команди
         if data == "noop":
             return
         elif data == "start":
@@ -795,9 +860,20 @@ def process_message(message):
         chat_id = message["chat"]["id"]
         text = message.get("text", "")
         user = message["from"]
+        user_id = user.get("id", chat_id)
         user_name = user.get("first_name", "")
         
         logger.info(f"Message from {chat_id}: {text[:30]}...")
+        
+        # Перевірка admin команд
+        try:
+            from config import OPERATOR_CHAT_ID
+            if OPERATOR_CHAT_ID and is_admin(user_id, OPERATOR_CHAT_ID):
+                if text == "/admin":
+                    show_admin_menu(chat_id, send_message)
+                    return
+        except Exception as e:
+            logger.exception(f"Admin check error: {e}")
         
         state = get_user_state(chat_id)
         

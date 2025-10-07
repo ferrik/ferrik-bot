@@ -7,6 +7,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape as html_escape
 from threading import RLock
 from urllib.parse import quote_plus, unquote_plus
+from utils.html_formatter import escape_field, validate_telegram_html
+from utils.price_handler import parse_price, format_price, calculate_cart_total, price_to_sheets_format
 
 logging.basicConfig(
     level=logging.INFO,

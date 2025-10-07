@@ -1,129 +1,287 @@
-import os
+"""
+Gemini AI Service
+Інтеграція з Google Gemini API для AI пошуку
+
+Виправлення:
+- Санітизація user input
+- Кращa обробка помилок
+- Fallback механізм
+"""
+
 import logging
-import google.generativeai as genai
+import requests
+from typing import List, Dict, Any, Optional
 
-logger = logging.getLogger("gemini_service")
+import config
+from utils.html_formatter import sanitize_user_input
 
-_gemini_client = None
-_model = None
+logger = logging.getLogger(__name__)
 
-def init_gemini_client():
-    """Ініціалізація Gemini AI"""
-    global _gemini_client, _model
+# Gemini API endpoint
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+
+
+def get_ai_response(query: str, menu: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    Отримує відповідь від Gemini AI
+    
+    Args:
+        query: Запит користувача
+        menu: Список товарів меню
+    
+    Returns:
+        Відповідь AI або None
+    """
+    if not config.GEMINI_API_KEY:
+        logger.warning("Gemini API key not configured")
+        return None
+    
+    # Санітизація запиту
+    clean_query = sanitize_user_input(query)
+    
+    if not clean_query:
+        return None
     
     try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            logger.error("❌ GEMINI_API_KEY not set")
-            return None
+        # Формуємо prompt
+        menu_text = "\n".join([
+            f"- {item.get('Назва Страви', 'N/A')}: {item.get('Опис', 'Без опису')}"
+            for item in menu[:50]  # Обмежуємо кількість для context
+        ])
         
-        genai.configure(api_key=api_key)
+        prompt = f"""Ти асистент ресторану. Допоможи клієнту знайти страву з меню.
+
+Меню:
+{menu_text}
+
+Запит клієнта: {clean_query}
+
+Дай коротку відповідь (2-3 речення) та порекомендуй конкретні страви з меню."""
         
-        # Використовуємо безкоштовну модель
-        model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
+        # API request
+        headers = {
+            'Content-Type': 'application/json',
+        }
         
-        _model = genai.GenerativeModel(
-            model_name=model_name,
-            generation_config={
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "top_k": 40,
-                "max_output_tokens": 500,
-            }
+        payload = {
+            'contents': [{
+                'parts': [{'text': prompt}]
+            }]
+        }
+        
+        response = requests.post(
+            f"{GEMINI_API_URL}?key={config.GEMINI_API_KEY}",
+            headers=headers,
+            json=payload,
+            timeout=30
         )
         
-        logger.info(f"✅ Gemini initialized: {model_name}")
-        return _model
+        response.raise_for_status()
+        result = response.json()
         
+        # Парсимо відповідь
+        if 'candidates' in result and len(result['candidates']) > 0:
+            text = result['candidates'][0]['content']['parts'][0]['text']
+            return text
+        
+        return None
+        
+    except requests.exceptions.Timeout:
+        logger.error("Gemini API timeout")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Gemini API error: {e}")
+        return None
     except Exception as e:
-        logger.error(f"❌ Gemini init error: {e}", exc_info=True)
+        logger.error(f"Unexpected error in AI response: {e}")
         return None
 
-def is_gemini_connected():
-    """Перевірка підключення"""
-    return _model is not None
 
-def get_ai_response(prompt, max_retries=2):
-    """Отримати відповідь від AI"""
-    global _model
+def search_menu(query: str, menu: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Пошук страв в меню за допомогою AI або fallback до простого пошуку
     
-    if not _model:
-        _model = init_gemini_client()
-        if not _model:
-            raise RuntimeError("Gemini not available")
+    Args:
+        query: Пошуковий запит
+        menu: Список товарів
     
-    for attempt in range(max_retries):
+    Returns:
+        List відфільтрованих items
+    """
+    # Санітизація
+    clean_query = sanitize_user_input(query).lower()
+    
+    if not clean_query:
+        return []
+    
+    results = []
+    
+    # Спочатку пробуємо простий пошук (завжди працює)
+    for item in menu:
+        name = (item.get('Назва Страви', '') or '').lower()
+        description = (item.get('Опис', '') or '').lower()
+        category = (item.get('Категорія', '') or '').lower()
+        
+        if (clean_query in name or 
+            clean_query in description or 
+            clean_query in category):
+            results.append(item)
+    
+    # Якщо знайдено через простий пошук - повертаємо
+    if results:
+        logger.info(f"Simple search found {len(results)} items for '{query}'")
+        return results
+    
+    # Якщо нічого не знайдено - пробуємо AI (якщо доступний)
+    if config.GEMINI_API_KEY:
         try:
-            # Системний промпт для контексту
-            system_prompt = """Ти - помічник ресторану Hubsy. 
-Твоя мета: допомогти користувачу обрати страви.
-Відповідай коротко (2-3 речення), дружньо, українською мовою.
-Будь конкретним та корисним."""
+            logger.info(f"Trying AI search for '{query}'")
+            ai_response = get_ai_response(query, menu)
             
-            full_prompt = f"{system_prompt}\n\n{prompt}"
-            
-            response = _model.generate_content(full_prompt)
-            
-            if not response or not response.text:
-                logger.warning(f"Empty response on attempt {attempt + 1}")
-                continue
-            
-            return response.text.strip()
-            
+            if ai_response:
+                # AI повертає текст з рекомендаціями
+                # Пробуємо витягти назви страв з відповіді
+                results = extract_items_from_ai_response(ai_response, menu)
+                
+                if results:
+                    logger.info(f"AI search found {len(results)} items")
+                    return results
         except Exception as e:
-            logger.error(f"❌ AI error (attempt {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                continue
-            raise
+            logger.error(f"AI search failed: {e}")
     
-    raise RuntimeError("AI failed after retries")
+    # Якщо все не спрацювало - повертаємо порожній список
+    logger.info(f"No results found for '{query}'")
+    return []
 
-def analyze_user_query(query, menu_context):
-    """Аналіз запиту користувача для пошуку"""
-    prompt = f"""Проаналізуй запит користувача: "{query}"
 
-Контекст меню: {menu_context}
-
-Визнач:
-1. Чи це запит про категорію їжі (піца, суші, десерти тощо)?
-2. Чи це запит про конкретну страву?
-3. Чи це запит про характеристики (солодке, м'ясне, вегетаріанське)?
-
-Поверни ТІЛЬКИ одне слово - назву категорії або страви."""
+def extract_items_from_ai_response(ai_text: str, menu: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Витягує items з AI відповіді
     
-    return get_ai_response(prompt)
+    Args:
+        ai_text: Текст відповіді AI
+        menu: Повне меню
+    
+    Returns:
+        List знайдених items
+    """
+    results = []
+    ai_text_lower = ai_text.lower()
+    
+    # Шукаємо згадки страв з меню в AI відповіді
+    for item in menu:
+        name = (item.get('Назва Страви', '') or '').lower()
+        
+        if name and name in ai_text_lower:
+            results.append(item)
+    
+    return results
 
-def generate_recommendation(user_preferences=None, menu_items=None):
-    """Генерація персональної рекомендації"""
-    context = ""
-    
-    if user_preferences:
-        context += f"Користувач часто замовляє: {user_preferences}. "
-    
-    if menu_items:
-        context += f"Доступні страви: {', '.join(menu_items[:10])}. "
-    
-    prompt = f"""{context}
 
-Порекомендуй 2-3 найкращі страви для користувача.
-Поясни чому саме ці страви підійдуть.
-Будь дружнім та переконливим."""
+def get_ai_recommendation(user_preferences: Dict[str, Any], menu: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    Отримує AI рекомендації на основі вподобань користувача
     
-    return get_ai_response(prompt)
+    Args:
+        user_preferences: Словник з вподобаннями (вегетаріанство, алергії, etc)
+        menu: Список товарів
+    
+    Returns:
+        Текст рекомендації
+    """
+    if not config.GEMINI_API_KEY:
+        return None
+    
+    try:
+        # Формуємо промпт з вподобаннями
+        prefs_text = ", ".join([f"{k}: {v}" for k, v in user_preferences.items()])
+        
+        menu_text = "\n".join([
+            f"- {item.get('Назва Страви')}: {item.get('Опис', 'Без опису')}"
+            for item in menu[:30]
+        ])
+        
+        prompt = f"""Ти дієтолог ресторану. Допоможи клієнту вибрати страву.
 
-def chat_with_user(user_message, conversation_history=None):
-    """Діалог з користувачем"""
-    context = ""
-    
-    if conversation_history:
-        context = "Попередні повідомлення:\n"
-        for msg in conversation_history[-3:]:  # Останні 3
-            context += f"- {msg}\n"
-    
-    prompt = f"""{context}
+Вподобання клієнта: {prefs_text}
 
-Користувач пише: "{user_message}"
+Меню:
+{menu_text}
 
-Відповідь як помічник ресторану (коротко, дружньо):"""
+Порекомендуй 2-3 страви які найкраще підходять клієнту та коротко поясни чому."""
+        
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            'contents': [{
+                'parts': [{'text': prompt}]
+            }]
+        }
+        
+        response = requests.post(
+            f"{GEMINI_API_URL}?key={config.GEMINI_API_KEY}",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        response.raise_for_status()
+        result = response.json()
+        
+        if 'candidates' in result and len(result['candidates']) > 0:
+            return result['candidates'][0]['content']['parts'][0]['text']
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"AI recommendation failed: {e}")
+        return None
+
+
+def test_gemini_connection() -> bool:
+    """
+    Тестує з'єднання з Gemini API
     
-    return get_ai_response(prompt)
+    Returns:
+        True якщо API доступний
+    """
+    if not config.GEMINI_API_KEY:
+        logger.warning("Gemini API key not configured")
+        return False
+    
+    try:
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            'contents': [{
+                'parts': [{'text': 'Test connection'}]
+            }]
+        }
+        
+        response = requests.post(
+            f"{GEMINI_API_URL}?key={config.GEMINI_API_KEY}",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            logger.info("✅ Gemini API connection OK")
+            return True
+        else:
+            logger.error(f"❌ Gemini API returned {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Gemini API connection failed: {e}")
+        return False
+
+
+# ============================================================================
+# EXPORT
+# ============================================================================
+
+__all__ = [
+    'get_ai_response',
+    'search_menu',
+    'get_ai_recommendation',
+    'test_gemini_connection',
+]

@@ -1,226 +1,464 @@
-import os
-import gspread
-from google.oauth2.service_account import Credentials
+"""
+Google Sheets Service
+Робота з Google Sheets API для меню та замовлень
+
+Виправлення:
+- Decimal замість float для цін
+- Нормалізація полів через field_mapping
+- Кращa обробка помилок
+"""
+
 import logging
 import json
 from datetime import datetime
+from typing import List, Dict, Any, Optional
 
-logger = logging.getLogger("hubsy_sheets")
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-_sheets_client = None
-_menu_cache = []
-_cache_timestamp = None
+import config
+from utils.price_handler import price_to_sheets_format, parse_price
+from config.field_mapping import normalize_menu_list, create_legacy_compatible_item
 
-def init_gspread_client():
-    """Ініціалізація Google Sheets"""
-    global _sheets_client
+logger = logging.getLogger(__name__)
+
+# Google Sheets API setup
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+# Кеш для service
+_sheets_service = None
+
+
+def get_sheets_service():
+    """
+    Отримує або створює Google Sheets service
     
-    if _sheets_client:
-        return _sheets_client
+    Returns:
+        Google Sheets API service
+    """
+    global _sheets_service
+    
+    if _sheets_service is not None:
+        return _sheets_service
     
     try:
-        creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if not creds_json:
-            logger.error("❌ GOOGLE_CREDENTIALS_JSON not set")
-            return None
+        # Парсимо credentials з JSON
+        if config.GOOGLE_CREDENTIALS_JSON:
+            creds_dict = json.loads(config.GOOGLE_CREDENTIALS_JSON)
+        else:
+            raise ValueError("Google credentials not configured")
         
-        creds_dict = json.loads(creds_json)
-        scopes = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive"
-        ]
+        # Створюємо credentials
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=SCOPES
+        )
         
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        _sheets_client = gspread.authorize(creds)
+        # Створюємо service
+        _sheets_service = build('sheets', 'v4', credentials=credentials)
         
-        logger.info("✅ Google Sheets initialized")
-        return _sheets_client
+        logger.info("✅ Google Sheets service initialized")
+        return _sheets_service
         
     except Exception as e:
-        logger.error(f"❌ Sheets init error: {e}", exc_info=True)
-        return None
+        logger.error(f"Failed to initialize Google Sheets service: {e}")
+        raise
 
-def get_menu_from_sheet(force_reload=False):
-    """Отримати меню з кешем"""
-    global _menu_cache, _cache_timestamp
+
+def get_menu_from_sheet() -> List[Dict[str, Any]]:
+    """
+    Отримує меню з Google Sheets
     
-    # Кеш на 5 хвилин
-    if not force_reload and _menu_cache and _cache_timestamp:
-        age = (datetime.now() - _cache_timestamp).total_seconds()
-        if age < 300:
-            logger.info(f"📦 Using cache ({len(_menu_cache)} items)")
-            return _menu_cache
+    ВИПРАВЛЕННЯ:
+    - Нормалізація полів через field_mapping
+    - Legacy compatibility
+    - Кращa обробка помилок
     
+    Returns:
+        List of menu items з нормалізованими полями
+    """
     try:
-        client = init_gspread_client()
-        if not client:
-            logger.warning("⚠️ No client")
-            return _menu_cache
+        service = get_sheets_service()
+        sheet = service.spreadsheets()
         
-        sheet_id = os.environ.get("GOOGLE_SHEET_ID") or os.environ.get("SPREADSHEET_ID")
-        if not sheet_id:
-            logger.error("❌ SHEET_ID not set")
-            return _menu_cache
+        # Читаємо заголовки (перший рядок)
+        headers_result = sheet.values().get(
+            spreadsheetId=config.GOOGLE_SHEET_ID,
+            range='Menu!A1:Z1'
+        ).execute()
         
-        # Відкриваємо аркуш "Меню"
-        spreadsheet = client.open_by_key(sheet_id)
-        menu_sheet = spreadsheet.worksheet("Меню")
+        headers = headers_result.get('values', [[]])[0]
         
-        # Отримуємо всі записи
-        raw_menu = menu_sheet.get_all_records()
+        if not headers:
+            logger.error("No headers found in menu sheet")
+            return []
         
-        # Адаптуємо структуру під ваші колонки
-        menu = []
-        for item in raw_menu:
-            # Перевіряємо чи активна страва
-            active = str(item.get('Активний', '')).lower()
-            if active not in ['так', 'yes', 'true', '1']:
-                continue  # Пропускаємо неактивні
+        # Читаємо дані (з другого рядка)
+        result = sheet.values().get(
+            spreadsheetId=config.GOOGLE_SHEET_ID,
+            range='Menu!A2:Z1000'
+        ).execute()
+        
+        values = result.get('values', [])
+        
+        if not values:
+            logger.warning("No data found in menu sheet")
+            return []
+        
+        # Конвертуємо в list of dicts
+        raw_menu = []
+        for row in values:
+            # Доповнюємо пусті комірки
+            if len(row) < len(headers):
+                row = row + [''] * (len(headers) - len(row))
             
-            # Конвертуємо під стандартну структуру
-            adapted_item = {
-                'ID': item.get('ID', ''),
-                'Назва Страви': item.get('Страви', ''),  # ← КЛЮЧОВА ЗМІНА
-                'Категорія': item.get('Категорія', ''),
-                'Ціна': item.get('Ціна', 0),
-                'Опис': item.get('Опис', ''),
-                'Вага': '',  # У вас немає цієї колонки
-                'Ресторан': item.get('Ресторан', ''),
-                'Час Доставки': item.get('Час Доставки (хв)', ''),
-                'Фото': item.get('Фото URL', ''),
-                'Рейтинг': item.get('Рейтинг', ''),
-                'Аллергени': item.get('Аллергени', '')
-            }
+            # Створюємо dict
+            item = dict(zip(headers, row))
             
-            # Додаємо тільки якщо є назва страви
-            if adapted_item['Назва Страви']:
-                menu.append(adapted_item)
+            # Пропускаємо порожні рядки
+            if not any(item.values()):
+                continue
+            
+            raw_menu.append(item)
         
-        _menu_cache = menu
-        _cache_timestamp = datetime.now()
+        logger.info(f"Loaded {len(raw_menu)} raw items from sheet")
         
-        logger.info(f"✅ Menu loaded: {len(menu)} items")
-        return menu
+        # КРИТИЧНО: Нормалізуємо поля
+        normalized_menu = normalize_menu_list(raw_menu)
         
-    except gspread.exceptions.WorksheetNotFound:
-        logger.error("❌ Worksheet 'Меню' not found")
-        return _menu_cache
+        # BACKWARD COMPATIBILITY: Додаємо legacy ключі
+        compatible_menu = [create_legacy_compatible_item(item) for item in normalized_menu]
+        
+        logger.info(f"✅ Menu normalized: {len(compatible_menu)} items")
+        return compatible_menu
+        
+    except HttpError as e:
+        logger.error(f"HTTP error loading menu: {e}")
+        return []
     except Exception as e:
-        logger.error(f"❌ Menu loading error: {e}", exc_info=True)
-        return _menu_cache
+        logger.error(f"Failed to load menu from sheets: {e}")
+        return []
 
-def save_order_to_sheets(chat_id, cart):
-    """Зберегти замовлення"""
+
+def save_order_to_sheets(order_id: str, cart: Dict, contact_info: Dict) -> bool:
+    """
+    Зберігає замовлення в Google Sheets
+    
+    КРИТИЧНЕ ВИПРАВЛЕННЯ:
+    - Decimal замість float (БЕЗ ВТРАТИ ТОЧНОСТІ!)
+    - Правильне форматування для Sheets
+    - Кращa обробка помилок
+    
+    Args:
+        order_id: ID замовлення
+        cart: Словник {item: quantity}
+        contact_info: Контактна інформація
+    
+    Returns:
+        True якщо успішно, False якщо помилка
+    """
     try:
-        client = init_gspread_client()
-        if not client:
-            logger.error("❌ Cannot save: no client")
+        service = get_sheets_service()
+        sheet = service.spreadsheets()
+        
+        # Timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Готуємо rows для запису
+        rows_to_add = []
+        
+        for item, quantity in cart.items():
+            # Конвертуємо item (може бути dict або frozenset)
+            if isinstance(item, dict):
+                item_dict = item
+            else:
+                try:
+                    item_dict = dict(item)
+                except (TypeError, ValueError):
+                    logger.error(f"Cannot convert item to dict: {type(item)}")
+                    continue
+            
+            # Отримуємо поля (підтримка обох форматів)
+            item_name = item_dict.get('Назва Страви') or item_dict.get('name', 'N/A')
+            item_category = item_dict.get('Категорія') or item_dict.get('category', 'N/A')
+            price_value = item_dict.get('Ціна') or item_dict.get('price', 0)
+            
+            # ⚠️ КРИТИЧНО: Використовуємо price_to_sheets_format
+            # ❌ НЕ РОБИТИ: float(str(price))  ← Втрата точності!
+            # ✅ ПРАВИЛЬНО: price_to_sheets_format(price)
+            price_formatted = price_to_sheets_format(price_value)
+            
+            # Розраховуємо total для рядка
+            unit_price = parse_price(price_value)
+            from decimal import Decimal
+            item_total = unit_price * Decimal(str(quantity))
+            total_formatted = price_to_sheets_format(item_total)
+            
+            # Формуємо row
+            row = [
+                str(order_id),                               # A: Order ID
+                timestamp,                                   # B: Timestamp
+                item_name,                                   # C: Item Name
+                item_category,                               # D: Category
+                int(quantity),                               # E: Quantity (int)
+                price_formatted,                             # F: Unit Price (STRING!)
+                total_formatted,                             # G: Total (STRING!)
+                contact_info.get('phone', 'N/A'),           # H: Phone
+                contact_info.get('address', 'N/A'),         # I: Address
+                contact_info.get('name', 'N/A'),            # J: Customer Name
+            ]
+            
+            rows_to_add.append(row)
+        
+        if not rows_to_add:
+            logger.warning(f"No rows to add for order {order_id}")
             return False
         
-        sheet_id = os.environ.get("GOOGLE_SHEET_ID") or os.environ.get("SPREADSHEET_ID")
-        spreadsheet = client.open_by_key(sheet_id)
+        # Записуємо в Sheets
+        body = {
+            'values': rows_to_add
+        }
         
-        # Відкриваємо аркуш "Замовлення"
-        try:
-            orders_sheet = spreadsheet.worksheet("Замовлення")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.warning("⚠️ 'Замовлення' not found, creating...")
-            orders_sheet = spreadsheet.add_worksheet(title="Замовлення", rows="100", cols="15")
-            # Додаємо заголовки як у вашій таблиці
-            orders_sheet.append_row([
-                "ID Замовлення", "Telegram User ID", "Час Замовлення", 
-                "Товари (JSON)", "Загальна Сума", "Адреса", "Телефон",
-                "Спосіб Оплати", "Статус", "Канал", "Вартість доставки",
-                "Загальна сума", "Тип доставки", "Час доставки/самовивозу",
-                "Оператор", "Примітки"
-            ])
+        result = sheet.values().append(
+            spreadsheetId=config.GOOGLE_SHEET_ID,
+            range='Orders!A:J',  # Adjust if your sheet has different name/columns
+            valueInputOption='RAW',  # ВАЖЛИВО: RAW щоб зберегти string format
+            insertDataOption='INSERT_ROWS',
+            body=body
+        ).execute()
         
-        # Формуємо дані замовлення
-        order_items = []
-        total = 0
+        updated_cells = result.get('updates', {}).get('updatedCells', 0)
+        logger.info(f"✅ Order {order_id} saved to sheets: {updated_cells} cells updated")
         
-        for item in cart:
-            name = item.get('Назва Страви', '')
-            item_id = item.get('ID', '')
-            price = float(str(item.get('Ціна', 0)).replace(',', '.'))
+        return True
+        
+    except HttpError as e:
+        logger.error(f"HTTP error saving order {order_id}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to save order {order_id} to sheets: {e}")
+        # НЕ кидаємо exception - це не критично якщо Sheets failed
+        return False
+
+
+def get_orders_from_sheet(limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Отримує останні замовлення з Sheets
+    
+    Args:
+        limit: Максимальна кількість замовлень
+    
+    Returns:
+        List of orders
+    """
+    try:
+        service = get_sheets_service()
+        sheet = service.spreadsheets()
+        
+        # Читаємо заголовки
+        headers_result = sheet.values().get(
+            spreadsheetId=config.GOOGLE_SHEET_ID,
+            range='Orders!A1:J1'
+        ).execute()
+        
+        headers = headers_result.get('values', [[]])[0]
+        
+        if not headers:
+            logger.warning("No headers in Orders sheet")
+            return []
+        
+        # Читаємо дані
+        result = sheet.values().get(
+            spreadsheetId=config.GOOGLE_SHEET_ID,
+            range=f'Orders!A2:J{limit + 1}'
+        ).execute()
+        
+        values = result.get('values', [])
+        
+        # Конвертуємо в list of dicts
+        orders = []
+        for row in values:
+            if len(row) < len(headers):
+                row = row + [''] * (len(headers) - len(row))
             
-            order_items.append({
-                "id": item_id,
-                "name": name,
-                "price": price,
-                "qty": 1
-            })
-            total += price
+            order = dict(zip(headers, row))
+            orders.append(order)
         
-        # ID замовлення
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        order_id = f"ORD-{timestamp}-{chat_id}"
+        logger.info(f"Loaded {len(orders)} orders from sheet")
+        return orders
         
-        # Час замовлення
-        order_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        logger.error(f"Failed to load orders: {e}")
+        return []
+
+
+def update_menu_item(item_id: str, updates: Dict[str, Any]) -> bool:
+    """
+    Оновлює товар в меню
+    
+    Args:
+        item_id: ID товару
+        updates: Словник з полями для оновлення
+    
+    Returns:
+        True якщо успішно
+    """
+    try:
+        # TODO: Реалізувати якщо потрібна функція редагування
+        logger.warning("update_menu_item not implemented yet")
+        return False
         
-        # JSON товарів
-        items_json = json.dumps(order_items, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Failed to update menu item {item_id}: {e}")
+        return False
+
+
+def add_menu_item(item: Dict[str, Any]) -> bool:
+    """
+    Додає новий товар в меню
+    
+    Args:
+        item: Словник з даними товару
+    
+    Returns:
+        True якщо успішно
+    """
+    try:
+        service = get_sheets_service()
+        sheet = service.spreadsheets()
         
-        # Рядок для таблиці
-        order_data = [
-            order_id,
-            str(chat_id),
-            order_time,
-            items_json,
-            f"{total:.2f}",
-            "",  # Адреса (додайте якщо потрібно)
-            "",  # Телефон
-            "Готівка при отриманні",
-            "Нове",
-            "Telegram Bot",
-            "0.0",
-            "",
-            "",
-            "",
-            "",
-            ""
+        # Формуємо row (відповідно до структури вашої таблиці)
+        row = [
+            item.get('ID', ''),
+            item.get('Назва Страви', ''),
+            item.get('Категорія', ''),
+            price_to_sheets_format(item.get('Ціна', 0)),
+            item.get('Опис', ''),
+            item.get('Доступно', 'Так'),
         ]
         
-        orders_sheet.append_row(order_data)
-        logger.info(f"✅ Order saved: {order_id}, {total:.2f} грн")
+        body = {'values': [row]}
+        
+        result = sheet.values().append(
+            spreadsheetId=config.GOOGLE_SHEET_ID,
+            range='Menu!A:F',
+            valueInputOption='RAW',
+            body=body
+        ).execute()
+        
+        logger.info(f"✅ Menu item added: {item.get('Назва Страви')}")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Save order error: {e}", exc_info=True)
+        logger.error(f"Failed to add menu item: {e}")
         return False
 
-def is_sheets_connected():
-    """Перевірка підключення"""
-    try:
-        client = init_gspread_client()
-        return client is not None
-    except:
-        return False
 
-def search_menu_items(query):
-    """Пошук страв"""
+def test_sheets_connection() -> bool:
+    """
+    Тестує з'єднання з Google Sheets
+    
+    Returns:
+        True якщо з'єднання OK
+    """
     try:
-        menu = get_menu_from_sheet()
-        query_lower = query.lower()
+        service = get_sheets_service()
+        sheet = service.spreadsheets()
         
-        results = []
-        for item in menu:
-            name = item.get('Назва Страви', '').lower()
-            category = item.get('Категорія', '').lower()
-            description = item.get('Опис', '').lower()
-            
-            if query_lower in name or query_lower in category or query_lower in description:
-                results.append(item)
+        # Пробуємо прочитати назву таблиці
+        result = sheet.get(spreadsheetId=config.GOOGLE_SHEET_ID).execute()
+        title = result.get('properties', {}).get('title', 'Unknown')
         
-        logger.info(f"🔍 Search '{query}': {len(results)} results")
-        return results
+        logger.info(f"✅ Sheets connection OK. Connected to: '{title}'")
+        return True
         
     except Exception as e:
-        logger.error(f"❌ Search error: {e}", exc_info=True)
-        return []
+        logger.error(f"❌ Sheets connection failed: {e}")
+        return False
 
-def reload_menu():
-    """Примусове перезавантаження"""
-    logger.info("🔄 Force reload...")
-    return get_menu_from_sheet(force_reload=True)
+
+def get_sheet_info() -> Dict[str, Any]:
+    """
+    Отримує інформацію про таблицю
+    
+    Returns:
+        Dict з метаданими таблиці
+    """
+    try:
+        service = get_sheets_service()
+        sheet = service.spreadsheets()
+        
+        result = sheet.get(spreadsheetId=config.GOOGLE_SHEET_ID).execute()
+        
+        info = {
+            'title': result.get('properties', {}).get('title'),
+            'sheets': [s['properties']['title'] for s in result.get('sheets', [])],
+            'url': f"https://docs.google.com/spreadsheets/d/{config.GOOGLE_SHEET_ID}"
+        }
+        
+        return info
+        
+    except Exception as e:
+        logger.error(f"Failed to get sheet info: {e}")
+        return {}
+
+
+# ============================================================================
+# HELPER ФУНКЦІЇ
+# ============================================================================
+
+def validate_menu_item(item: Dict[str, Any]) -> tuple:
+    """
+    Валідує що item містить всі необхідні поля
+    
+    Args:
+        item: Словник товару
+    
+    Returns:
+        (is_valid: bool, error_message: str)
+    """
+    required_fields = ['Назва Страви', 'Ціна', 'Категорія']
+    
+    for field in required_fields:
+        if field not in item or not item[field]:
+            return False, f"Missing required field: {field}"
+    
+    # Перевірка що ціна валідна
+    from utils.price_handler import validate_price
+    is_valid, error = validate_price(item['Ціна'])
+    if not is_valid:
+        return False, f"Invalid price: {error}"
+    
+    return True, ""
+
+
+def format_price_for_display(price_value: Any) -> str:
+    """
+    Форматує ціну для відображення
+    
+    Args:
+        price_value: Ціна
+    
+    Returns:
+        Відформатована строка з валютою
+    """
+    from utils.price_handler import format_price
+    return format_price(price_value)
+
+
+# ============================================================================
+# EXPORT
+# ============================================================================
+
+__all__ = [
+    'get_sheets_service',
+    'get_menu_from_sheet',
+    'save_order_to_sheets',
+    'get_orders_from_sheet',
+    'update_menu_item',
+    'add_menu_item',
+    'test_sheets_connection',
+    'get_sheet_info',
+    'validate_menu_item',
+]

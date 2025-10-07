@@ -1,17 +1,7 @@
-# Секрети та конфіденційна інформація
-creds.json
-*.pem
-*.key
+# Environment variables (КРИТИЧНО!)
 .env
 .env.local
 .env.production
-config.local.py
-
-# Бази даних
-bot_data.db
-*.db
-*.sqlite
-*.sqlite3
 
 # Python
 __pycache__/
@@ -34,13 +24,12 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
 
-# Virtual environments
+# Virtual Environment
 venv/
+venv_test/
 ENV/
 env/
-.venv
 
 # IDE
 .vscode/
@@ -48,20 +37,24 @@ env/
 *.swp
 *.swo
 *~
-.DS_Store
-*.sublime-project
-*.sublime-workspace
 
 # Logs
 *.log
 logs/
 
+# Google Credentials
+credentials.json
+service-account.json
+*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
-.tox/
-.cache
 
-# Local config
-instance/
+# Redis dumps
+dump.rdb

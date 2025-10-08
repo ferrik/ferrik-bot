@@ -9,6 +9,12 @@ from threading import RLock
 from urllib.parse import quote_plus, unquote_plus
 from utils.html_formatter import escape_field, validate_telegram_html
 from utils.price_handler import parse_price, format_price, calculate_cart_total, price_to_sheets_format
+from utils.field_mapping import (
+    normalize_menu_item, 
+    get_field_value, 
+    MenuField,
+    create_legacy_compatible_item
+)
 
 logging.basicConfig(
     level=logging.INFO,

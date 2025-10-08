@@ -708,4 +708,111 @@ def handle_confirm_order(chat_id):
     address = get_data(chat_id, 'address')
     
     try:
+        # Розрахувати суму
+        total = 0
+        for item_name, qty in cart.items():
+            item = find_item(item_name)
+            if item:
+                total += float(item.get('Ціна', 0)) * qty
         
+        # Зберегти
+        contact_info = {'phone': phone, 'address': address}
+        order_id = db_service.save_order(chat_id, cart, contact_info, str(total))
+        
+        if not order_id:
+            raise Exception("Save failed")
+        
+        # Очистити корзину
+        with user_carts_lock:
+            user_carts[chat_id] = {}
+        
+        set_state(chat_id, UserState.MAIN_MENU)
+        
+        # Sheets sync (не критично)
+        try:
+            sheets_service.save_order_to_sheets(order_id, cart, contact_info)
+        except:
+            pass
+        
+        # Оператору
+        if OPERATOR_CHAT_ID:
+            try:
+                op_text = (
+                    f"🆕 <b>Замовлення #{order_id}</b>\n\n"
+                    f"{format_cart_summary(chat_id)}\n\n"
+                    f"📱 {phone}\n"
+                    f"📍 {address}"
+                )
+                send_message(OPERATOR_CHAT_ID, op_text)
+            except:
+                pass
+        
+        # Користувачу
+        text = (
+            f"✅ <b>Замовлення #{order_id} прийнято!</b>\n\n"
+            f"💰 Сума: {total:.2f} грн\n\n"
+            "🎉 Дякуємо!\n"
+            "Наш оператор зв'яжеться з вами\n"
+            "протягом 5-10 хвилин\n\n"
+            "Очікуйте дзвінка!"
+        )
+        
+        send_message(chat_id, text, reply_markup=main_menu_keyboard())
+        
+        logger.info(f"✅ Order {order_id} created")
+        
+    except Exception as e:
+        logger.error(f"Checkout failed: {e}")
+        send_message(
+            chat_id,
+            "❌ Помилка оформлення\n\nСпробуйте пізніше або зверніться до оператора",
+            reply_markup=main_menu_keyboard()
+        )
+
+
+# =============================================================================
+# WEBHOOK
+# =============================================================================
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Webhook endpoint"""
+    # Перевірка secret
+    secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+    
+    if secret != WEBHOOK_SECRET:
+        logger.warning(f"❌ Auth failed from {request.remote_addr}")
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        update = request.get_json()
+        
+        if not update:
+            return jsonify({"status": "ok"}), 200
+        
+        # Message
+        if 'message' in update:
+            msg = update['message']
+            chat_id = msg['chat']['id']
+            
+            # Текст
+            if 'text' in msg:
+                text = msg['text']
+                
+                # Команди
+                if text.startswith('/'):
+                    if text == '/start':
+                        handle_start(chat_id)
+                    elif text == '/menu':
+                        handle_menu(chat_id)
+                    elif text == '/cart':
+                        handle_cart(chat_id)
+                    elif text == '/help':
+                        handle_help(chat_id)
+                    elif text == '/cancel':
+                        set_state(chat_id, UserState.MAIN_MENU)
+                        send_message(chat_id, "✅ Скасовано", reply_markup=main_menu_keyboard())
+                    else:
+                        send_message(chat_id, "❌ Невідома команда\n\n/help для допомоги")
+                
+                else:

@@ -4,11 +4,11 @@ gunicorn==21.0.0
 
 # HTTP requests
 requests==2.28.0
-urllib3==1.26.18  # сумісна версія
+urllib3==1.26.18
 
-# Google Sheets API (сумісні між собою)
+# Google Sheets API (сумісні версії)
 google-api-python-client==2.92.0
-google-auth==1.35.0
+google-auth==2.14.1
 google-auth-oauthlib==0.5.3
 google-auth-httplib2==0.1.0
 google-api-core==2.11.0
@@ -16,7 +16,7 @@ google-api-core==2.11.0
 # Environment variables
 python-dotenv==1.0.0
 
-# Redis (опціонально, але рекомендовано для production)
+# Redis (опціонально)
 redis==4.5.0
 hiredis==2.2.3
 

@@ -1,998 +1,848 @@
+"""
+Hubsy Bot - Telegram Bot для замовлення їжі
+Secure Version з виправленнями
+
+Автор: Claude AI + ferrik
+Дата: 2025-10-08
+"""
+
 import os
+import sys
 import logging
 from flask import Flask, request, jsonify
-from datetime import datetime
-from collections import defaultdict, Counter
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from html import escape as html_escape
-from threading import RLock
-from urllib.parse import quote_plus, unquote_plus
-from utils.html_formatter import escape_field, validate_telegram_html
-from utils.price_handler import parse_price, format_price, calculate_cart_total, price_to_sheets_format
-from utils.field_mapping import (
-    normalize_menu_item, 
-    get_field_value, 
-    MenuField,
-    create_legacy_compatible_item
-)
+from dotenv import load_dotenv
 
+# Завантажити .env
+load_dotenv()
+
+# Налаштування логування
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
+
 logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-
-carts_lock = RLock()
-states_lock = RLock()
-history_lock = RLock()
-
 logger.info("Starting Hubsy Bot (Secure Version)...")
 
-# Критична перевірка конфігурації
+# =============================================================================
+# ІМПОРТ CONFIG
+# =============================================================================
+
 try:
-    from config import (
-        BOT_TOKEN, GEMINI_API_KEY, SPREADSHEET_ID, 
-        WEBHOOK_SECRET, validate_config, log_config
-    )
+    import bot_config as config
     
-    if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN not set")
-        raise RuntimeError("BOT_TOKEN is required")
+    # Backward compatibility aliases
+    BOT_TOKEN = config.BOT_TOKEN
+    WEBHOOK_SECRET = config.WEBHOOK_SECRET
+    GOOGLE_SHEET_ID = config.GOOGLE_SHEET_ID
+    SPREADSHEET_ID = config.GOOGLE_SHEET_ID  # Alias
+    OPERATOR_CHAT_ID = config.OPERATOR_CHAT_ID
     
-    if not WEBHOOK_SECRET:
-        logger.critical("WEBHOOK_SECRET not set")
-        raise RuntimeError("WEBHOOK_SECRET is required")
-    
-    logger.info("Config validated")
+    logger.info("✅ Config loaded successfully")
     
 except ImportError as e:
     logger.critical(f"Config import failed: {e}")
-    raise RuntimeError("Cannot start without config") from e
-except Exception as e:
-    logger.exception("Config error")
-    raise
+    print(f"\nError: Cannot start without config\n")
+    sys.exit(1)
 
-# Імпорти з fallback
+# =============================================================================
+# ІМПОРТИ СЕРВІСІВ
+# =============================================================================
+
 try:
-    from services.sheets import get_menu_from_sheet, save_order_to_sheets, search_menu_items
-    from services.gemini import init_gemini_client, get_ai_response, is_gemini_connected
-    from services.telegram import tg_send_message, tg_answer_callback, tg_set_webhook
-    from services.database import (
-        init_database, save_order, get_order, update_order_status,
-        get_orders_by_status, log_activity, get_statistics, get_popular_items as db_get_popular
-    )
-    from handlers.admin import (
-        is_admin, show_admin_menu, show_statistics, show_new_orders,
-        show_order_details, change_order_status, show_popular_items as admin_show_popular,
-        reload_menu as admin_reload_menu
-    )
-    logger.info("Services imported")
+    from services import telegram as tg_service
+    from services import sheets as sheets_service
+    from services import database as db_service
+    
+    # Gemini опціонально
+    try:
+        from services import gemini as ai_service
+        AI_ENABLED = True
+    except ImportError:
+        logger.warning("Gemini service not available")
+        AI_ENABLED = False
+    
+    logger.info("✅ Services imported")
+    
 except ImportError as e:
-    logger.critical(f"Service import failed: {e}")
-    raise RuntimeError("Cannot start without services") from e
+    logger.error(f"Failed to import services: {e}")
+    logger.error("Make sure all service files exist in services/ directory")
+    sys.exit(1)
 
+# =============================================================================
+# FLASK APP
+# =============================================================================
+
+app = Flask(__name__)
+
+# =============================================================================
+# ГЛОБАЛЬНІ ЗМІННІ (поступово мігруємо на Redis)
+# =============================================================================
+
+from collections import defaultdict
+from threading import RLock
+
+# Стани користувачів
+user_states = {}
+user_states_lock = RLock()
+
+# Корзини
+user_carts = defaultdict(dict)
+user_carts_lock = RLock()
+
+# Кеш меню
 menu_cache = []
-user_carts = defaultdict(list)
-user_states = defaultdict(lambda: {'state': 'main', 'data': {}})
-user_history = defaultdict(list)
-menu_analytics = Counter()
+menu_cache_lock = RLock()
 
-KEY_NAME = "Назва Страви"
-KEY_PRICE = "Ціна"
-KEY_CATEGORY = "Категорія"
-KEY_DESCRIPTION = "Опис"
-KEY_ID = "ID"
-KEY_RESTAURANT = "Ресторан"
-KEY_RATING = "Рейтинг"
+# Константи
+MAX_CART_ITEMS = getattr(config, 'MAX_CART_ITEMS', 50)
+MAX_ITEM_QUANTITY = getattr(config, 'MAX_ITEM_QUANTITY', 99)
 
-MAX_CALLBACK_LENGTH = 60  # Безпечний ліміт
+logger.info("✅ Global variables initialized")
 
-CATEGORY_EMOJI = {
-    "Піца": "🍕", "Бургери": "🍔", "Суші": "🍣",
-    "Салати": "🥗", "Напої": "🥤", "Десерти": "🍰", "Супи": "🍲"
-}
+# =============================================================================
+# HELPER ФУНКЦІЇ
+# =============================================================================
 
-def safe_callback_data(prefix: str, value: str) -> str:
-    """Безпечний callback_data з URL encoding"""
-    try:
-        # Видаляємо спецсимволи
-        safe_value = "".join(c for c in str(value) if c.isalnum() or c in "-_")
-        # URL encode
-        encoded = quote_plus(safe_value)
-        callback = f"{prefix}_{encoded}"
-        
-        # Обрізаємо до безпечної довжини
-        if len(callback) > MAX_CALLBACK_LENGTH:
-            callback = callback[:MAX_CALLBACK_LENGTH]
-        
-        return callback
-    except Exception as e:
-        logger.error(f"Callback data error: {e}")
-        return f"{prefix}_error"
-
-def parse_callback_data(data: str):
-    """Декодування callback_data"""
-    try:
-        if '_' not in data:
-            return data, ""
-        
-        prefix, value = data.split('_', 1)
-        decoded_value = unquote_plus(value)
-        return prefix, decoded_value
-    except Exception as e:
-        logger.error(f"Parse callback error: {e}")
-        return data, ""
-
-def parse_price(price_str) -> Decimal:
-    """Безпечний парсинг ціни в Decimal"""
-    try:
-        clean_price = str(price_str).replace(",", ".").replace(" ", "").strip()
-        if not clean_price:
-            return Decimal('0.00')
-        price = Decimal(clean_price)
-        return price.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    except (InvalidOperation, ValueError, TypeError) as e:
-        logger.warning(f"Price parse error '{price_str}': {e}")
-        return Decimal('0.00')
-
-def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
-    """Відправка з HTML escaping"""
-    try:
-        # Ескейпуємо HTML
-        safe_text = html_escape(text)
-        
-        # Відновлюємо дозволені теги
-        safe_text = safe_text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>")
-        safe_text = safe_text.replace("&lt;i&gt;", "<i>").replace("&lt;/i&gt;", "</i>")
-        safe_text = safe_text.replace("&lt;code&gt;", "<code>").replace("&lt;/code&gt;", "</code>")
-        
-        result = tg_send_message(chat_id, safe_text, reply_markup, parse_mode)
-        
-        if not result or not result.get('ok'):
-            logger.error(f"Send failed: {result}")
-            raise RuntimeError("Send message failed")
-        
-        return result
-        
-    except Exception as e:
-        logger.exception(f"Send error for chat {chat_id}")
-        raise
-
-def answer_callback(callback_id, text="", show_alert=False):
-    """Відповідь на callback"""
-    try:
-        return tg_answer_callback(callback_id, text, show_alert)
-    except Exception as e:
-        logger.exception("Callback answer error")
-        return None
-
-def init_services():
-    """Ініціалізація з proper error handling"""
+def get_menu():
+    """Отримує меню з кешу або завантажує"""
     global menu_cache
     
-    logger.info("Initializing services...")
-    
-    # База даних
-    try:
-        if init_database():
-            logger.info("Database initialized")
-        else:
-            logger.error("Database init failed")
-    except Exception as e:
-        logger.exception(f"Database error: {e}")
-    
-    try:
-        log_config()
-        if not validate_config():
-            logger.warning("Config validation failed")
-    except Exception as e:
-        logger.exception(f"Config validation error: {e}")
-    
-    try:
-        menu_cache = get_menu_from_sheet()
-        if menu_cache:
-            logger.info(f"Menu loaded: {len(menu_cache)} items")
-        else:
-            logger.warning("Menu is empty")
-    except Exception as e:
-        logger.exception(f"Menu load error: {e}")
-        menu_cache = []
+    with menu_cache_lock:
+        if not menu_cache:
+            logger.info("Loading menu from Google Sheets...")
+            try:
+                menu_cache = sheets_service.get_menu_from_sheet()
+                logger.info(f"✅ Menu loaded: {len(menu_cache)} items")
+            except Exception as e:
+                logger.error(f"Failed to load menu: {e}")
+                return []
+        
+        return menu_cache
+
+
+def refresh_menu():
+    """Оновлює кеш меню"""
+    global menu_cache
     
     try:
-        init_gemini_client()
-        if is_gemini_connected():
-            logger.info("Gemini initialized")
-        else:
-            logger.warning("Gemini not connected")
+        with menu_cache_lock:
+            menu_cache = sheets_service.get_menu_from_sheet()
+        logger.info(f"✅ Menu refreshed: {len(menu_cache)} items")
+        return True
     except Exception as e:
-        logger.exception(f"Gemini init error: {e}")
-    
-    try:
-        from config import RENDER_URL
-        result = tg_set_webhook(RENDER_URL)
-        if result and result.get('ok'):
-            logger.info("Webhook set successfully")
-        else:
-            logger.error(f"Webhook setup failed: {result}")
-    except Exception as e:
-        logger.exception(f"Webhook error: {e}")
+        logger.error(f"Failed to refresh menu: {e}")
+        return False
 
-def get_user_state(chat_id):
-    """Thread-safe state getter"""
-    with states_lock:
-        return user_states[chat_id].copy()
-
-def set_user_state(chat_id, state, data=None):
-    """Thread-safe state setter"""
-    with states_lock:
-        user_states[chat_id] = {'state': state, 'data': data or {}}
-
-def add_to_history(chat_id, item):
-    """Thread-safe history"""
-    with history_lock:
-        user_history[chat_id].append({
-            'item': item.copy(),
-            'timestamp': datetime.now().isoformat()
-        })
-        if len(user_history[chat_id]) > 20:
-            user_history[chat_id] = user_history[chat_id][-20:]
-
-def track_popularity(item_id):
-    """Thread-safe analytics"""
-    menu_analytics[item_id] += 1
-
-def get_popular_items(limit=3):
-    """Топ популярних"""
-    try:
-        if not menu_analytics:
-            sorted_menu = sorted(
-                menu_cache, 
-                key=lambda x: parse_price(x.get(KEY_RATING, 0)), 
-                reverse=True
-            )
-            return sorted_menu[:limit]
-        
-        popular_ids = [item_id for item_id, count in menu_analytics.most_common(limit)]
-        return [item for item in menu_cache if item.get(KEY_ID) in popular_ids]
-    except Exception as e:
-        logger.exception(f"Get popular error: {e}")
-        return []
-
-def get_user_preferences(chat_id):
-    """Аналіз уподобань"""
-    try:
-        with history_lock:
-            history = user_history.get(chat_id, [])
-        
-        if not history:
-            return None
-        
-        categories = Counter()
-        for entry in history:
-            item = entry.get('item', {})
-            cat = item.get(KEY_CATEGORY, '')
-            if cat:
-                categories[cat] += 1
-        
-        return categories.most_common(1)[0][0] if categories else None
-    except Exception as e:
-        logger.exception(f"Get preferences error: {e}")
-        return None
-
-def ai_search(query, chat_id):
-    """AI пошук з fallback"""
-    if not is_gemini_connected():
-        return search_menu_items(query), None
-    
-    try:
-        categories = get_categories()
-        menu_list = [f"{item[KEY_NAME]}" for item in menu_cache[:10]]
-        
-        prompt = f"""Користувач шукає: "{query}"
-
-Категорії: {', '.join(categories)}
-Страви: {', '.join(menu_list)}
-
-Поверни ТІЛЬКИ назву категорії або страви."""
-
-        ai_result = get_ai_response(prompt).strip()
-        
-        if ai_result in categories:
-            return get_items_by_category(ai_result), ai_result
-        
-        results = [item for item in menu_cache if ai_result.lower() in item[KEY_NAME].lower()]
-        return results, None
-        
-    except Exception as e:
-        logger.exception(f"AI search error: {e}")
-        return search_menu_items(query), None
-
-def get_ai_recommendation(chat_id):
-    """AI рекомендація"""
-    if not is_gemini_connected():
-        return "AI недоступний зараз."
-    
-    try:
-        preferred = get_user_preferences(chat_id)
-        categories = get_categories()
-        
-        context = f"Користувач любить: {preferred}. " if preferred else ""
-        
-        prompt = f"""{context}Порекомендуй 2 страви.
-Категорії: {', '.join(categories)}
-Коротко, дружньо."""
-
-        return get_ai_response(prompt)
-        
-    except Exception as e:
-        logger.exception(f"AI recommendation error: {e}")
-        return "Спробуйте наше меню!"
 
 def get_categories():
-    """Унікальні категорії"""
-    try:
-        categories = set()
-        for item in menu_cache:
-            cat = item.get(KEY_CATEGORY, "")
-            if cat:
-                categories.add(cat)
-        return sorted(list(categories))
-    except Exception as e:
-        logger.exception(f"Get categories error: {e}")
-        return []
+    """Отримує унікальні категорії"""
+    menu = get_menu()
+    categories = set()
+    
+    for item in menu:
+        category = item.get('Категорія', 'Інше')
+        if category:
+            categories.add(category)
+    
+    return sorted(list(categories))
+
 
 def get_items_by_category(category):
-    """Страви за категорією"""
-    try:
-        return [item for item in menu_cache if item.get(KEY_CATEGORY) == category]
-    except Exception as e:
-        logger.exception(f"Get items error: {e}")
-        return []
+    """Отримує товари за категорією"""
+    menu = get_menu()
+    return [item for item in menu if item.get('Категорія') == category]
 
-def format_item(item, show_full=True):
-    """Форматування з escape"""
-    try:
-        name = item.get(KEY_NAME, "Без назви")
-        price = item.get(KEY_PRICE, "?")
-        
-        if show_full:
-            desc = item.get(KEY_DESCRIPTION, "")
-            restaurant = item.get(KEY_RESTAURANT, "")
-            rating = item.get(KEY_RATING, "")
-            
-            # HTML буде ескейпнуто в send_message
-            text = f"<b>{name}</b>\n\n"
-            if desc:
-                text += f"{desc}\n\n"
-            if restaurant:
-                text += f"🏪 {restaurant}\n"
-            if rating:
-                text += f"⭐ {rating}\n"
-            text += f"\n💰 <b>{price} грн</b>"
-            return text
-        else:
-            return f"{name} - {price} грн"
-    except Exception as e:
-        logger.exception(f"Format item error: {e}")
-        return "Помилка форматування"
+
+def find_item_by_name(name):
+    """Знаходить товар за назвою"""
+    menu = get_menu()
+    for item in menu:
+        if item.get('Назва Страви') == name:
+            return item
+    return None
+
+
+# =============================================================================
+# ФОРМАТУВАННЯ
+# =============================================================================
+
+import html
+
+def safe_html_escape(text):
+    """Безпечно escape HTML"""
+    if text is None:
+        return ""
+    return html.escape(str(text))
+
+
+def format_item(item):
+    """Форматує товар для відображення"""
+    name = safe_html_escape(item.get('Назва Страви', 'Без назви'))
+    category = safe_html_escape(item.get('Категорія', 'Без категорії'))
+    price = safe_html_escape(item.get('Ціна', '0'))
+    description = safe_html_escape(item.get('Опис', ''))
+    
+    text = f"<b>{name}</b>\n"
+    text += f"<i>Категорія:</i> {category}\n"
+    
+    if description:
+        text += f"{description}\n"
+    
+    text += f"<b>Ціна:</b> {price} грн"
+    
+    return text
+
 
 def get_cart_summary(chat_id):
-    """Підсумок корзини"""
-    try:
-        with carts_lock:
-            cart = list(user_carts.get(chat_id, []))
-        
-        if not cart:
-            return None, Decimal('0.00')
-        
-        items_count = defaultdict(int)
-        total = Decimal('0.00')
-        
-        for item in cart:
-            name = item.get(KEY_NAME, "")
-            items_count[name] += 1
-            price = parse_price(item.get(KEY_PRICE, 0))
-            total += price
-        
-        return items_count, total
-    except Exception as e:
-        logger.exception(f"Cart summary error: {e}")
-        return None, Decimal('0.00')
-
-def handle_start(chat_id, user_name=None):
-    """Привітання"""
-    try:
-        set_user_state(chat_id, 'main')
-        
-        preferred = get_user_preferences(chat_id)
-        greeting = f"Привіт, {user_name}! 👋\n\n" if user_name else "Привіт! 👋\n\n"
-        
-        if preferred:
-            greeting += f"<i>Бачу ти любиш {preferred}</i>\n\n"
-        
-        text = f"{greeting}Я <b>Hubsy</b> — твій помічник.\n\nЩо хочеш зробити?"
-        
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🍽️ Меню", "callback_data": "menu"}],
-                [{"text": "🔥 Популярне", "callback_data": "popular"}],
-                [
-                    {"text": "🔍 Пошук", "callback_data": "search"},
-                    {"text": "✨ AI", "callback_data": "ai_recommend"}
-                ],
-                [{"text": "🛒 Кошик", "callback_data": "cart"}]
-            ]
-        }
-        
-        send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.exception(f"Start handler error: {e}")
-        send_message(chat_id, "Помилка. Спробуйте /start")
-
-def show_menu(chat_id):
-    """Показ категорій"""
-    try:
-        set_user_state(chat_id, 'choosing_category')
-        
-        categories = get_categories()
-        
-        if not categories:
-            send_message(chat_id, "❌ Меню недоступне")
-            return
-        
-        text = "<b>🍽️ Меню</b>\n\nОбери категорію:"
-        keyboard = {"inline_keyboard": []}
-        
-        for cat in categories:
-            emoji = CATEGORY_EMOJI.get(cat, "🍽️")
-            cb = safe_callback_data("cat", cat)
-            keyboard["inline_keyboard"].append([
-                {"text": f"{emoji} {cat}", "callback_data": cb}
-            ])
-        
-        keyboard["inline_keyboard"].append([
-            {"text": "🔍 Пошук", "callback_data": "search"},
-            {"text": "🏠 Головна", "callback_data": "start"}
-        ])
-        
-        send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.exception(f"Show menu error: {e}")
-
-def show_category_items(chat_id, category):
-    """Страви категорії"""
-    try:
-        items = get_items_by_category(category)
-        
-        if not items:
-            send_message(chat_id, f"В <b>{category}</b> немає страв")
-            return
-        
-        set_user_state(chat_id, 'browsing_items', {
-            'category': category,
-            'items': items,
-            'current_index': 0
-        })
-        
-        show_item_card(chat_id, items[0], 0, len(items), category)
-    except Exception as e:
-        logger.exception(f"Show category error: {e}")
-
-def show_item_card(chat_id, item, index, total, category):
-    """Карточка страви"""
-    try:
-        text = format_item(item, show_full=True)
-        text += f"\n\n📄 {index + 1}/{total}"
-        
-        keyboard = {"inline_keyboard": []}
-        
-        nav_row = []
-        if index > 0:
-            nav_row.append({"text": "⬅️", "callback_data": f"prev_{index}"})
-        nav_row.append({"text": f"{index + 1}/{total}", "callback_data": "noop"})
-        if index < total - 1:
-            nav_row.append({"text": "➡️", "callback_data": f"next_{index}"})
-        
-        keyboard["inline_keyboard"].append(nav_row)
-        
-        item_id = str(item.get(KEY_ID, item.get(KEY_NAME, "")))
-        cb = safe_callback_data("add", item_id)
-        keyboard["inline_keyboard"].append([
-            {"text": "➕ Додати", "callback_data": cb}
-        ])
-        
-        keyboard["inline_keyboard"].append([
-            {"text": "🔙 Категорії", "callback_data": "menu"},
-            {"text": "🏠 Головна", "callback_data": "start"}
-        ])
-        
-        send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.exception(f"Show card error: {e}")
-
-def navigate_items(chat_id, direction):
-    """Навігація"""
-    try:
-        state = get_user_state(chat_id)
-        
-        if state['state'] != 'browsing_items':
-            return
-        
-        items = state['data']['items']
-        current = state['data']['current_index']
-        category = state['data']['category']
-        
-        new_index = current + (1 if direction == 'next' else -1)
-        new_index = max(0, min(new_index, len(items) - 1))
-        
-        set_user_state(chat_id, 'browsing_items', {
-            'category': category,
-            'items': items,
-            'current_index': new_index
-        })
-        
-        show_item_card(chat_id, items[new_index], new_index, len(items), category)
-    except Exception as e:
-        logger.exception(f"Navigate error: {e}")
-
-def add_to_cart(chat_id, item_id):
-    """Додати в корзину"""
-    try:
-        item = None
-        for menu_item in menu_cache:
-            if str(menu_item.get(KEY_ID, "")) == str(item_id):
-                item = menu_item
-                break
-        
-        if not item:
-            return "❌ Не знайдено"
-        
-        with carts_lock:
-            user_carts[chat_id].append(item.copy())
-        
-        track_popularity(item_id)
-        add_to_history(chat_id, item)
-        
-        name = item.get(KEY_NAME, "")
-        price = item.get(KEY_PRICE, "")
-        
-        return f"✅ Додано!\n\n{name}\n{price} грн"
-    except Exception as e:
-        logger.exception(f"Add to cart error: {e}")
-        return "❌ Помилка"
-
-def show_cart(chat_id):
-    """Показ корзини"""
-    try:
-        items_count, total = get_cart_summary(chat_id)
-        
-        if not items_count:
-            text = "🛒 <b>Кошик порожній</b>"
-            keyboard = {"inline_keyboard": [[{"text": "🍽️ Меню", "callback_data": "menu"}]]}
-            send_message(chat_id, text, reply_markup=keyboard)
-            return
-        
-        text = "🛒 <b>Твій кошик:</b>\n\n"
-        
-        for name, count in items_count.items():
-            text += f"• {name} x{count}\n"
-        
-        text += f"\n💰 <b>Всього: {total:.2f} грн</b>"
-        
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "✅ Оформити", "callback_data": "checkout"}],
-                [{"text": "🗑️ Очистити", "callback_data": "clear_cart"}],
-                [{"text": "➕ Додати", "callback_data": "menu"}],
-                [{"text": "🏠 Головна", "callback_data": "start"}]
-            ]
-        }
-        
-        send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.exception(f"Show cart error: {e}")
-
-def show_popular(chat_id):
-    """Популярні страви"""
-    try:
-        popular = get_popular_items(3)
-        
-        if not popular:
-            send_message(chat_id, "❌ Немає даних")
-            return
-        
-        text = "🔥 <b>Топ:</b>\n\n"
-        keyboard = {"inline_keyboard": []}
-        
-        for item in popular:
-            name = item.get(KEY_NAME, "")
-            price = item.get(KEY_PRICE, "")
-            text += f"• {name} - {price} грн\n"
+    """Формує summary корзини"""
+    with user_carts_lock:
+        cart = user_carts.get(chat_id, {})
+    
+    if not cart:
+        return "🛒 Ваша корзина порожня"
+    
+    summary = "🛒 <b>Ваша корзина:</b>\n\n"
+    total = 0
+    
+    for item_name, quantity in cart.items():
+        item = find_item_by_name(item_name)
+        if item:
+            name = safe_html_escape(item.get('Назва Страви', 'N/A'))
+            price = float(item.get('Ціна', 0))
+            item_total = price * quantity
+            total += item_total
             
-            item_id = str(item.get(KEY_ID, ""))
-            cb = safe_callback_data("add", item_id)
-            keyboard["inline_keyboard"].append([
-                {"text": f"➕ {name[:20]}", "callback_data": cb}
-            ])
-        
-        keyboard["inline_keyboard"].append([
-            {"text": "🍽️ Меню", "callback_data": "menu"},
-            {"text": "🏠 Головна", "callback_data": "start"}
-        ])
-        
-        send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.exception(f"Show popular error: {e}")
+            summary += f"▫️ <b>{name}</b>\n"
+            summary += f"   {price:.2f} грн x {quantity} = {item_total:.2f} грн\n\n"
+    
+    summary += f"💰 <b>Разом:</b> {total:.2f} грн"
+    
+    return summary
 
-def start_search(chat_id):
+
+# =============================================================================
+# TELEGRAM API
+# =============================================================================
+
+def send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
+    """Відправляє повідомлення"""
+    try:
+        return tg_service.tg_send_message(chat_id, text, reply_markup, parse_mode)
+    except Exception as e:
+        logger.error(f"Failed to send message to {chat_id}: {e}")
+        return None
+
+
+def create_main_keyboard():
+    """Головна клавіатура"""
+    return {
+        "keyboard": [
+            [{"text": "📋 Меню"}, {"text": "🛒 Корзина"}],
+            [{"text": "🔍 Пошук"}, {"text": "ℹ️ Допомога"}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
+
+
+def create_categories_keyboard():
+    """Клавіатура категорій"""
+    categories = get_categories()
+    
+    keyboard = {"inline_keyboard": []}
+    
+    for category in categories:
+        keyboard["inline_keyboard"].append([
+            {"text": category, "callback_data": f"category:{category}"}
+        ])
+    
+    keyboard["inline_keyboard"].append([
+        {"text": "🔙 Назад", "callback_data": "back_to_main"}
+    ])
+    
+    return keyboard
+
+
+def create_item_keyboard(item):
+    """Клавіатура для товару"""
+    item_name = item.get('Назва Страви', 'unknown')
+    
+    return {
+        "inline_keyboard": [
+            [{"text": "➕ Додати в корзину", "callback_data": f"add:{item_name}"}],
+            [{"text": "🔙 Назад", "callback_data": "back_to_categories"}]
+        ]
+    }
+
+
+# =============================================================================
+# ОБРОБНИКИ КОМАНД
+# =============================================================================
+
+def handle_start(chat_id):
+    """Команда /start"""
+    welcome_text = (
+        "👋 Вітаємо в Hubsy Bot!\n\n"
+        "Тут ви можете:\n"
+        "📋 Переглянути меню\n"
+        "🛒 Оформити замовлення\n"
+    )
+    
+    if AI_ENABLED:
+        welcome_text += "🔍 Знайти страви за допомогою AI\n"
+    
+    welcome_text += "\nОберіть дію з меню:"
+    
+    send_message(chat_id, welcome_text, reply_markup=create_main_keyboard())
+    
+    with user_states_lock:
+        user_states[chat_id] = None
+
+
+def handle_menu(chat_id):
+    """Показати меню"""
+    text = "📋 <b>Оберіть категорію:</b>"
+    send_message(chat_id, text, reply_markup=create_categories_keyboard())
+
+
+def handle_cart(chat_id):
+    """Показати корзину"""
+    summary = get_cart_summary(chat_id)
+    
+    with user_carts_lock:
+        cart = user_carts.get(chat_id, {})
+    
+    if cart:
+        keyboard = {
+            "keyboard": [
+                [{"text": "✅ Оформити замовлення"}],
+                [{"text": "🗑 Очистити корзину"}],
+                [{"text": "🔙 Назад"}]
+            ],
+            "resize_keyboard": True
+        }
+        send_message(chat_id, summary, reply_markup=keyboard)
+    else:
+        send_message(chat_id, summary, reply_markup=create_main_keyboard())
+
+
+def handle_search(chat_id):
     """Пошук"""
-    try:
-        set_user_state(chat_id, 'searching')
-        
-        text = "🔍 <b>Пошук</b>\n\nНапиши що шукаєш:"
-        keyboard = {"inline_keyboard": [[{"text": "❌ Скасувати", "callback_data": "start"}]]}
-        
-        send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.exception(f"Start search error: {e}")
+    if not AI_ENABLED:
+        send_message(
+            chat_id,
+            "🔍 Функція пошуку тимчасово недоступна.\n"
+            "Перегляньте меню: /menu"
+        )
+        return
+    
+    text = (
+        "🔍 <b>Пошук страв</b>\n\n"
+        "Напишіть що ви шукаєте:\n"
+        "Наприклад: 'щось гостре' або 'вегетаріанські страви'"
+    )
+    
+    with user_states_lock:
+        user_states[chat_id] = 'searching'
+    
+    send_message(chat_id, text)
 
-def process_search(chat_id, query):
-    """Обробка пошуку"""
-    try:
-        results, category = ai_search(query, chat_id)
+
+def handle_help(chat_id):
+    """Допомога"""
+    text = (
+        "ℹ️ <b>Допомога</b>\n\n"
+        "Команди:\n"
+        "/start - Головне меню\n"
+        "/menu - Показати меню\n"
+        "/cart - Переглянути корзину\n"
+        "/help - Ця довідка\n\n"
+        "Як замовити:\n"
+        "1. Оберіть 📋 Меню\n"
+        "2. Виберіть категорію\n"
+        "3. Додайте товари в 🛒 Корзину\n"
+        "4. Оформіть замовлення"
+    )
+    
+    send_message(chat_id, text, reply_markup=create_main_keyboard())
+
+
+def handle_cancel(chat_id):
+    """Команда /cancel"""
+    with user_states_lock:
+        user_states[chat_id] = None
+    
+    send_message(chat_id, "✅ Дію скасовано", reply_markup=create_main_keyboard())
+
+
+# =============================================================================
+# ОБРОБКА CALLBACK QUERIES
+# =============================================================================
+
+def handle_callback_category(chat_id, category):
+    """Вибрано категорію"""
+    items = get_items_by_category(category)
+    
+    if not items:
+        send_message(chat_id, f"❌ Категорія '{category}' порожня")
+        return
+    
+    # Показуємо перший товар
+    item = items[0]
+    text = format_item(item)
+    
+    keyboard = create_item_keyboard(item)
+    
+    if len(items) > 1:
+        keyboard["inline_keyboard"].insert(1, [
+            {"text": "⬅️", "callback_data": f"prev:{category}:0"},
+            {"text": f"1/{len(items)}", "callback_data": "noop"},
+            {"text": "➡️", "callback_data": f"next:{category}:0"}
+        ])
+    
+    send_message(chat_id, text, reply_markup=keyboard)
+
+
+def handle_callback_add_to_cart(chat_id, item_name):
+    """Додати в корзину"""
+    item = find_item_by_name(item_name)
+    
+    if not item:
+        send_message(chat_id, "❌ Товар не знайдено")
+        return
+    
+    with user_carts_lock:
+        cart = user_carts[chat_id]
         
-        if not results:
-            text = f"❌ Не знайшов '<b>{query}</b>'"
-            keyboard = {"inline_keyboard": [[
-                {"text": "🔍 Новий", "callback_data": "search"},
-                {"text": "🍽️ Меню", "callback_data": "menu"}
-            ]]}
-            send_message(chat_id, text, reply_markup=keyboard)
-            set_user_state(chat_id, 'main')
+        if len(cart) >= MAX_CART_ITEMS:
+            send_message(chat_id, f"❌ Максимум {MAX_CART_ITEMS} товарів у корзині")
             return
         
-        if category:
-            send_message(chat_id, f"✅ Знайшов: <b>{category}</b>")
-            show_category_items(chat_id, category)
+        current_quantity = cart.get(item_name, 0)
+        
+        if current_quantity >= MAX_ITEM_QUANTITY:
+            send_message(chat_id, f"❌ Максимум {MAX_ITEM_QUANTITY} шт одного товару")
+            return
+        
+        cart[item_name] = current_quantity + 1
+    
+    send_message(chat_id, f"✅ {item_name} додано в корзину!")
+
+
+# =============================================================================
+# CHECKOUT
+# =============================================================================
+
+def handle_checkout_start(chat_id):
+    """Початок оформлення"""
+    with user_carts_lock:
+        cart = user_carts.get(chat_id, {})
+    
+    if not cart:
+        send_message(chat_id, "❌ Корзина порожня", reply_markup=create_main_keyboard())
+        return
+    
+    text = "📝 Для оформлення надішліть ваш номер телефону"
+    
+    keyboard = {
+        "keyboard": [[
+            {"text": "📱 Надіслати номер", "request_contact": True}
+        ]],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+    
+    with user_states_lock:
+        user_states[chat_id] = 'awaiting_contact'
+    
+    send_message(chat_id, text, reply_markup=keyboard)
+
+
+def handle_contact_received(chat_id, contact):
+    """Отримано контакт"""
+    phone = contact.get('phone_number')
+    
+    if not phone:
+        send_message(chat_id, "❌ Не вдалося отримати номер")
+        return
+    
+    # Зберігаємо телефон
+    with user_states_lock:
+        if chat_id not in user_states:
+            user_states[chat_id] = {}
+        if isinstance(user_states[chat_id], dict):
+            user_states[chat_id]['phone'] = phone
         else:
-            text = f"🔍 '<b>{query}</b>':\n\n"
-            keyboard = {"inline_keyboard": []}
-            
-            for item in results[:5]:
-                name = item.get(KEY_NAME, "")
-                price = item.get(KEY_PRICE, "")
-                text += f"• {name} - {price} грн\n"
-                
-                item_id = str(item.get(KEY_ID, ""))
-                cb = safe_callback_data("add", item_id)
-                keyboard["inline_keyboard"].append([
-                    {"text": f"➕ {name[:25]}", "callback_data": cb}
-                ])
-            
-            keyboard["inline_keyboard"].append([
-                {"text": "🔍 Новий", "callback_data": "search"},
-                {"text": "🏠 Головна", "callback_data": "start"}
-            ])
-            
-            send_message(chat_id, text, reply_markup=keyboard)
-        
-        set_user_state(chat_id, 'main')
-    except Exception as e:
-        logger.exception(f"Process search error: {e}")
+            user_states[chat_id] = {'phone': phone}
+    
+    text = "📍 Тепер надішліть адресу доставки"
+    
+    with user_states_lock:
+        user_states[chat_id] = 'awaiting_address'
+    
+    send_message(chat_id, text)
 
-def show_ai_recommendation(chat_id):
-    """AI порада"""
-    try:
-        text = "✨ Думаю..."
-        send_message(chat_id, text)
-        
-        recommendation = get_ai_recommendation(chat_id)
-        
-        text = f"✨ <b>AI-Порада:</b>\n\n{recommendation}"
-        
-        keyboard = {"inline_keyboard": [
-            [{"text": "🍽️ Меню", "callback_data": "menu"}],
-            [{"text": "🔄 Інша", "callback_data": "ai_recommend"}],
-            [{"text": "🏠 Головна", "callback_data": "start"}]
-        ]}
-        
-        send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.exception(f"AI recommend error: {e}")
 
-def clear_cart(chat_id):
-    """Очистити корзину"""
-    try:
-        with carts_lock:
-            user_carts[chat_id] = []
-        return "🗑️ Очищено"
-    except Exception as e:
-        logger.exception(f"Clear cart error: {e}")
-        return "❌ Помилка"
+def handle_address_received(chat_id, address):
+    """Отримано адресу"""
+    if len(address) < 10:
+        send_message(chat_id, "❌ Адреса занадто коротка (мінімум 10 символів)")
+        return
+    
+    # Фінальне підтвердження
+    with user_carts_lock:
+        cart = user_carts.get(chat_id, {})
+    
+    summary = get_cart_summary(chat_id)
+    
+    # Отримати телефон
+    phone = "N/A"
+    with user_states_lock:
+        state_data = user_states.get(chat_id, {})
+        if isinstance(state_data, dict):
+            phone = state_data.get('phone', 'N/A')
+    
+    text = f"{summary}\n\n"
+    text += f"📱 Телефон: {phone}\n"
+    text += f"📍 Адреса: {safe_html_escape(address)}\n\n"
+    text += "Підтвердити замовлення?"
+    
+    keyboard = {
+        "keyboard": [
+            [{"text": "✅ Підтвердити"}],
+            [{"text": "❌ Скасувати"}]
+        ],
+        "resize_keyboard": True
+    }
+    
+    # Зберегти адресу
+    with user_states_lock:
+        state_data = user_states.get(chat_id, {})
+        if isinstance(state_data, dict):
+            state_data['address'] = address
+            user_states[chat_id] = 'awaiting_confirmation'
+        else:
+            user_states[chat_id] = {'address': address, 'state': 'awaiting_confirmation'}
+    
+    send_message(chat_id, text, reply_markup=keyboard)
 
-def checkout(chat_id):
-    """Оформлення"""
+
+def handle_order_confirmation(chat_id):
+    """Підтвердження замовлення"""
+    with user_carts_lock:
+        cart = user_carts.get(chat_id, {})
+    
+    if not cart:
+        send_message(chat_id, "❌ Корзина порожня")
+        return
+    
     try:
-        with carts_lock:
-            cart = list(user_carts.get(chat_id, []))
+        # Отримати контакти
+        contact_info = {}
+        with user_states_lock:
+            state_data = user_states.get(chat_id, {})
+            if isinstance(state_data, dict):
+                contact_info = state_data
         
-        if not cart:
-            return "❌ Порожньо"
+        phone = contact_info.get('phone', 'N/A')
+        address = contact_info.get('address', 'N/A')
         
-        save_order_to_sheets(chat_id, cart)
+        # Розрахувати total
+        total = 0
+        for item_name, quantity in cart.items():
+            item = find_item_by_name(item_name)
+            if item:
+                price = float(item.get('Ціна', 0))
+                total += price * quantity
         
-        _, total = get_cart_summary(chat_id)
-        
-        with carts_lock:
-            user_carts[chat_id] = []
-        
-        text = (
-            "✅ <b>Замовлення прийнято!</b>\n\n"
-            f"💰 {total:.2f} грн\n"
-            "📞 Зателефонуємо за 5 хв\n\n"
-            "Дякуємо!"
+        # Зберегти в database
+        order_id = db_service.save_order(
+            chat_id=chat_id,
+            cart=cart,
+            contact_info={'phone': phone, 'address': address},
+            total=str(total)
         )
         
-        keyboard = {"inline_keyboard": [[{"text": "🏠 Головна", "callback_data": "start"}]]}
+        if not order_id:
+            raise Exception("Database save failed")
         
-        send_message(chat_id, text, reply_markup=keyboard)
-        return None
+        # Очистити корзину
+        with user_carts_lock:
+            user_carts[chat_id] = {}
         
-    except Exception as e:
-        logger.exception(f"Checkout error: {e}")
-        return "❌ Помилка"
-
-def process_callback_query(callback_query):
-    """Обробка callback з валідацією"""
-    try:
-        # Перевірка структури
-        if 'message' not in callback_query:
-            logger.warning("Callback without message (inline)")
-            return
+        with user_states_lock:
+            user_states[chat_id] = None
         
-        if 'chat' not in callback_query['message']:
-            logger.warning("Callback without chat")
-            return
-        
-        chat_id = callback_query["message"]["chat"]["id"]
-        callback_id = callback_query["id"]
-        data = callback_query["data"]
-        user = callback_query.get("from", {})
-        user_id = user.get("id", chat_id)
-        user_name = user.get("first_name", "")
-        
-        logger.info(f"Callback: {data[:20]}... from {chat_id}")
-        
-        answer_callback(callback_id, "")
-        
-        # Перевірка admin команд
+        # Sheets sync (не критично)
         try:
-            from config import OPERATOR_CHAT_ID
-            if OPERATOR_CHAT_ID and is_admin(user_id, OPERATOR_CHAT_ID):
-                if data == "admin_menu":
-                    show_admin_menu(chat_id, send_message)
-                    return
-                elif data == "admin_stats":
-                    show_statistics(chat_id, send_message, days=1)
-                    return
-                elif data == "admin_stats_7":
-                    show_statistics(chat_id, send_message, days=7)
-                    return
-                elif data == "admin_stats_30":
-                    show_statistics(chat_id, send_message, days=30)
-                    return
-                elif data == "admin_orders_new":
-                    show_new_orders(chat_id, send_message)
-                    return
-                elif data.startswith("admin_order_"):
-                    order_id = data[12:]
-                    show_order_details(chat_id, order_id, send_message, get_order)
-                    return
-                elif data.startswith("admin_status_"):
-                    parts = data.split('_', 3)
-                    if len(parts) == 4:
-                        order_id = parts[2]
-                        new_status = parts[3]
-                        msg = change_order_status(order_id, new_status, update_order_status)
-                        answer_callback(callback_id, msg, show_alert=True)
-                        show_order_details(chat_id, order_id, send_message, get_order)
-                    return
-                elif data == "admin_popular":
-                    admin_show_popular(chat_id, send_message)
-                    return
-                elif data == "admin_reload_menu":
-                    def reload_func():
-                        global menu_cache
-                        menu_cache = get_menu_from_sheet()
-                        return len(menu_cache)
-                    admin_reload_menu(chat_id, send_message, reload_func)
-                    return
+            sheets_service.save_order_to_sheets(order_id, cart, contact_info)
         except Exception as e:
-            logger.exception(f"Admin command error: {e}")
+            logger.error(f"Sheets sync failed: {e}")
         
-        # Звичайні команди
-        if data == "noop":
-            return
-        elif data == "start":
-            handle_start(chat_id, user_name)
-        elif data == "menu":
-            show_menu(chat_id)
-        elif data == "popular":
-            show_popular(chat_id)
-        elif data == "cart":
-            show_cart(chat_id)
-        elif data == "search":
-            start_search(chat_id)
-        elif data == "ai_recommend":
-            show_ai_recommendation(chat_id)
-        elif data.startswith("cat_"):
-            _, category = parse_callback_data(data)
-            show_category_items(chat_id, category)
-        elif data.startswith("add_"):
-            _, item_id = parse_callback_data(data)
-            msg = add_to_cart(chat_id, item_id)
-            answer_callback(callback_id, msg, show_alert=True)
-        elif data.startswith("next_") or data.startswith("prev_"):
-            direction = 'next' if data.startswith("next") else 'prev'
-            navigate_items(chat_id, direction)
-        elif data == "clear_cart":
-            msg = clear_cart(chat_id)
-            answer_callback(callback_id, msg, show_alert=True)
-            show_cart(chat_id)
-        elif data == "checkout":
-            msg = checkout(chat_id)
-            if msg:
-                answer_callback(callback_id, msg, show_alert=True)
-        else:
-            logger.warning(f"Unknown callback: {data}")
-            
-    except KeyError as e:
-        logger.exception(f"Callback structure error: {e}")
-    except Exception as e:
-        logger.exception(f"Callback error: {e}")
-
-def process_message(message):
-    """Обробка повідомлень з валідацією"""
-    try:
-        # Валідація структури
-        if 'chat' not in message:
-            logger.warning("Message without chat")
-            return
-        
-        if 'from' not in message:
-            logger.warning("Message without from")
-            return
-        
-        chat_id = message["chat"]["id"]
-        text = message.get("text", "")
-        user = message["from"]
-        user_id = user.get("id", chat_id)
-        user_name = user.get("first_name", "")
-        
-        logger.info(f"Message from {chat_id}: {text[:30]}...")
-        
-        # Перевірка admin команд
-        try:
-            from config import OPERATOR_CHAT_ID
-            if OPERATOR_CHAT_ID and is_admin(user_id, OPERATOR_CHAT_ID):
-                if text == "/admin":
-                    show_admin_menu(chat_id, send_message)
-                    return
-        except Exception as e:
-            logger.exception(f"Admin check error: {e}")
-        
-        state = get_user_state(chat_id)
-        
-        if state['state'] == 'searching':
-            process_search(chat_id, text)
-            return
-        
-        if text == "/start":
-            handle_start(chat_id, user_name)
-        elif text == "/menu":
-            show_menu(chat_id)
-        elif text == "/cart":
-            show_cart(chat_id)
-        elif text == "/help":
-            handle_start(chat_id, user_name)
-        else:
-            if is_gemini_connected():
-                process_search(chat_id, text)
-            else:
-                send_message(chat_id, "Використай /start")
+        # Повідомлення оператору
+        if OPERATOR_CHAT_ID:
+            try:
+                operator_msg = f"🆕 <b>Нове замовлення #{order_id}</b>\n\n"
+                operator_msg += get_cart_summary(chat_id)
+                operator_msg += f"\n\n📱 Телефон: {phone}\n📍 Адреса: {address}"
                 
-    except KeyError as e:
-        logger.exception(f"Message structure error: {e}")
+                send_message(OPERATOR_CHAT_ID, operator_msg)
+            except Exception as e:
+                logger.error(f"Failed to notify operator: {e}")
+        
+        # Повідомлення користувачу
+        user_msg = f"✅ <b>Замовлення #{order_id} прийнято!</b>\n\n"
+        user_msg += f"💰 Сума: {total:.2f} грн\n\n"
+        user_msg += "Наш оператор зв'яжеться з вами найближчим часом.\nДякуємо! 🎉"
+        
+        send_message(chat_id, user_msg, reply_markup=create_main_keyboard())
+        
+        logger.info(f"✅ Order {order_id} created for chat {chat_id}")
+        
     except Exception as e:
-        logger.exception(f"Message error: {e}")
+        logger.error(f"Checkout failed: {e}")
+        send_message(
+            chat_id,
+            "❌ Помилка при оформленні. Спробуйте пізніше.",
+            reply_markup=create_main_keyboard()
+        )
 
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check"""
-    try:
-        return jsonify({
-            'status': 'healthy',
-            'menu_items': len(menu_cache),
-            'popular_tracked': len(menu_analytics),
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.exception("Health check error")
-        return jsonify({'status': 'error', 'error': str(e)}), 500
 
-@app.route('/', methods=['GET'])
-def index():
-    """Index"""
-    return jsonify({
-        'status': 'ok',
-        'bot': 'Hubsy',
-        'version': '3.0-secure'
-    })
+# =============================================================================
+# WEBHOOK HANDLER
+# =============================================================================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Secure webhook with dual authentication"""
-    # Перевірка 1: X-Telegram-Bot-Api-Secret-Token header
-    header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    """Webhook endpoint"""
+    # Перевірка secret
+    received_secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
     
-    if header_secret:
-        if header_secret != WEBHOOK_SECRET:
-            logger.warning(
-                f"Invalid webhook header from {request.remote_addr}, "
-                f"User-Agent: {request.headers.get('User-Agent')}"
-            )
-            return jsonify({'status': 'unauthorized'}), 401
-    else:
-        # Якщо header немає - це старий метод, логуємо
-        logger.warning(f"Webhook without header from {request.remote_addr}")
-        return jsonify({'status': 'unauthorized'}), 401
+    if received_secret != WEBHOOK_SECRET:
+        logger.warning(f"⚠️  Webhook auth failed from {request.remote_addr}")
+        return jsonify({"error": "Unauthorized"}), 401
     
     try:
-        # Валідація JSON
-        update = request.get_json(force=False, silent=False)
+        update = request.get_json()
         
         if not update:
-            logger.warning("Empty webhook payload")
-            return jsonify({'status': 'ok'})
+            return jsonify({"status": "ok"}), 200
         
-        if not isinstance(update, dict):
-            logger.error("Invalid webhook payload type")
-            return jsonify({'status': 'bad request'}), 400
-        
-        update_id = update.get('update_id', 'unknown')
-        logger.info(f"Processing update {update_id}")
-        
+        # Обробка повідомлення
         if 'message' in update:
-            process_message(update['message'])
+            message = update['message']
+            chat_id = message['chat']['id']
+            
+            # Команди
+            if 'text' in message:
+                text = message['text']
+                
+                if text.startswith('/'):
+                    if text == '/start':
+                        handle_start(chat_id)
+                    elif text == '/menu':
+                        handle_menu(chat_id)
+                    elif text == '/cart':
+                        handle_cart(chat_id)
+                    elif text == '/help':
+                        handle_help(chat_id)
+                    elif text == '/cancel':
+                        handle_cancel(chat_id)
+                    else:
+                        send_message(chat_id, "❌ Невідома команда. /help для допомоги")
+                
+                else:
+                    # Текст відповідно до стану
+                    current_state = user_states.get(chat_id)
+                    
+                    if current_state == 'searching' and AI_ENABLED:
+                        # AI пошук
+                        try:
+                            results = ai_service.search_menu(text, get_menu())
+                            
+                            if results:
+                                send_message(chat_id, f"🔍 Знайдено {len(results)} результатів:")
+                                
+                                for item in results[:5]:
+                                    item_text = format_item(item)
+                                    send_message(chat_id, item_text, reply_markup=create_item_keyboard(item))
+                            else:
+                                send_message(chat_id, "😔 Нічого не знайдено")
+                            
+                            with user_states_lock:
+                                user_states[chat_id] = None
+                            
+                            send_message(chat_id, "Що далі?", reply_markup=create_main_keyboard())
+                        except Exception as e:
+                            logger.error(f"Search failed: {e}")
+                            send_message(chat_id, "❌ Помилка пошуку")
+                    
+                    elif current_state == 'awaiting_address':
+                        handle_address_received(chat_id, text)
+                    
+                    elif current_state == 'awaiting_confirmation':
+                        if text == "✅ Підтвердити":
+                            handle_order_confirmation(chat_id)
+                        elif text == "❌ Скасувати":
+                            handle_cancel(chat_id)
+                    
+                    else:
+                        # Кнопки меню
+                        if text == "📋 Меню":
+                            handle_menu(chat_id)
+                        elif text == "🛒 Корзина":
+                            handle_cart(chat_id)
+                        elif text == "🔍 Пошук":
+                            handle_search(chat_id)
+                        elif text == "ℹ️ Допомога":
+                            handle_help(chat_id)
+                        elif text == "✅ Оформити замовлення":
+                            handle_checkout_start(chat_id)
+                        elif text == "🗑 Очистити корзину":
+                            with user_carts_lock:
+                                user_carts[chat_id] = {}
+                            send_message(chat_id, "✅ Корзину очищено", reply_markup=create_main_keyboard())
+                        elif text == "🔙 Назад":
+                            handle_start(chat_id)
+                        else:
+                            send_message(chat_id, "Оберіть дію з меню", reply_markup=create_main_keyboard())
+            
+            # Контакт
+            elif 'contact' in message:
+                handle_contact_received(chat_id, message['contact'])
+        
+        # Callback queries
         elif 'callback_query' in update:
-            process_callback_query(update['callback_query'])
-        else:
-            logger.warning(f"Unknown update type: {list(update.keys())}")
+            callback = update['callback_query']
+            callback_id = callback['id']
+            chat_id = callback['message']['chat']['id']
+            data = callback['data']
+            
+            # Відповісти на callback
+            tg_service.tg_answer_callback_query(callback_id)
+            
+            if data.startswith('category:'):
+                category = data.split(':', 1)[1]
+                handle_callback_category(chat_id, category)
+            
+            elif data.startswith('add:'):
+                item_name = data.split(':', 1)[1]
+                handle_callback_add_to_cart(chat_id, item_name)
+            
+            elif data == 'back_to_categories':
+                handle_menu(chat_id)
+            
+            elif data == 'back_to_main':
+                handle_start(chat_id)
         
-        return jsonify({'status': 'ok'})
+        return jsonify({"status": "ok"}), 200
         
-    except ValueError as e:
-        logger.exception("Invalid JSON in webhook")
-        return jsonify({'status': 'bad request', 'error': 'invalid json'}), 400
     except Exception as e:
-        logger.exception(f"Webhook processing error: {e}")
-        return jsonify({'status': 'error', 'error': 'internal error'}), 500
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"status": "error"}), 500
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Not found"}), 404
 
-@app.errorhandler(500)
-def internal_error(error):
-    logger.exception("Internal server error")
-    return jsonify({"error": "Internal server error"}), 500
+# =============================================================================
+# HEALTH & ADMIN ENDPOINTS
+# =============================================================================
 
-with app.app_context():
-    init_services()
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check"""
+    try:
+        menu_ok = len(get_menu()) > 0
+        
+        return jsonify({
+            "status": "healthy" if menu_ok else "degraded",
+            "menu_items": len(menu_cache),
+            "version": "2.0.0-secure"
+        }), 200 if menu_ok else 503
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({"status": "unhealthy", "error": str(e)}), 503
 
-if __name__ == "__main__":
-    logger.warning("Use gunicorn for production: gunicorn -w 4 main:app")
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+
+@app.route('/admin/refresh_menu', methods=['POST'])
+def admin_refresh_menu():
+    """Оновити меню"""
+    success = refresh_menu()
+    
+    if success:
+        return jsonify({"status": "ok", "items": len(menu_cache)})
+    else:
+        return jsonify({"status": "error"}), 500
+
+
+@app.route('/', methods=['GET'])
+def index():
+    """Root endpoint"""
+    return jsonify({
+        "service": "Hubsy Bot",
+        "status": "running",
+        "version": "2.0.0-secure"
+    })
+
+
+# =============================================================================
+# ІНІЦІАЛІЗАЦІЯ
+# =============================================================================
+
+def initialize_bot():
+    """Ініціалізація при старті"""
+    logger.info("=" * 60)
+    logger.info("INITIALIZING HUBSY BOT")
+    logger.info("=" * 60)
+    
+    # Завантажити меню
+    logger.info("Loading menu...")
+    menu = get_menu()
+    logger.info(f"✅ Menu loaded: {len(menu)} items")
+    
+    # Налаштувати webhook (якщо є URL)
+    if hasattr(config, 'WEBHOOK_URL') and config.WEBHOOK_URL:
+        logger.info("Setting up webhook...")
+        try:
+            success = tg_service.setup_webhook_safe()
+            if success:
+                logger.info("✅ Webhook configured")
+            else:
+                logger.warning("⚠️  Webhook setup failed (non-critical)")
+        except Exception as e:
+            logger.warning(f"⚠️  Webhook setup error: {e}")
+    else:
+        logger.warning("⚠️  WEBHOOK_URL not set, skipping webhook setup")
+    
+    logger.info("=" * 60)
+    logger.info("✅ BOT INITIALIZED SUCCESSFULLY")
+    logger.info("=" * 60)
+
+
+# =============================================================================
+# ЗАПУСК
+# =============================================================================
+
+if __name__ == '__main__':
+    try:
+        initialize_bot()
+        
+        port = getattr(config, 'PORT', 10000)
+        
+        logger.info(f"Starting server on port {port}")
+        
+        app.run(
+            host='0.0.0.0',
+            port=port,
+            debug=getattr(config, 'FLASK_DEBUG', False)
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Failed to start: {e}")
+        raise

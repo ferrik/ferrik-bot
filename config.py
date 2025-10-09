@@ -13,12 +13,9 @@ logger = logging.getLogger('config')
 # ОСНОВНІ НАЛАШТУВАННЯ
 # ============================================================
 
-# Environment
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-
-# Server
 PORT = int(os.getenv('PORT', 10000))
 
 # ============================================================
@@ -26,17 +23,15 @@ PORT = int(os.getenv('PORT', 10000))
 # ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
-BOT_TOKEN = TELEGRAM_BOT_TOKEN  # Аліас для зворотної сумісності
+BOT_TOKEN = TELEGRAM_BOT_TOKEN  # Аліас
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN not set!")
 
-# Webhook configuration
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
-RENDER_URL = os.getenv('RENDER_EXTERNAL_URL', '')  # ⭐ ДОДАНО ЦЮ ЗМІННУ
+RENDER_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 
-# Operator chat ID (має бути числом, не hash)
 OPERATOR_CHAT_ID_STR = os.getenv('OPERATOR_CHAT_ID', '')
 OPERATOR_CHAT_ID: Optional[int] = None
 
@@ -45,7 +40,7 @@ if OPERATOR_CHAT_ID_STR:
         OPERATOR_CHAT_ID = int(OPERATOR_CHAT_ID_STR)
     except ValueError:
         logger.error(f"❌ Invalid OPERATOR_CHAT_ID: {OPERATOR_CHAT_ID_STR}")
-        logger.info("💡 OPERATOR_CHAT_ID має бути числом (наприклад: 123456789)")
+        logger.info("💡 OPERATOR_CHAT_ID має бути числом")
 
 # ============================================================
 # GOOGLE SHEETS
@@ -72,16 +67,79 @@ REDIS_URL = os.getenv('REDIS_URL', '')
 if not REDIS_URL:
     logger.warning("⚠️  REDIS_URL not set. Using in-memory storage (not suitable for production with multiple workers)")
 
-# Cart settings
 CART_TTL_HOURS = int(os.getenv('CART_TTL_HOURS', 24))
 MAX_CART_ITEMS = int(os.getenv('MAX_CART_ITEMS', 50))
+
+# ============================================================
+# FIELD MAPPING - Google Sheets columns
+# ============================================================
+
+# Order sheet columns
+ORDER_FIELDS = {
+    'order_id': 'A',
+    'user_id': 'B',
+    'username': 'C',
+    'timestamp': 'D',
+    'items': 'E',
+    'total': 'F',
+    'status': 'G',
+    'phone': 'H',
+    'address': 'I',
+    'notes': 'J'
+}
+
+# Menu/Product sheet columns
+MENU_FIELDS = {
+    'id': 'A',
+    'name': 'B',
+    'description': 'C',
+    'price': 'D',
+    'category': 'E',
+    'available': 'F',
+    'image_url': 'G'
+}
+
+# User data columns
+USER_FIELDS = {
+    'user_id': 'A',
+    'username': 'B',
+    'phone': 'C',
+    'address': 'D',
+    'registered': 'E'
+}
+
+# Sheet names
+SHEET_NAMES = {
+    'orders': 'Orders',
+    'menu': 'Menu',
+    'users': 'Users'
+}
+
+# Field mapping class для сумісності з config.field_mapping
+class field_mapping:
+    ORDER_FIELDS = ORDER_FIELDS
+    MENU_FIELDS = MENU_FIELDS
+    USER_FIELDS = USER_FIELDS
+    SHEET_NAMES = SHEET_NAMES
+    
+    @staticmethod
+    def get_column_letter(field_name, field_type='order'):
+        mapping = {
+            'order': ORDER_FIELDS,
+            'menu': MENU_FIELDS,
+            'user': USER_FIELDS
+        }
+        return mapping.get(field_type, {}).get(field_name, 'A')
+    
+    @staticmethod
+    def get_sheet_name(sheet_type):
+        return SHEET_NAMES.get(sheet_type, 'Sheet1')
 
 # ============================================================
 # VALIDATION
 # ============================================================
 
 def validate_config():
-    """Перевірка конфігурації"""
     warnings = []
     errors = []
     
@@ -110,12 +168,7 @@ def validate_config():
     
     logger.info("✅ Configuration validated successfully")
 
-# ============================================================
-# DISPLAY CONFIG (for debugging)
-# ============================================================
-
 def display_config():
-    """Показати конфігурацію (без секретів)"""
     logger.info("=" * 60)
     logger.info("BOT CONFIGURATION")
     logger.info("=" * 60)

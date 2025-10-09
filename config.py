@@ -26,6 +26,8 @@ PORT = int(os.getenv('PORT', 10000))
 # ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
+BOT_TOKEN = TELEGRAM_BOT_TOKEN  # Аліас для зворотної сумісності
+
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN not set!")
 
@@ -121,7 +123,7 @@ def display_config():
     logger.info(f"Debug mode: {DEBUG}")
     logger.info(f"Log level: {LOG_LEVEL}")
     logger.info(f"Port: {PORT}")
-    logger.info(f"Bot token: {TELEGRAM_BOT_TOKEN[:13]}***" if TELEGRAM_BOT_TOKEN else "Not set")
+    logger.info(f"Bot token: {TELEGRAM_BOT_TOKEN[:15]}***" if TELEGRAM_BOT_TOKEN else "Not set")
     logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not set'}")
     logger.info(f"Webhook secret: {WEBHOOK_SECRET[:10]}***" if WEBHOOK_SECRET else "Not set")
     logger.info(f"Sheet ID: {GOOGLE_SHEET_ID if GOOGLE_SHEET_ID else 'Not set'}")

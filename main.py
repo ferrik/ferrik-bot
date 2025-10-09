@@ -711,3 +711,454 @@ def handle_address_received(chat_id, address):
         f"{summary}\n\n"
         f"━━━━━━━━━━━━━━━━━\n\n"
         f"📞 Телефон: <code>{phone}</code>\n"
+        f"📍 Адреса: {safe_escape(address)}\n\n"
+        f"<b>Крок 3/3:</b> Підтвердіть замовлення"
+    )
+    
+    keyboard = {
+        "keyboard": [
+            [{"text": "✅ Підтвердити замовлення"}],
+            [{"text": "❌ Скасувати"}]
+        ],
+        "resize_keyboard": True
+    }
+    
+    send_message(chat_id, text, reply_markup=keyboard)
+
+
+def confirm_order(chat_id):
+    """Підтвердження замовлення"""
+    with user_carts_lock:
+        cart = user_carts.get(chat_id, {})
+    
+    if not cart:
+        send_message(chat_id, "❌ Корзина порожня")
+        handle_start(chat_id)
+        return
+    
+    try:
+        phone = get_state_data(chat_id, 'phone', 'N/A')
+        address = get_state_data(chat_id, 'address', 'N/A')
+        
+        # Розрахувати суму
+        total = 0.0
+        for item_name, quantity in cart.items():
+            item = find_item_by_name(item_name)
+            if item:
+                try:
+                    price = float(str(item.get('Ціна', 0)).replace(',', '.'))
+                    total += price * quantity
+                except:
+                    pass
+        
+        # Зберегти в database
+        order_id = db_service.save_order(
+            chat_id=chat_id,
+            cart=cart,
+            contact_info={'phone': phone, 'address': address},
+            total=f"{total:.2f}"
+        )
+        
+        if not order_id:
+            raise Exception("Database save failed")
+        
+        # Очистити корзину та стан
+        with user_carts_lock:
+            user_carts[chat_id] = {}
+        
+        clear_state(chat_id)
+        clear_navigation(chat_id)
+        
+        # Sheets sync (не критично)
+        try:
+            sheets_service.save_order_to_sheets(order_id, cart, {'phone': phone, 'address': address})
+        except Exception as e:
+            logger.error(f"Sheets sync failed: {e}")
+        
+        # Повідомлення оператору
+        if hasattr(config, 'OPERATOR_CHAT_ID') and config.OPERATOR_CHAT_ID:
+            try:
+                op_text = (
+                    f"🆕 <b>Нове замовлення #{order_id}</b>\n\n"
+                    f"{format_cart_summary(chat_id)}\n\n"
+                    f"📞 {phone}\n"
+                    f"📍 {address}"
+                )
+                send_message(config.OPERATOR_CHAT_ID, op_text)
+            except Exception as e:
+                logger.error(f"Operator notification failed: {e}")
+        
+        # Повідомлення користувачу
+        text = (
+            f"🎉 <b>Замовлення #{order_id} прийнято!</b>\n\n"
+            f"💰 Сума: <b>{total:.2f} грн</b>\n\n"
+            f"Наш оператор зв'яжеться з вами\nнайближчим часом.\n\n"
+            f"Дякуємо за замовлення! ❤️"
+        )
+        
+        send_message(chat_id, text, reply_markup=create_main_keyboard())
+        
+        logger.info(f"✅ Order {order_id} completed for {chat_id}")
+        
+    except Exception as e:
+        logger.error(f"Order confirmation failed: {e}")
+        send_message(
+            chat_id,
+            "❌ Помилка при оформленні замовлення\n\n"
+            "Спробуйте пізніше або зв'яжіться з оператором",
+            reply_markup=create_main_keyboard()
+        )
+        clear_state(chat_id)
+
+
+# =============================================================================
+# WEBHOOK
+# =============================================================================
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Webhook endpoint"""
+    received_secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+    
+    if received_secret != config.WEBHOOK_SECRET:
+        logger.warning(f"⚠️  Unauthorized webhook from {request.remote_addr}")
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        update = request.get_json()
+        
+        if not update:
+            return jsonify({"status": "ok"}), 200
+        
+        # Обробка message
+        if 'message' in update:
+            message = update['message']
+            chat_id = message['chat']['id']
+            
+            # Команди
+            if 'text' in message:
+                text = message['text']
+                
+                if text.startswith('/'):
+                    # Команди
+                    if text == '/start':
+                        handle_start(chat_id)
+                    elif text == '/menu':
+                        handle_menu(chat_id)
+                    elif text == '/cart':
+                        handle_cart(chat_id)
+                    elif text == '/help':
+                        handle_help(chat_id)
+                    elif text == '/cancel':
+                        handle_cancel(chat_id)
+                    else:
+                        send_message(chat_id, "❌ Невідома команда. Використайте /help")
+                
+                else:
+                    # Обробка відповідно до стану
+                    current_state = get_state(chat_id)
+                    
+                    if current_state == State.SEARCHING:
+                        # AI пошук
+                        if AI_ENABLED:
+                            try:
+                                send_message(chat_id, "🔍 Шукаю...")
+                                
+                                results = ai_service.search_menu(text, get_menu())
+                                
+                                if results:
+                                    send_message(
+                                        chat_id,
+                                        f"✅ Знайдено {len(results)} результатів:"
+                                    )
+                                    
+                                    for item in results[:5]:
+                                        item_text = format_item(item, include_buttons=False)
+                                        item_name = item.get('Назва Страви', '')
+                                        
+                                        keyboard = {
+                                            "inline_keyboard": [[
+                                                {"text": "➕ В корзину", "callback_data": f"add:{item_name}"}
+                                            ]]
+                                        }
+                                        
+                                        send_message(chat_id, item_text, reply_markup=keyboard)
+                                else:
+                                    send_message(
+                                        chat_id,
+                                        "😔 Нічого не знайдено\n\n"
+                                        "Спробуйте інші слова або перегляньте меню"
+                                    )
+                                
+                                handle_cancel(chat_id)
+                                
+                            except Exception as e:
+                                logger.error(f"Search failed: {e}")
+                                send_message(chat_id, "❌ Помилка пошуку")
+                                handle_cancel(chat_id)
+                    
+                    elif current_state == State.CHECKOUT_ADDRESS:
+                        # Отримання адреси
+                        handle_address_received(chat_id, text)
+                    
+                    elif current_state == State.CHECKOUT_CONFIRM:
+                        # Підтвердження
+                        if text == "✅ Підтвердити замовлення":
+                            confirm_order(chat_id)
+                        elif text == "❌ Скасувати":
+                            handle_cancel(chat_id)
+                    
+                    else:
+                        # Кнопки головного меню
+                        if text == "📋 Меню":
+                            handle_menu(chat_id)
+                        elif text == "🛒 Корзина":
+                            handle_cart(chat_id)
+                        elif text == "🔍 Пошук":
+                            handle_search(chat_id)
+                        elif text == "ℹ️ Допомога":
+                            handle_help(chat_id)
+                        elif text == "✅ Оформити замовлення":
+                            start_checkout(chat_id)
+                        elif text == "🗑 Очистити корзину":
+                            with user_carts_lock:
+                                user_carts[chat_id] = {}
+                            send_message(chat_id, "✅ Корзину очищено", reply_markup=create_main_keyboard())
+                        elif text == "🔙 Продовжити покупки":
+                            handle_cancel(chat_id)
+                        elif text == "❌ Скасувати":
+                            handle_cancel(chat_id)
+                        else:
+                            # Невідома команда
+                            send_message(
+                                chat_id,
+                                "🤔 Не зрозумів. Оберіть дію з меню або використайте /help",
+                                reply_markup=create_main_keyboard()
+                            )
+            
+            # Контакт
+            elif 'contact' in message:
+                contact = message['contact']
+                phone = contact.get('phone_number')
+                
+                if phone:
+                    handle_phone_received(chat_id, phone)
+                else:
+                    send_message(chat_id, "❌ Не вдалося отримати номер телефону")
+        
+        # Callback queries
+        elif 'callback_query' in update:
+            callback = update['callback_query']
+            callback_id = callback['id']
+            chat_id = callback['message']['chat']['id']
+            data = callback['data']
+            
+            # Відповісти на callback
+            try:
+                tg_service.tg_answer_callback_query(callback_id)
+            except:
+                pass
+            
+            # Обробка callback
+            if data.startswith('cat:'):
+                # Вибрано категорію
+                category = data[4:]
+                show_category(chat_id, category)
+            
+            elif data.startswith('item:'):
+                # Навігація по товарах
+                parts = data.split(':')
+                if len(parts) == 3:
+                    category = parts[1]
+                    index = int(parts[2])
+                    show_item(chat_id, category, index)
+            
+            elif data.startswith('add:'):
+                # Додати в корзину
+                item_name = data[4:]
+                add_to_cart(chat_id, item_name)
+            
+            elif data == 'goto_cart':
+                # Перейти в корзину
+                handle_cart(chat_id)
+            
+            elif data == 'continue_shopping':
+                # Продовжити покупки
+                state = get_state(chat_id)
+                category = get_state_data(chat_id, 'category')
+                
+                if state == State.VIEWING_ITEM and category:
+                    # Повернутися до перегляду категорії
+                    index = get_state_data(chat_id, 'index', 0)
+                    show_item(chat_id, category, index)
+                else:
+                    # Повернутися до категорій
+                    handle_menu(chat_id)
+            
+            elif data == 'back_categories':
+                # Назад до категорій
+                handle_menu(chat_id)
+            
+            elif data == 'back_main':
+                # Назад в головне меню
+                handle_start(chat_id)
+            
+            elif data == 'noop':
+                # Нічого не робити (для інформаційних кнопок)
+                pass
+        
+        return jsonify({"status": "ok"}), 200
+        
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# =============================================================================
+# АДМІН ENDPOINTS
+# =============================================================================
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check"""
+    try:
+        menu_ok = len(get_menu()) > 0
+        
+        return jsonify({
+            "status": "healthy" if menu_ok else "degraded",
+            "menu_items": len(menu_cache),
+            "active_users": len(user_states),
+            "carts": len(user_carts),
+            "ai_enabled": AI_ENABLED,
+            "version": "3.0.0"
+        }), 200 if menu_ok else 503
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e)
+        }), 503
+
+
+@app.route('/admin/refresh_menu', methods=['POST'])
+def admin_refresh_menu():
+    """Оновити кеш меню"""
+    global menu_cache
+    
+    try:
+        with menu_cache_lock:
+            menu_cache = []
+        
+        menu = get_menu()
+        
+        return jsonify({
+            "status": "ok",
+            "items": len(menu),
+            "categories": len(get_categories())
+        })
+    except Exception as e:
+        logger.error(f"Menu refresh failed: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+@app.route('/admin/stats', methods=['GET'])
+def admin_stats():
+    """Статистика"""
+    try:
+        with user_carts_lock:
+            total_items_in_carts = sum(
+                sum(cart.values()) for cart in user_carts.values()
+            )
+        
+        return jsonify({
+            "active_users": len(user_states),
+            "total_carts": len(user_carts),
+            "total_items_in_carts": total_items_in_carts,
+            "menu_items": len(menu_cache),
+            "categories": len(get_categories())
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/', methods=['GET'])
+def index():
+    """Root endpoint"""
+    return jsonify({
+        "service": "Hubsy Bot",
+        "status": "running",
+        "version": "3.0.0",
+        "features": [
+            "FSM state management",
+            "Smart navigation",
+            "Breadcrumbs",
+            "AI search" if AI_ENABLED else "Menu browsing",
+            "Shopping cart",
+            "Order processing"
+        ]
+    })
+
+
+# =============================================================================
+# ІНІЦІАЛІЗАЦІЯ
+# =============================================================================
+
+def initialize_bot():
+    """Ініціалізація при старті"""
+    logger.info("=" * 60)
+    logger.info("🚀 INITIALIZING HUBSY BOT v3.0.0")
+    logger.info("=" * 60)
+    
+    # Завантажити меню
+    logger.info("📋 Loading menu...")
+    menu = get_menu()
+    logger.info(f"✅ Menu loaded: {len(menu)} items in {len(get_categories())} categories")
+    
+    # Налаштувати webhook
+    if hasattr(config, 'WEBHOOK_URL') and config.WEBHOOK_URL:
+        logger.info("🔗 Setting up webhook...")
+        try:
+            success = tg_service.setup_webhook_safe()
+            if success:
+                logger.info("✅ Webhook configured")
+            else:
+                logger.warning("⚠️  Webhook setup failed (continuing anyway)")
+        except Exception as e:
+            logger.warning(f"⚠️  Webhook error: {e}")
+    else:
+        logger.warning("⚠️  WEBHOOK_URL not set - webhook disabled")
+    
+    logger.info("=" * 60)
+    logger.info("✅ BOT READY!")
+    logger.info("=" * 60)
+
+
+# =============================================================================
+# ЗАПУСК
+# =============================================================================
+
+if __name__ == '__main__':
+    try:
+        initialize_bot()
+        
+        port = getattr(config, 'PORT', 10000)
+        debug = getattr(config, 'FLASK_DEBUG', False)
+        
+        logger.info(f"🌐 Starting server on port {port}")
+        logger.info(f"🔧 Debug mode: {debug}")
+        
+        app.run(
+            host='0.0.0.0',
+            port=port,
+            debug=debug
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("👋 Bot stopped by user")
+    except Exception as e:
+        logger.critical(f"❌ Failed to start: {e}", exc_info=True)
+        sys.exit(1)

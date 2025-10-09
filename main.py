@@ -1,21 +1,23 @@
 """
 Hubsy Bot - Telegram Bot для замовлення їжі
-Version 3.0 - Покращений UX та безпека
+Version: 3.0.0 - Production Ready
 
-Автор: Claude AI + ferrik
-Дата: 2025-10-08
+Features:
+- FSM для керування станами
+- Правильний UX з навігацією
+- Breadcrumbs
+- Кнопки "Назад"
+- Обробка помилок
+- AI fallback
 """
 
 import os
 import sys
 import logging
-import html
-from collections import defaultdict
-from threading import RLock
-from datetime import datetime
-
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from collections import defaultdict
+from threading import RLock
 
 # Завантажити .env
 load_dotenv()
@@ -31,49 +33,31 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-logger.info("🚀 Starting Hubsy Bot v3.0...")
+logger.info("🚀 Starting Hubsy Bot v3.0.0...")
 
 # =============================================================================
-# ІМПОРТ CONFIG
+# ІМПОРТИ
 # =============================================================================
 
 try:
     import bot_config as config
-    
-    BOT_TOKEN = config.BOT_TOKEN
-    WEBHOOK_SECRET = config.WEBHOOK_SECRET
-    GOOGLE_SHEET_ID = config.GOOGLE_SHEET_ID
-    OPERATOR_CHAT_ID = getattr(config, 'OPERATOR_CHAT_ID', None)
-    
-    logger.info("✅ Config loaded")
-    
-except Exception as e:
-    logger.critical(f"Config error: {e}")
-    sys.exit(1)
-
-# =============================================================================
-# ІМПОРТИ СЕРВІСІВ
-# =============================================================================
-
-try:
     from services import telegram as tg_service
     from services import sheets as sheets_service
     from services import database as db_service
     
     # Gemini опціонально
-    AI_ENABLED = False
     try:
         from services import gemini as ai_service
-        if hasattr(config, 'GEMINI_API_KEY') and config.GEMINI_API_KEY:
-            AI_ENABLED = True
-            logger.info("✅ AI search enabled")
-    except:
-        pass
+        AI_ENABLED = True
+        logger.info("✅ AI Service enabled")
+    except ImportError:
+        AI_ENABLED = False
+        logger.warning("⚠️  AI Service disabled")
     
-    logger.info("✅ Services loaded")
+    logger.info("✅ All imports successful")
     
 except Exception as e:
-    logger.error(f"Services import error: {e}")
+    logger.critical(f"❌ Import failed: {e}")
     sys.exit(1)
 
 # =============================================================================
@@ -86,9 +70,10 @@ app = Flask(__name__)
 # ГЛОБАЛЬНІ ЗМІННІ
 # =============================================================================
 
-# Стани (структуровано)
-user_sessions = defaultdict(dict)
-user_sessions_lock = RLock()
+# Стани користувачів (FSM)
+user_states = {}
+user_state_data = {}
+user_states_lock = RLock()
 
 # Корзини
 user_carts = defaultdict(dict)
@@ -97,242 +82,230 @@ user_carts_lock = RLock()
 # Кеш меню
 menu_cache = []
 menu_cache_lock = RLock()
-menu_last_update = None
+
+# Навігація (для кнопок "Назад")
+user_navigation = defaultdict(list)
+nav_lock = RLock()
 
 # Константи
 MAX_CART_ITEMS = 50
 MAX_ITEM_QUANTITY = 99
-MENU_CACHE_TTL = 15 * 60  # 15 хвилин
 
-logger.info("✅ Initialized")
-
-# =============================================================================
-# СТАНИ КОРИСТУВАЧА (FSM Light)
-# =============================================================================
-
-class UserState:
-    """Стани користувача"""
-    MAIN_MENU = "main"
-    BROWSING_CATEGORIES = "categories"
-    BROWSING_ITEMS = "items"
-    VIEWING_ITEM = "item"
-    IN_CART = "cart"
-    SEARCHING = "search"
+# Стани FSM
+class State:
+    MAIN_MENU = "main_menu"
+    BROWSING_CATEGORIES = "browsing_categories"
+    VIEWING_CATEGORY = "viewing_category"
+    VIEWING_ITEM = "viewing_item"
+    IN_CART = "in_cart"
+    SEARCHING = "searching"
     CHECKOUT_PHONE = "checkout_phone"
     CHECKOUT_ADDRESS = "checkout_address"
     CHECKOUT_CONFIRM = "checkout_confirm"
 
-
-def get_session(chat_id):
-    """Отримує сесію користувача"""
-    with user_sessions_lock:
-        if chat_id not in user_sessions:
-            user_sessions[chat_id] = {
-                'state': UserState.MAIN_MENU,
-                'data': {},
-                'history': []
-            }
-        return user_sessions[chat_id]
-
-
-def set_state(chat_id, new_state, **data):
-    """Встановлює стан"""
-    session = get_session(chat_id)
-    
-    # Зберегти попередній стан для "Назад"
-    if session['state'] != new_state:
-        session['history'].append(session['state'])
-        # Обмежити історію
-        if len(session['history']) > 10:
-            session['history'] = session['history'][-10:]
-    
-    session['state'] = new_state
-    session['data'].update(data)
-    
-    logger.debug(f"User {chat_id}: state changed to {new_state}")
-
-
-def get_state(chat_id):
-    """Отримує поточний стан"""
-    return get_session(chat_id)['state']
-
-
-def get_data(chat_id, key, default=None):
-    """Отримує дані зі стану"""
-    return get_session(chat_id)['data'].get(key, default)
-
-
-def go_back(chat_id):
-    """Повернутися до попереднього стану"""
-    session = get_session(chat_id)
-    if session['history']:
-        previous_state = session['history'].pop()
-        session['state'] = previous_state
-        return previous_state
-    return session['state']
-
+logger.info("✅ Global variables initialized")
 
 # =============================================================================
-# МЕНЮ
+# HELPER ФУНКЦІЇ
 # =============================================================================
 
-def get_menu(force_refresh=False):
-    """Отримує меню з кешем"""
-    global menu_cache, menu_last_update
+def get_menu():
+    """Отримує меню з кешу"""
+    global menu_cache
     
     with menu_cache_lock:
-        # Перевірка TTL
-        now = datetime.now()
-        if menu_last_update and not force_refresh:
-            age = (now - menu_last_update).total_seconds()
-            if age < MENU_CACHE_TTL and menu_cache:
-                logger.debug(f"Menu cache hit (age: {age:.0f}s)")
-                return menu_cache
+        if not menu_cache:
+            logger.info("📋 Loading menu from Google Sheets...")
+            try:
+                menu_cache = sheets_service.get_menu_from_sheet()
+                logger.info(f"✅ Menu loaded: {len(menu_cache)} items")
+            except Exception as e:
+                logger.error(f"❌ Failed to load menu: {e}")
+                return []
         
-        # Завантажити з Sheets
-        logger.info("📥 Loading menu from Sheets...")
-        try:
-            menu_cache = sheets_service.get_menu_from_sheet()
-            menu_last_update = now
-            logger.info(f"✅ Menu loaded: {len(menu_cache)} items")
-            return menu_cache
-        except Exception as e:
-            logger.error(f"Failed to load menu: {e}")
-            return menu_cache if menu_cache else []
+        return menu_cache
 
 
 def get_categories():
-    """Унікальні категорії"""
+    """Отримує список категорій"""
     menu = get_menu()
-    categories = sorted(set(item.get('Категорія', 'Інше') for item in menu))
-    return [cat for cat in categories if cat]
+    categories = set()
+    
+    for item in menu:
+        category = item.get('Категорія', 'Інше')
+        if category:
+            categories.add(category)
+    
+    return sorted(list(categories))
 
 
 def get_items_by_category(category):
-    """Товари за категорією"""
+    """Отримує товари за категорією"""
     menu = get_menu()
     return [item for item in menu if item.get('Категорія') == category]
 
 
-def find_item(item_name):
-    """Знайти товар за назвою"""
+def find_item_by_name(name):
+    """Знаходить товар за назвою"""
     menu = get_menu()
     for item in menu:
-        if item.get('Назва Страви') == item_name:
+        if item.get('Назва Страви') == name:
             return item
     return None
 
 
-# =============================================================================
-# ФОРМАТУВАННЯ (з безпечним HTML)
-# =============================================================================
-
 def safe_escape(text):
-    """Безпечний HTML escape"""
-    return html.escape(str(text or ""))
+    """Безпечно escape HTML"""
+    import html
+    if text is None:
+        return ""
+    return html.escape(str(text))
 
 
-def format_item(item):
+# =============================================================================
+# FSM ФУНКЦІЇ
+# =============================================================================
+
+def set_state(chat_id, state, **data):
+    """Встановлює стан користувача"""
+    with user_states_lock:
+        user_states[chat_id] = state
+        user_state_data[chat_id] = data
+        logger.debug(f"State {chat_id}: {state}")
+
+
+def get_state(chat_id):
+    """Отримує поточний стан"""
+    return user_states.get(chat_id, State.MAIN_MENU)
+
+
+def get_state_data(chat_id, key, default=None):
+    """Отримує дані стану"""
+    return user_state_data.get(chat_id, {}).get(key, default)
+
+
+def clear_state(chat_id):
+    """Очищує стан"""
+    with user_states_lock:
+        user_states.pop(chat_id, None)
+        user_state_data.pop(chat_id, None)
+
+
+# =============================================================================
+# НАВІГАЦІЯ (для кнопок "Назад")
+# =============================================================================
+
+def push_navigation(chat_id, state, **data):
+    """Додає в історію навігації"""
+    with nav_lock:
+        user_navigation[chat_id].append({
+            'state': state,
+            'data': data
+        })
+        # Обмежити глибину
+        if len(user_navigation[chat_id]) > 5:
+            user_navigation[chat_id].pop(0)
+
+
+def pop_navigation(chat_id):
+    """Повертається назад"""
+    with nav_lock:
+        nav = user_navigation.get(chat_id, [])
+        if len(nav) > 1:
+            nav.pop()  # Видалити поточний
+            previous = nav[-1]  # Взяти попередній
+            return previous
+        return None
+
+
+def clear_navigation(chat_id):
+    """Очищає навігацію"""
+    with nav_lock:
+        user_navigation[chat_id] = []
+
+
+# =============================================================================
+# ФОРМАТУВАННЯ
+# =============================================================================
+
+def format_item(item, include_buttons=True):
     """Форматує товар"""
     name = safe_escape(item.get('Назва Страви', 'Без назви'))
     category = safe_escape(item.get('Категорія', ''))
     price = safe_escape(item.get('Ціна', '0'))
-    desc = safe_escape(item.get('Опис', ''))
+    description = safe_escape(item.get('Опис', ''))
     
     text = f"🍽 <b>{name}</b>\n\n"
-    if desc:
-        text += f"{desc}\n\n"
-    text += f"📂 {category}\n"
+    
+    if description:
+        text += f"{description}\n\n"
+    
+    text += f"📁 <i>{category}</i>\n"
     text += f"💰 <b>{price} грн</b>"
     
     return text
 
 
 def format_cart_summary(chat_id):
-    """Summary корзини"""
+    """Форматує корзину"""
     with user_carts_lock:
         cart = user_carts.get(chat_id, {})
     
     if not cart:
-        return "🛒 Корзина порожня\n\nДодайте товари з меню!"
+        return "🛒 Ваша корзина порожня"
     
     text = "🛒 <b>Ваша корзина:</b>\n\n"
-    total = 0
+    total = 0.0
     
-    for item_name, qty in cart.items():
-        item = find_item(item_name)
+    for item_name, quantity in cart.items():
+        item = find_item_by_name(item_name)
         if item:
-            name = safe_escape(item['Назва Страви'])
-            price = float(item.get('Ціна', 0))
-            subtotal = price * qty
-            total += subtotal
+            name = safe_escape(item.get('Назва Страви'))
+            try:
+                price = float(str(item.get('Ціна', 0)).replace(',', '.'))
+            except:
+                price = 0.0
             
-            text += f"• {name}\n"
-            text += f"  {price:.2f} грн × {qty} = {subtotal:.2f} грн\n\n"
+            item_total = price * quantity
+            total += item_total
+            
+            text += f"▫️ <b>{name}</b>\n"
+            text += f"   {price:.2f} грн × {quantity} = {item_total:.2f} грн\n\n"
     
-    text += f"━━━━━━━━━━━━━━━━\n"
+    text += f"━━━━━━━━━━━━━━━━━\n"
     text += f"💰 <b>Разом: {total:.2f} грн</b>"
     
     return text
 
 
 def get_breadcrumbs(chat_id):
-    """Навігаційні breadcrumbs"""
+    """Отримує breadcrumbs (шлях користувача)"""
     state = get_state(chat_id)
     
-    breadcrumbs = {
-        UserState.MAIN_MENU: "🏠 Головна",
-        UserState.BROWSING_CATEGORIES: "🏠 Головна → 📋 Меню",
-        UserState.BROWSING_ITEMS: "🏠 Головна → 📋 Меню → Категорія",
-        UserState.IN_CART: "🏠 Головна → 🛒 Корзина",
-        UserState.SEARCHING: "🏠 Головна → 🔍 Пошук",
+    crumbs = {
+        State.MAIN_MENU: "🏠 Головна",
+        State.BROWSING_CATEGORIES: "🏠 Головна → 📋 Меню",
+        State.VIEWING_CATEGORY: "🏠 Головна → 📋 Меню → 📂 Категорія",
+        State.VIEWING_ITEM: "🏠 Головна → 📋 Меню → 📂 Категорія → 🍽 Страва",
+        State.IN_CART: "🏠 Головна → 🛒 Корзина",
+        State.SEARCHING: "🏠 Головна → 🔍 Пошук",
     }
     
-    return breadcrumbs.get(state, "")
-
-
-# =============================================================================
-# TELEGRAM HELPERS
-# =============================================================================
-
-def send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
-    """Відправити повідомлення"""
-    try:
-        # Додати breadcrumbs якщо не головна сторінка
-        state = get_state(chat_id)
-        if state != UserState.MAIN_MENU:
-            breadcrumb = get_breadcrumbs(chat_id)
-            if breadcrumb:
-                text = f"<i>{breadcrumb}</i>\n\n{text}"
-        
-        return tg_service.tg_send_message(chat_id, text, reply_markup, parse_mode)
-    except Exception as e:
-        logger.error(f"Send message error: {e}")
-        return None
-
-
-def create_keyboard(buttons, one_time=False):
-    """Створити клавіатуру"""
-    return {
-        "keyboard": buttons,
-        "resize_keyboard": True,
-        "one_time_keyboard": one_time
-    }
-
-
-def create_inline_keyboard(buttons):
-    """Inline клавіатура"""
-    return {"inline_keyboard": buttons}
+    category = get_state_data(chat_id, 'category')
+    if category:
+        return crumbs.get(state, "").replace("Категорія", category)
+    
+    return crumbs.get(state, "🏠 Головна")
 
 
 # =============================================================================
 # КЛАВІАТУРИ
 # =============================================================================
 
-def main_menu_keyboard():
+def create_main_keyboard():
     """Головне меню"""
     buttons = [
-        [{"text": "📋 Меню"}, {"text": "🛒 Корзина"}]
+        [{"text": "📋 Меню"}, {"text": "🛒 Корзина"}],
     ]
     
     if AI_ENABLED:
@@ -340,47 +313,112 @@ def main_menu_keyboard():
     else:
         buttons.append([{"text": "ℹ️ Допомога"}])
     
-    return create_keyboard(buttons)
+    return {
+        "keyboard": buttons,
+        "resize_keyboard": True
+    }
 
 
-def categories_keyboard():
+def create_categories_keyboard():
     """Клавіатура категорій"""
     categories = get_categories()
     
-    buttons = []
-    for i in range(0, len(categories), 2):
-        row = [{"text": f"📂 {cat}", "callback_data": f"cat:{cat}"} 
-               for cat in categories[i:i+2]]
-        buttons.append(row)
+    keyboard = {"inline_keyboard": []}
     
-    buttons.append([{"text": "🏠 Головна", "callback_data": "home"}])
+    # По 2 кнопки в рядку
+    row = []
+    for i, category in enumerate(categories):
+        row.append({
+            "text": f"📂 {category}",
+            "callback_data": f"cat:{category}"
+        })
+        
+        if len(row) == 2 or i == len(categories) - 1:
+            keyboard["inline_keyboard"].append(row)
+            row = []
     
-    return create_inline_keyboard(buttons)
-
-
-def item_keyboard(item_name):
-    """Клавіатура товару"""
-    return create_inline_keyboard([
-        [{"text": "➕ В корзину", "callback_data": f"add:{item_name}"}],
-        [
-            {"text": "◀️ Назад", "callback_data": "back"},
-            {"text": "🏠 Головна", "callback_data": "home"}
-        ]
+    # Кнопка назад
+    keyboard["inline_keyboard"].append([
+        {"text": "🔙 Назад в меню", "callback_data": "back_main"}
     ])
+    
+    return keyboard
 
 
-def cart_keyboard(has_items=False):
+def create_item_keyboard(item, category, index, total):
+    """Клавіатура для товару"""
+    item_name = item.get('Назва Страви', '')
+    
+    keyboard = {"inline_keyboard": []}
+    
+    # Кнопка додати
+    keyboard["inline_keyboard"].append([
+        {"text": "➕ Додати в корзину", "callback_data": f"add:{item_name}"}
+    ])
+    
+    # Навігація якщо є кілька товарів
+    if total > 1:
+        nav_row = []
+        
+        if index > 0:
+            nav_row.append({
+                "text": "⬅️ Попередня",
+                "callback_data": f"item:{category}:{index-1}"
+            })
+        
+        nav_row.append({
+            "text": f"{index + 1}/{total}",
+            "callback_data": "noop"
+        })
+        
+        if index < total - 1:
+            nav_row.append({
+                "text": "Наступна ➡️",
+                "callback_data": f"item:{category}:{index+1}"
+            })
+        
+        keyboard["inline_keyboard"].append(nav_row)
+    
+    # Кнопка назад
+    keyboard["inline_keyboard"].append([
+        {"text": "🔙 Назад до категорій", "callback_data": "back_categories"}
+    ])
+    
+    return keyboard
+
+
+def create_cart_keyboard(has_items=False):
     """Клавіатура корзини"""
     if has_items:
-        return create_keyboard([
-            [{"text": "✅ Оформити замовлення"}],
-            [{"text": "🗑 Очистити"}, {"text": "🔙 До меню"}]
-        ])
+        return {
+            "keyboard": [
+                [{"text": "✅ Оформити замовлення"}],
+                [{"text": "🗑 Очистити корзину"}],
+                [{"text": "🔙 Продовжити покупки"}]
+            ],
+            "resize_keyboard": True
+        }
     else:
-        return create_keyboard([
-            [{"text": "📋 Переглянути меню"}],
-            [{"text": "🏠 Головна"}]
-        ])
+        return create_main_keyboard()
+
+
+# =============================================================================
+# ВІДПРАВКА ПОВІДОМЛЕНЬ
+# =============================================================================
+
+def send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
+    """Wrapper для відправки"""
+    try:
+        # Додати breadcrumbs якщо не головне меню
+        state = get_state(chat_id)
+        if state != State.MAIN_MENU and not text.startswith('🏠'):
+            breadcrumbs = get_breadcrumbs(chat_id)
+            text = f"<i>{breadcrumbs}</i>\n\n{text}"
+        
+        return tg_service.tg_send_message(chat_id, text, reply_markup, parse_mode)
+    except Exception as e:
+        logger.error(f"Send message error: {e}")
+        return None
 
 
 # =============================================================================
@@ -389,85 +427,168 @@ def cart_keyboard(has_items=False):
 
 def handle_start(chat_id):
     """Команда /start"""
-    set_state(chat_id, UserState.MAIN_MENU)
+    clear_state(chat_id)
+    clear_navigation(chat_id)
+    
+    set_state(chat_id, State.MAIN_MENU)
     
     text = (
-        "👋 <b>Вітаємо в Hubsy Bot!</b>\n\n"
-        "🍽 Замовляйте улюблені страви\n"
-        "⚡️ Швидко та зручно\n"
-        "🚀 Доставка за 30-40 хвилин\n\n"
+        "👋 <b>Вітаємо в Hubsy!</b>\n\n"
+        "🍽 Замовляйте смачну їжу онлайн\n"
+        "🚀 Швидка доставка\n"
+        "💳 Зручна оплата\n\n"
         "Оберіть дію:"
     )
     
-    send_message(chat_id, text, reply_markup=main_menu_keyboard())
+    send_message(chat_id, text, reply_markup=create_main_keyboard())
 
 
 def handle_menu(chat_id):
-    """Показати меню"""
-    set_state(chat_id, UserState.BROWSING_CATEGORIES)
+    """Показати категорії"""
+    push_navigation(chat_id, State.MAIN_MENU)
+    set_state(chat_id, State.BROWSING_CATEGORIES)
     
     categories = get_categories()
     
+    if not categories:
+        send_message(chat_id, "❌ Меню поки що порожнє. Спробуйте пізніше.")
+        return
+    
+    text = f"📋 <b>Наше меню</b>\n\nОберіть категорію ({len(categories)}):"
+    
+    send_message(chat_id, text, reply_markup=create_categories_keyboard())
+
+
+def handle_cart(chat_id):
+    """Показати корзину"""
+    push_navigation(chat_id, get_state(chat_id))
+    set_state(chat_id, State.IN_CART)
+    
+    summary = format_cart_summary(chat_id)
+    
+    with user_carts_lock:
+        has_items = len(user_carts.get(chat_id, {})) > 0
+    
+    send_message(chat_id, summary, reply_markup=create_cart_keyboard(has_items))
+
+
+def handle_search(chat_id):
+    """Пошук"""
+    if not AI_ENABLED:
+        send_message(
+            chat_id,
+            "🔍 <b>Пошук тимчасово недоступний</b>\n\n"
+            "Перегляньте наше меню: 📋 Меню"
+        )
+        return
+    
+    push_navigation(chat_id, get_state(chat_id))
+    set_state(chat_id, State.SEARCHING)
+    
     text = (
-        "📋 <b>Наше меню</b>\n\n"
-        f"Оберіть категорію ({len(categories)} доступно):"
+        "🔍 <b>Пошук страв</b>\n\n"
+        "Напишіть що ви шукаєте:\n\n"
+        "💡 <i>Наприклад:</i>\n"
+        "• \"щось гостре\"\n"
+        "• \"вегетаріанські страви\"\n"
+        "• \"десерт\"\n\n"
+        "Або натисніть /cancel для виходу"
     )
     
-    send_message(chat_id, text, reply_markup=categories_keyboard())
+    keyboard = {
+        "keyboard": [[{"text": "❌ Скасувати"}]],
+        "resize_keyboard": True
+    }
+    
+    send_message(chat_id, text, reply_markup=keyboard)
 
 
-def handle_category(chat_id, category):
-    """Показати товари категорії"""
+def handle_help(chat_id):
+    """Допомога"""
+    text = (
+        "ℹ️ <b>Довідка</b>\n\n"
+        "<b>Як зробити замовлення:</b>\n"
+        "1️⃣ Виберіть 📋 Меню\n"
+        "2️⃣ Оберіть категорію\n"
+        "3️⃣ Додайте страви в корзину\n"
+        "4️⃣ Перейдіть в 🛒 Корзину\n"
+        "5️⃣ Оформіть замовлення\n\n"
+        "<b>Команди:</b>\n"
+        "/start - Головне меню\n"
+        "/cancel - Скасувати поточну дію\n"
+        "/cart - Переглянути корзину\n"
+        "/help - Ця довідка\n\n"
+        "❓ Питання? Зв'яжіться з оператором"
+    )
+    
+    send_message(chat_id, text, reply_markup=create_main_keyboard())
+
+
+def handle_cancel(chat_id):
+    """Скасування"""
+    previous = pop_navigation(chat_id)
+    
+    if previous:
+        # Повернутися до попереднього стану
+        set_state(chat_id, previous['state'], **previous['data'])
+        
+        if previous['state'] == State.MAIN_MENU:
+            handle_start(chat_id)
+        elif previous['state'] == State.BROWSING_CATEGORIES:
+            handle_menu(chat_id)
+        elif previous['state'] == State.VIEWING_CATEGORY:
+            category = previous['data'].get('category')
+            if category:
+                show_category(chat_id, category)
+        else:
+            handle_start(chat_id)
+    else:
+        # Немає історії - повернутися на головну
+        handle_start(chat_id)
+
+
+# =============================================================================
+# ОБРОБКА КАТЕГОРІЙ ТА ТОВАРІВ
+# =============================================================================
+
+def show_category(chat_id, category):
+    """Показує товари категорії"""
+    push_navigation(chat_id, get_state(chat_id), category=get_state_data(chat_id, 'category'))
+    set_state(chat_id, State.VIEWING_CATEGORY, category=category)
+    
     items = get_items_by_category(category)
     
     if not items:
         send_message(chat_id, f"❌ Категорія <b>{category}</b> порожня")
+        handle_menu(chat_id)
         return
     
-    set_state(chat_id, UserState.BROWSING_ITEMS, category=category, item_index=0)
-    
     # Показати перший товар
-    show_item(chat_id, items[0], 0, len(items))
+    show_item(chat_id, category, 0, items)
 
 
-def show_item(chat_id, item, index, total):
-    """Показати товар з навігацією"""
+def show_item(chat_id, category, index, items=None):
+    """Показує конкретний товар"""
+    if items is None:
+        items = get_items_by_category(category)
+    
+    if not items or index < 0 or index >= len(items):
+        send_message(chat_id, "❌ Товар не знайдено")
+        return
+    
+    set_state(chat_id, State.VIEWING_ITEM, category=category, index=index)
+    
+    item = items[index]
     text = format_item(item)
     
-    # Додати навігацію якщо більше 1 товару
-    if total > 1:
-        text += f"\n\n<i>Товар {index + 1} з {total}</i>"
+    keyboard = create_item_keyboard(item, category, index, len(items))
     
-    # Клавіатура з навігацією
-    category = get_data(chat_id, 'category')
-    buttons = []
-    
-    # Навігація
-    if total > 1:
-        nav_row = []
-        if index > 0:
-            nav_row.append({"text": "◀️", "callback_data": f"prev:{category}:{index}"})
-        nav_row.append({"text": f"{index + 1}/{total}", "callback_data": "noop"})
-        if index < total - 1:
-            nav_row.append({"text": "▶️", "callback_data": f"next:{category}:{index}"})
-        buttons.append(nav_row)
-    
-    # Додати в корзину
-    item_name = item['Назва Страви']
-    buttons.append([{"text": "➕ В корзину", "callback_data": f"add:{item_name}"}])
-    
-    # Назад
-    buttons.append([
-        {"text": "◀️ До категорій", "callback_data": "back"},
-        {"text": "🏠 Головна", "callback_data": "home"}
-    ])
-    
-    send_message(chat_id, text, reply_markup=create_inline_keyboard(buttons))
+    send_message(chat_id, text, reply_markup=keyboard)
 
 
-def handle_add_to_cart(chat_id, item_name):
-    """Додати в корзину"""
-    item = find_item(item_name)
+def add_to_cart(chat_id, item_name):
+    """Додає товар в корзину"""
+    item = find_item_by_name(item_name)
     
     if not item:
         send_message(chat_id, "❌ Товар не знайдено")
@@ -477,342 +598,116 @@ def handle_add_to_cart(chat_id, item_name):
         cart = user_carts[chat_id]
         
         if len(cart) >= MAX_CART_ITEMS:
-            send_message(chat_id, f"❌ Максимум {MAX_CART_ITEMS} видів товарів")
+            send_message(chat_id, f"❌ Максимум {MAX_CART_ITEMS} різних товарів")
             return
         
-        qty = cart.get(item_name, 0)
+        current = cart.get(item_name, 0)
         
-        if qty >= MAX_ITEM_QUANTITY:
-            send_message(chat_id, f"❌ Максимум {MAX_ITEM_QUANTITY} шт")
+        if current >= MAX_ITEM_QUANTITY:
+            send_message(chat_id, f"❌ Максимум {MAX_ITEM_QUANTITY} шт одного товару")
             return
         
-        cart[item_name] = qty + 1
+        cart[item_name] = current + 1
     
-    # Відповідь
-    name = safe_escape(item['Назва Страви'])
-    new_qty = cart[item_name]
+    # Повідомлення з швидкими діями
+    name = safe_escape(item.get('Назва Страви'))
+    quantity = cart[item_name]
     
-    text = f"✅ <b>{name}</b> додано!\n\nКількість: {new_qty} шт"
+    text = f"✅ <b>{name}</b> додано!\n\nКількість: {quantity} шт"
     
-    # Швидкі дії
-    keyboard = create_inline_keyboard([
-        [
-            {"text": "➕ Ще один", "callback_data": f"add:{item_name}"},
-            {"text": "🛒 Корзина", "callback_data": "cart"}
-        ],
-        [{"text": "◀️ Продовжити покупки", "callback_data": "back"}]
-    ])
-    
-    send_message(chat_id, text, reply_markup=keyboard)
-
-
-def handle_cart(chat_id):
-    """Показати корзину"""
-    set_state(chat_id, UserState.IN_CART)
-    
-    with user_carts_lock:
-        cart = user_carts.get(chat_id, {})
-    
-    summary = format_cart_summary(chat_id)
-    
-    send_message(chat_id, summary, reply_markup=cart_keyboard(bool(cart)))
-
-
-def handle_clear_cart(chat_id):
-    """Очистити корзину"""
-    with user_carts_lock:
-        user_carts[chat_id] = {}
-    
-    send_message(
-        chat_id,
-        "✅ Корзину очищено",
-        reply_markup=main_menu_keyboard()
-    )
-    set_state(chat_id, UserState.MAIN_MENU)
-
-
-def handle_search(chat_id):
-    """Пошук"""
-    if not AI_ENABLED:
-        send_message(
-            chat_id,
-            "❌ Пошук тимчасово недоступний\n\nПерегляньте меню: /menu"
-        )
-        return
-    
-    set_state(chat_id, UserState.SEARCHING)
-    
-    text = (
-        "🔍 <b>AI Пошук</b>\n\n"
-        "Опишіть що шукаєте:\n"
-        "• \"щось гостре\"\n"
-        "• \"вегетаріанське\"\n"
-        "• \"десерт\"\n\n"
-        "Або /cancel для скасування"
-    )
-    
-    keyboard = create_keyboard([[{"text": "❌ Скасувати"}]], one_time=True)
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "🛒 Перейти в корзину", "callback_data": "goto_cart"},
+                {"text": "📋 Продовжити", "callback_data": "continue_shopping"}
+            ]
+        ]
+    }
     
     send_message(chat_id, text, reply_markup=keyboard)
-
-
-def handle_search_query(chat_id, query):
-    """Обробка пошукового запиту"""
-    send_message(chat_id, "🔍 Шукаю...")
-    
-    try:
-        results = ai_service.search_menu(query, get_menu())
-        
-        if results:
-            text = f"✨ Знайдено <b>{len(results)}</b> результатів:\n"
-            send_message(chat_id, text)
-            
-            # Показати перші 5
-            for item in results[:5]:
-                item_text = format_item(item)
-                item_name = item['Назва Страви']
-                
-                keyboard = create_inline_keyboard([
-                    [{"text": "➕ В корзину", "callback_data": f"add:{item_name}"}]
-                ])
-                
-                send_message(chat_id, item_text, reply_markup=keyboard)
-        else:
-            text = (
-                "😔 Нічого не знайдено\n\n"
-                "Спробуйте інші слова або\n"
-                "перегляньте всі категорії: /menu"
-            )
-            send_message(chat_id, text)
-        
-        set_state(chat_id, UserState.MAIN_MENU)
-        send_message(chat_id, "Що далі?", reply_markup=main_menu_keyboard())
-        
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        send_message(chat_id, "❌ Помилка пошуку")
-
-
-def handle_help(chat_id):
-    """Допомога"""
-    text = (
-        "ℹ️ <b>Як замовити:</b>\n\n"
-        "1️⃣ Оберіть <b>📋 Меню</b>\n"
-        "2️⃣ Виберіть категорію\n"
-        "3️⃣ Додайте товари в <b>🛒 Корзину</b>\n"
-        "4️⃣ Оформіть замовлення\n\n"
-        "<b>Команди:</b>\n"
-        "/start - Головне меню\n"
-        "/menu - Показати меню\n"
-        "/cart - Корзина\n"
-        "/cancel - Скасувати дію\n"
-        "/help - Ця довідка\n\n"
-        "❓ Питання? Пишіть @support"
-    )
-    
-    send_message(chat_id, text, reply_markup=main_menu_keyboard())
 
 
 # =============================================================================
 # CHECKOUT
 # =============================================================================
 
-def handle_checkout_start(chat_id):
-    """Почати оформлення"""
+def start_checkout(chat_id):
+    """Початок оформлення"""
     with user_carts_lock:
         cart = user_carts.get(chat_id, {})
     
     if not cart:
-        send_message(chat_id, "❌ Корзина порожня")
+        send_message(chat_id, "❌ Корзина порожня", reply_markup=create_main_keyboard())
         return
     
-    set_state(chat_id, UserState.CHECKOUT_PHONE)
+    push_navigation(chat_id, State.IN_CART)
+    set_state(chat_id, State.CHECKOUT_PHONE)
     
     text = (
-        "📝 <b>Оформлення замовлення</b>\n\n"
-        "Крок 1 з 3\n\n"
-        "Надішліть ваш номер телефону:"
+        "📞 <b>Оформлення замовлення</b>\n\n"
+        "Крок 1/3: Надішліть ваш номер телефону\n\n"
+        "Натисніть кнопку нижче або введіть вручну:"
     )
     
-    keyboard = create_keyboard([
-        [{"text": "📱 Надіслати номер", "request_contact": True}],
-        [{"text": "❌ Скасувати"}]
-    ], one_time=True)
+    keyboard = {
+        "keyboard": [[
+            {"text": "📱 Надіслати номер", "request_contact": True}
+        ], [
+            {"text": "❌ Скасувати"}
+        ]],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
     
     send_message(chat_id, text, reply_markup=keyboard)
 
 
-def handle_contact(chat_id, contact):
-    """Отримано контакт"""
-    phone = contact.get('phone_number')
+def handle_phone_received(chat_id, phone):
+    """Телефон отримано"""
+    with user_states_lock:
+        if chat_id not in user_state_data:
+            user_state_data[chat_id] = {}
+        user_state_data[chat_id]['phone'] = phone
     
-    if not phone:
-        send_message(chat_id, "❌ Помилка отримання номера")
-        return
-    
-    set_state(chat_id, UserState.CHECKOUT_ADDRESS, phone=phone)
+    set_state(chat_id, State.CHECKOUT_ADDRESS, phone=phone)
     
     text = (
-        "📝 <b>Оформлення замовлення</b>\n\n"
-        "Крок 2 з 3\n\n"
-        f"✅ Телефон: {phone}\n\n"
-        "Тепер надішліть адресу доставки:"
+        f"✅ Номер збережено: <code>{phone}</code>\n\n"
+        "📍 <b>Крок 2/3:</b> Надішліть адресу доставки\n\n"
+        "Наприклад: <i>вул. Хрещатик, 1, кв. 5</i>"
     )
     
-    keyboard = create_keyboard([[{"text": "❌ Скасувати"}]], one_time=True)
+    keyboard = {
+        "keyboard": [[{"text": "❌ Скасувати"}]],
+        "resize_keyboard": True
+    }
     
     send_message(chat_id, text, reply_markup=keyboard)
 
 
-def handle_address(chat_id, address):
-    """Отримано адресу"""
+def handle_address_received(chat_id, address):
+    """Адреса отримана"""
     if len(address) < 10:
-        send_message(chat_id, "❌ Адреса занадто коротка (мінімум 10 символів)")
+        send_message(
+            chat_id,
+            "❌ Адреса занадто коротка\n\n"
+            "Введіть повну адресу (мінімум 10 символів)"
+        )
         return
     
-    phone = get_data(chat_id, 'phone')
+    with user_states_lock:
+        if chat_id not in user_state_data:
+            user_state_data[chat_id] = {}
+        user_state_data[chat_id]['address'] = address
     
-    set_state(chat_id, UserState.CHECKOUT_CONFIRM, address=address)
+    set_state(chat_id, State.CHECKOUT_CONFIRM, address=address)
     
-    # Фінальне підтвердження
+    # Показати фінальне підтвердження
+    phone = get_state_data(chat_id, 'phone', 'N/A')
+    
     summary = format_cart_summary(chat_id)
     
     text = (
-        "📝 <b>Підтвердження замовлення</b>\n\n"
-        "Крок 3 з 3\n\n"
         f"{summary}\n\n"
-        "━━━━━━━━━━━━━━━━\n"
-        f"📱 Телефон: {phone}\n"
-        f"📍 Адреса: {safe_escape(address)}\n\n"
-        "Все вірно?"
-    )
-    
-    keyboard = create_keyboard([
-        [{"text": "✅ Підтвердити замовлення"}],
-        [{"text": "❌ Скасувати"}]
-    ], one_time=True)
-    
-    send_message(chat_id, text, reply_markup=keyboard)
-
-
-def handle_confirm_order(chat_id):
-    """Підтвердження замовлення"""
-    with user_carts_lock:
-        cart = user_carts.get(chat_id, {})
-    
-    if not cart:
-        send_message(chat_id, "❌ Корзина порожня")
-        return
-    
-    phone = get_data(chat_id, 'phone')
-    address = get_data(chat_id, 'address')
-    
-    try:
-        # Розрахувати суму
-        total = 0
-        for item_name, qty in cart.items():
-            item = find_item(item_name)
-            if item:
-                total += float(item.get('Ціна', 0)) * qty
-        
-        # Зберегти
-        contact_info = {'phone': phone, 'address': address}
-        order_id = db_service.save_order(chat_id, cart, contact_info, str(total))
-        
-        if not order_id:
-            raise Exception("Save failed")
-        
-        # Очистити корзину
-        with user_carts_lock:
-            user_carts[chat_id] = {}
-        
-        set_state(chat_id, UserState.MAIN_MENU)
-        
-        # Sheets sync (не критично)
-        try:
-            sheets_service.save_order_to_sheets(order_id, cart, contact_info)
-        except:
-            pass
-        
-        # Оператору
-        if OPERATOR_CHAT_ID:
-            try:
-                op_text = (
-                    f"🆕 <b>Замовлення #{order_id}</b>\n\n"
-                    f"{format_cart_summary(chat_id)}\n\n"
-                    f"📱 {phone}\n"
-                    f"📍 {address}"
-                )
-                send_message(OPERATOR_CHAT_ID, op_text)
-            except:
-                pass
-        
-        # Користувачу
-        text = (
-            f"✅ <b>Замовлення #{order_id} прийнято!</b>\n\n"
-            f"💰 Сума: {total:.2f} грн\n\n"
-            "🎉 Дякуємо!\n"
-            "Наш оператор зв'яжеться з вами\n"
-            "протягом 5-10 хвилин\n\n"
-            "Очікуйте дзвінка!"
-        )
-        
-        send_message(chat_id, text, reply_markup=main_menu_keyboard())
-        
-        logger.info(f"✅ Order {order_id} created")
-        
-    except Exception as e:
-        logger.error(f"Checkout failed: {e}")
-        send_message(
-            chat_id,
-            "❌ Помилка оформлення\n\nСпробуйте пізніше або зверніться до оператора",
-            reply_markup=main_menu_keyboard()
-        )
-
-
-# =============================================================================
-# WEBHOOK
-# =============================================================================
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Webhook endpoint"""
-    # Перевірка secret
-    secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-    
-    if secret != WEBHOOK_SECRET:
-        logger.warning(f"❌ Auth failed from {request.remote_addr}")
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        update = request.get_json()
-        
-        if not update:
-            return jsonify({"status": "ok"}), 200
-        
-        # Message
-        if 'message' in update:
-            msg = update['message']
-            chat_id = msg['chat']['id']
-            
-            # Текст
-            if 'text' in msg:
-                text = msg['text']
-                
-                # Команди
-                if text.startswith('/'):
-                    if text == '/start':
-                        handle_start(chat_id)
-                    elif text == '/menu':
-                        handle_menu(chat_id)
-                    elif text == '/cart':
-                        handle_cart(chat_id)
-                    elif text == '/help':
-                        handle_help(chat_id)
-                    elif text == '/cancel':
-                        set_state(chat_id, UserState.MAIN_MENU)
-                        send_message(chat_id, "✅ Скасовано", reply_markup=main_menu_keyboard())
-                    else:
-                        send_message(chat_id, "❌ Невідома команда\n\n/help для допомоги")
-                
-                else:
+        f"━━━━━━━━━━━━━━━━━\n\n"
+        f"📞 Телефон: <code>{phone}</code>\n"

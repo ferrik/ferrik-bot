@@ -19,7 +19,7 @@ from googleapiclient.errors import HttpError
 
 import config
 from utils.price_handler import price_to_sheets_format, parse_price
-from config.field_mapping import normalize_menu_list, create_legacy_compatible_item
+from config import normalize_menu_list, create_legacy_compatible_item
 
 logger = logging.getLogger(__name__)
 

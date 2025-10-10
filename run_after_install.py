@@ -79,4 +79,4 @@ def test_decimal_math():
 
 def test_field_mapping():
     """Тест 5: Field mapping"""
-    from config.field_mapping import normalize_menu_item
+    from config import normalize_menu_item

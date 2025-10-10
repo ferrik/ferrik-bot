@@ -103,7 +103,7 @@ def test_field_mapping():
     """Тест 4: Field Mapping"""
     print("\nТест 4: Field Mapping...")
     
-    from config.field_mapping import normalize_menu_item, get_field_value, MenuField
+    from config import normalize_menu_item, get_field_value, MenuField
     
     # Тест нормалізації
     raw_item = {

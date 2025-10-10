@@ -88,15 +88,20 @@ ORDER_FIELDS = {
     'notes': 'J'
 }
 
-# Menu/Product sheet columns
+# Menu/Product sheet columns - АДАПТОВАНО під вашу таблицю
 MENU_FIELDS = {
-    'id': 'A',
-    'name': 'B',
-    'description': 'C',
-    'price': 'D',
-    'category': 'E',
-    'available': 'F',
-    'image_url': 'G'
+    'id': 'A',           # ID
+    'category': 'B',     # Категорія
+    'name': 'C',         # Страви
+    'description': 'D',  # Опис
+    'price': 'E',        # Ціна
+    'restaurant': 'F',   # Ресторан
+    'delivery_time': 'G', # Час Доставки (хв)
+    'image_url': 'H',    # Фото URL
+    'available': 'I',    # Активний
+    'cook_time': 'J',    # Час_приготування
+    'allergens': 'K',    # Аллергени
+    'rating': 'L'        # Рейтинг
 }
 
 # User data columns
@@ -110,9 +115,10 @@ USER_FIELDS = {
 
 # Sheet names
 SHEET_NAMES = {
-    'orders': 'Orders',
-    'menu': 'Menu',
-    'users': 'Users'
+    'orders': 'Замовлення',
+    'menu': 'Меню',
+    'users': 'Users',
+    'config': 'Конфіг'
 }
 
 # Field mapping class для сумісності з config.field_mapping
@@ -140,15 +146,7 @@ class field_mapping:
 # ============================================================
 
 def normalize_menu_list(menu_data):
-    """
-    Normalize menu data from Google Sheets
-    
-    Args:
-        menu_data: Raw menu data from sheets
-        
-    Returns:
-        Normalized list of menu items
-    """
+    """Normalize menu data from Google Sheets"""
     if not menu_data:
         return []
     
@@ -169,15 +167,7 @@ def normalize_menu_list(menu_data):
     return normalized
 
 def create_legacy_compatible_item(item_data):
-    """
-    Create legacy compatible item format
-    
-    Args:
-        item_data: Item data dict
-        
-    Returns:
-        Legacy formatted item
-    """
+    """Create legacy compatible item format"""
     if not item_data:
         return None
     
@@ -214,6 +204,23 @@ def calculate_order_total(items):
         except (ValueError, TypeError):
             continue
     return total
+
+def parse_cart_item(item_str):
+    """Parse cart item from string format"""
+    try:
+        parts = item_str.split('|')
+        return {
+            'id': parts[0] if len(parts) > 0 else '',
+            'name': parts[1] if len(parts) > 1 else '',
+            'price': float(parts[2]) if len(parts) > 2 else 0,
+            'quantity': int(parts[3]) if len(parts) > 3 else 1
+        }
+    except (ValueError, IndexError):
+        return None
+
+def format_cart_item(item):
+    """Format cart item to string"""
+    return f"{item.get('id', '')}|{item.get('name', '')}|{item.get('price', 0)}|{item.get('quantity', 1)}"
 
 # ============================================================
 # VALIDATION

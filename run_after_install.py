@@ -41,7 +41,7 @@ def test_imports():
     try:
         from utils.html_formatter import escape_field
         from utils.price_handler import parse_price
-        from config.field_mapping import normalize_menu_item
+        from config import normalize_menu_item
         return True
     except ImportError:
         return False

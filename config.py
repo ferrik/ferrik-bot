@@ -115,7 +115,7 @@ SHEET_NAMES = {
     'users': 'Users'
 }
 
-# Field mapping class для сумісності з config.field_mapping
+# Field mapping class для сумісності з config
 class field_mapping:
     ORDER_FIELDS = ORDER_FIELDS
     MENU_FIELDS = MENU_FIELDS

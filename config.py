@@ -168,6 +168,53 @@ def normalize_menu_list(menu_data):
     
     return normalized
 
+def create_legacy_compatible_item(item_data):
+    """
+    Create legacy compatible item format
+    
+    Args:
+        item_data: Item data dict
+        
+    Returns:
+        Legacy formatted item
+    """
+    if not item_data:
+        return None
+    
+    return {
+        'id': str(item_data.get('id', '')),
+        'name': str(item_data.get('name', '')),
+        'description': str(item_data.get('description', '')),
+        'price': float(item_data.get('price', 0)),
+        'category': str(item_data.get('category', 'Інше')),
+        'available': bool(item_data.get('available', True)),
+        'image_url': str(item_data.get('image_url', ''))
+    }
+
+def format_price(price):
+    """Format price for display"""
+    try:
+        return f"{float(price):.2f} грн"
+    except (ValueError, TypeError):
+        return "0.00 грн"
+
+def validate_order_item(item):
+    """Validate order item structure"""
+    required_fields = ['id', 'name', 'price', 'quantity']
+    return all(field in item for field in required_fields)
+
+def calculate_order_total(items):
+    """Calculate total order price"""
+    total = 0
+    for item in items:
+        try:
+            price = float(item.get('price', 0))
+            quantity = int(item.get('quantity', 1))
+            total += price * quantity
+        except (ValueError, TypeError):
+            continue
+    return total
+
 # ============================================================
 # VALIDATION
 # ============================================================

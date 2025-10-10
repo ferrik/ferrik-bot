@@ -25,7 +25,7 @@ def test_imports():
         return False
     
     try:
-        from config.field_mapping import normalize_menu_item, MenuField
+        from config import normalize_menu_item, MenuField
         print("  ✅ field_mapping імпортовано")
     except ImportError as e:
         print(f"  ❌ field_mapping: {e}")

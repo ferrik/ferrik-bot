@@ -115,7 +115,7 @@ SHEET_NAMES = {
     'users': 'Users'
 }
 
-# Field mapping class для сумісності з config
+# Field mapping class для сумісності з config.field_mapping
 class field_mapping:
     ORDER_FIELDS = ORDER_FIELDS
     MENU_FIELDS = MENU_FIELDS
@@ -134,6 +134,39 @@ class field_mapping:
     @staticmethod
     def get_sheet_name(sheet_type):
         return SHEET_NAMES.get(sheet_type, 'Sheet1')
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def normalize_menu_list(menu_data):
+    """
+    Normalize menu data from Google Sheets
+    
+    Args:
+        menu_data: Raw menu data from sheets
+        
+    Returns:
+        Normalized list of menu items
+    """
+    if not menu_data:
+        return []
+    
+    normalized = []
+    for item in menu_data:
+        if isinstance(item, dict):
+            normalized_item = {
+                'id': item.get('id', ''),
+                'name': item.get('name', ''),
+                'description': item.get('description', ''),
+                'price': float(item.get('price', 0)) if item.get('price') else 0,
+                'category': item.get('category', 'Інше'),
+                'available': bool(item.get('available', True)),
+                'image_url': item.get('image_url', '')
+            }
+            normalized.append(normalized_item)
+    
+    return normalized
 
 # ============================================================
 # VALIDATION

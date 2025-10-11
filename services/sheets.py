@@ -1,24 +1,19 @@
 """
 Google Sheets Service
 Робота з Google Sheets API для меню та замовлень
-
-Виправлення:
-- Decimal замість float для цін
-- Нормалізація полів через field_mapping
-- Кращa обробка помилок
 """
 
 import logging
 import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+from decimal import Decimal
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 import config
-from utils.price_handler import price_to_sheets_format, parse_price
 from config import normalize_menu_list, create_legacy_compatible_item
 
 logger = logging.getLogger(__name__)
@@ -44,10 +39,14 @@ def get_sheets_service():
     
     try:
         # Парсимо credentials з JSON
-        if config.GOOGLE_CREDENTIALS_JSON:
-            creds_dict = json.loads(config.GOOGLE_CREDENTIALS_JSON)
-        else:
-            raise ValueError("Google credentials not configured")
+        # ВИПРАВЛЕННЯ: Использувати GOOGLE_CREDENTIALS замість GOOGLE_CREDENTIALS_JSON
+        creds_json = config.GOOGLE_CREDENTIALS or os.getenv('GOOGLE_CREDENTIALS', '')
+        
+        if not creds_json:
+            raise ValueError("❌ GOOGLE_CREDENTIALS not configured in environment")
+        
+        # Парсимо JSON
+        creds_dict = json.loads(creds_json)
         
         # Створюємо credentials
         credentials = service_account.Credentials.from_service_account_info(
@@ -58,11 +57,14 @@ def get_sheets_service():
         # Створюємо service
         _sheets_service = build('sheets', 'v4', credentials=credentials)
         
-        logger.info("✅ Google Sheets service initialized")
+        logger.info("✅ Google Sheets service initialized successfully")
         return _sheets_service
         
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Failed to parse GOOGLE_CREDENTIALS JSON: {e}")
+        raise
     except Exception as e:
-        logger.error(f"Failed to initialize Google Sheets service: {e}")
+        logger.error(f"❌ Failed to initialize Google Sheets service: {e}")
         raise
 
 
@@ -70,10 +72,7 @@ def get_menu_from_sheet() -> List[Dict[str, Any]]:
     """
     Отримує меню з Google Sheets
     
-    ВИПРАВЛЕННЯ:
-    - Нормалізація полів через field_mapping
-    - Legacy compatibility
-    - Кращa обробка помилок
+    Читає з листа "Меню" і нормалізує поля
     
     Returns:
         List of menu items з нормалізованими полями
@@ -82,28 +81,30 @@ def get_menu_from_sheet() -> List[Dict[str, Any]]:
         service = get_sheets_service()
         sheet = service.spreadsheets()
         
-        # Читаємо заголовки (перший рядок)
+        # Читаємо заголовки (перший рядок) - листа називається "Меню"
         headers_result = sheet.values().get(
             spreadsheetId=config.GOOGLE_SHEET_ID,
-            range='Menu!A1:Z1'
+            range='Меню!A1:L1'  # ВИПРАВЛЕННЯ: Українське ім'я листа
         ).execute()
         
         headers = headers_result.get('values', [[]])[0]
         
         if not headers:
-            logger.error("No headers found in menu sheet")
+            logger.error("❌ No headers found in 'Меню' sheet")
             return []
+        
+        logger.info(f"📋 Headers found: {headers}")
         
         # Читаємо дані (з другого рядка)
         result = sheet.values().get(
             spreadsheetId=config.GOOGLE_SHEET_ID,
-            range='Menu!A2:Z1000'
+            range='Меню!A2:L1000'
         ).execute()
         
         values = result.get('values', [])
         
         if not values:
-            logger.warning("No data found in menu sheet")
+            logger.warning("⚠️  No data found in 'Меню' sheet")
             return []
         
         # Конвертуємо в list of dicts
@@ -122,38 +123,31 @@ def get_menu_from_sheet() -> List[Dict[str, Any]]:
             
             raw_menu.append(item)
         
-        logger.info(f"Loaded {len(raw_menu)} raw items from sheet")
+        logger.info(f"📊 Loaded {len(raw_menu)} raw items from sheet")
         
-        # КРИТИЧНО: Нормалізуємо поля
+        # КРИТИЧНО: Нормалізуємо поля через config.normalize_menu_list
         normalized_menu = normalize_menu_list(raw_menu)
         
-        # BACKWARD COMPATIBILITY: Додаємо legacy ключі
-        compatible_menu = [create_legacy_compatible_item(item) for item in normalized_menu]
-        
-        logger.info(f"✅ Menu normalized: {len(compatible_menu)} items")
-        return compatible_menu
+        logger.info(f"✅ Menu normalized: {len(normalized_menu)} items")
+        return normalized_menu
         
     except HttpError as e:
-        logger.error(f"HTTP error loading menu: {e}")
+        logger.error(f"❌ HTTP error loading menu: {e}")
         return []
     except Exception as e:
-        logger.error(f"Failed to load menu from sheets: {e}")
+        logger.error(f"❌ Failed to load menu from sheets: {e}", exc_info=True)
         return []
 
 
-def save_order_to_sheets(order_id: str, cart: Dict, contact_info: Dict) -> bool:
+def save_order_to_sheets(order_id: str, user_id: int, cart: Dict, contact_info: Dict) -> bool:
     """
     Зберігає замовлення в Google Sheets
     
-    КРИТИЧНЕ ВИПРАВЛЕННЯ:
-    - Decimal замість float (БЕЗ ВТРАТИ ТОЧНОСТІ!)
-    - Правильне форматування для Sheets
-    - Кращa обробка помилок
-    
     Args:
         order_id: ID замовлення
-        cart: Словник {item: quantity}
-        contact_info: Контактна інформація
+        user_id: Telegram user ID
+        cart: Словник {item_name: quantity}
+        contact_info: Контактна інформація {phone, address, name}
     
     Returns:
         True якщо успішно, False якщо помилка
@@ -165,65 +159,34 @@ def save_order_to_sheets(order_id: str, cart: Dict, contact_info: Dict) -> bool:
         # Timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Готуємо rows для запису
-        rows_to_add = []
+        # Конвертуємо cart в JSON
+        cart_json = json.dumps(cart)
         
-        for item, quantity in cart.items():
-            # Конвертуємо item (може бути dict або frozenset)
-            if isinstance(item, dict):
-                item_dict = item
-            else:
-                try:
-                    item_dict = dict(item)
-                except (TypeError, ValueError):
-                    logger.error(f"Cannot convert item to dict: {type(item)}")
-                    continue
-            
-            # Отримуємо поля (підтримка обох форматів)
-            item_name = item_dict.get('Назва Страви') or item_dict.get('name', 'N/A')
-            item_category = item_dict.get('Категорія') or item_dict.get('category', 'N/A')
-            price_value = item_dict.get('Ціна') or item_dict.get('price', 0)
-            
-            # ⚠️ КРИТИЧНО: Використовуємо price_to_sheets_format
-            # ❌ НЕ РОБИТИ: float(str(price))  ← Втрата точності!
-            # ✅ ПРАВИЛЬНО: price_to_sheets_format(price)
-            price_formatted = price_to_sheets_format(price_value)
-            
-            # Розраховуємо total для рядка
-            unit_price = parse_price(price_value)
-            from decimal import Decimal
-            item_total = unit_price * Decimal(str(quantity))
-            total_formatted = price_to_sheets_format(item_total)
-            
-            # Формуємо row
-            row = [
-                str(order_id),                               # A: Order ID
-                timestamp,                                   # B: Timestamp
-                item_name,                                   # C: Item Name
-                item_category,                               # D: Category
-                int(quantity),                               # E: Quantity (int)
-                price_formatted,                             # F: Unit Price (STRING!)
-                total_formatted,                             # G: Total (STRING!)
-                contact_info.get('phone', 'N/A'),           # H: Phone
-                contact_info.get('address', 'N/A'),         # I: Address
-                contact_info.get('name', 'N/A'),            # J: Customer Name
-            ]
-            
-            rows_to_add.append(row)
+        # Розраховуємо суму
+        total_amount = sum(
+            float(item.get('price', 0)) * int(qty)
+            for item, qty in cart.items()
+        )
         
-        if not rows_to_add:
-            logger.warning(f"No rows to add for order {order_id}")
-            return False
+        # Готуємо row для запису
+        row = [
+            str(order_id),                                  # A: ID_замовлення
+            str(user_id),                                   # B: Telegram User ID
+            timestamp,                                      # C: Час_замовлення
+            cart_json,                                      # D: Товари (JSON)
+            round(total_amount, 2),                        # E: Загальна_сума
+            contact_info.get('address', 'N/A'),           # F: Адреса
+            contact_info.get('phone', 'N/A'),             # G: Телефон
+            'card',                                         # H: Спосіб_оплати
+            'pending',                                      # I: Статус
+        ]
         
-        # Записуємо в Sheets
-        body = {
-            'values': rows_to_add
-        }
+        body = {'values': [row]}
         
         result = sheet.values().append(
             spreadsheetId=config.GOOGLE_SHEET_ID,
-            range='Orders!A:J',  # Adjust if your sheet has different name/columns
-            valueInputOption='RAW',  # ВАЖЛИВО: RAW щоб зберегти string format
+            range='Замовлення!A:I',
+            valueInputOption='RAW',
             insertDataOption='INSERT_ROWS',
             body=body
         ).execute()
@@ -234,11 +197,10 @@ def save_order_to_sheets(order_id: str, cart: Dict, contact_info: Dict) -> bool:
         return True
         
     except HttpError as e:
-        logger.error(f"HTTP error saving order {order_id}: {e}")
+        logger.error(f"❌ HTTP error saving order {order_id}: {e}")
         return False
     except Exception as e:
-        logger.error(f"Failed to save order {order_id} to sheets: {e}")
-        # НЕ кидаємо exception - це не критично якщо Sheets failed
+        logger.error(f"❌ Failed to save order {order_id} to sheets: {e}", exc_info=True)
         return False
 
 
@@ -259,19 +221,19 @@ def get_orders_from_sheet(limit: int = 100) -> List[Dict[str, Any]]:
         # Читаємо заголовки
         headers_result = sheet.values().get(
             spreadsheetId=config.GOOGLE_SHEET_ID,
-            range='Orders!A1:J1'
+            range='Замовлення!A1:I1'
         ).execute()
         
         headers = headers_result.get('values', [[]])[0]
         
         if not headers:
-            logger.warning("No headers in Orders sheet")
+            logger.warning("⚠️  No headers in 'Замовлення' sheet")
             return []
         
         # Читаємо дані
         result = sheet.values().get(
             spreadsheetId=config.GOOGLE_SHEET_ID,
-            range=f'Orders!A2:J{limit + 1}'
+            range=f'Замовлення!A2:I{limit + 1}'
         ).execute()
         
         values = result.get('values', [])
@@ -285,74 +247,12 @@ def get_orders_from_sheet(limit: int = 100) -> List[Dict[str, Any]]:
             order = dict(zip(headers, row))
             orders.append(order)
         
-        logger.info(f"Loaded {len(orders)} orders from sheet")
+        logger.info(f"📊 Loaded {len(orders)} orders from sheet")
         return orders
         
     except Exception as e:
-        logger.error(f"Failed to load orders: {e}")
+        logger.error(f"❌ Failed to load orders: {e}")
         return []
-
-
-def update_menu_item(item_id: str, updates: Dict[str, Any]) -> bool:
-    """
-    Оновлює товар в меню
-    
-    Args:
-        item_id: ID товару
-        updates: Словник з полями для оновлення
-    
-    Returns:
-        True якщо успішно
-    """
-    try:
-        # TODO: Реалізувати якщо потрібна функція редагування
-        logger.warning("update_menu_item not implemented yet")
-        return False
-        
-    except Exception as e:
-        logger.error(f"Failed to update menu item {item_id}: {e}")
-        return False
-
-
-def add_menu_item(item: Dict[str, Any]) -> bool:
-    """
-    Додає новий товар в меню
-    
-    Args:
-        item: Словник з даними товару
-    
-    Returns:
-        True якщо успішно
-    """
-    try:
-        service = get_sheets_service()
-        sheet = service.spreadsheets()
-        
-        # Формуємо row (відповідно до структури вашої таблиці)
-        row = [
-            item.get('ID', ''),
-            item.get('Назва Страви', ''),
-            item.get('Категорія', ''),
-            price_to_sheets_format(item.get('Ціна', 0)),
-            item.get('Опис', ''),
-            item.get('Доступно', 'Так'),
-        ]
-        
-        body = {'values': [row]}
-        
-        result = sheet.values().append(
-            spreadsheetId=config.GOOGLE_SHEET_ID,
-            range='Menu!A:F',
-            valueInputOption='RAW',
-            body=body
-        ).execute()
-        
-        logger.info(f"✅ Menu item added: {item.get('Назва Страви')}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to add menu item: {e}")
-        return False
 
 
 def test_sheets_connection() -> bool:
@@ -391,60 +291,21 @@ def get_sheet_info() -> Dict[str, Any]:
         
         result = sheet.get(spreadsheetId=config.GOOGLE_SHEET_ID).execute()
         
+        sheets_list = [s['properties']['title'] for s in result.get('sheets', [])]
+        
         info = {
             'title': result.get('properties', {}).get('title'),
-            'sheets': [s['properties']['title'] for s in result.get('sheets', [])],
+            'sheets': sheets_list,
             'url': f"https://docs.google.com/spreadsheets/d/{config.GOOGLE_SHEET_ID}"
         }
+        
+        logger.info(f"📋 Sheet info: {info}")
         
         return info
         
     except Exception as e:
-        logger.error(f"Failed to get sheet info: {e}")
+        logger.error(f"❌ Failed to get sheet info: {e}")
         return {}
-
-
-# ============================================================================
-# HELPER ФУНКЦІЇ
-# ============================================================================
-
-def validate_menu_item(item: Dict[str, Any]) -> tuple:
-    """
-    Валідує що item містить всі необхідні поля
-    
-    Args:
-        item: Словник товару
-    
-    Returns:
-        (is_valid: bool, error_message: str)
-    """
-    required_fields = ['Назва Страви', 'Ціна', 'Категорія']
-    
-    for field in required_fields:
-        if field not in item or not item[field]:
-            return False, f"Missing required field: {field}"
-    
-    # Перевірка що ціна валідна
-    from utils.price_handler import validate_price
-    is_valid, error = validate_price(item['Ціна'])
-    if not is_valid:
-        return False, f"Invalid price: {error}"
-    
-    return True, ""
-
-
-def format_price_for_display(price_value: Any) -> str:
-    """
-    Форматує ціну для відображення
-    
-    Args:
-        price_value: Ціна
-    
-    Returns:
-        Відформатована строка з валютою
-    """
-    from utils.price_handler import format_price
-    return format_price(price_value)
 
 
 # ============================================================================
@@ -456,9 +317,6 @@ __all__ = [
     'get_menu_from_sheet',
     'save_order_to_sheets',
     'get_orders_from_sheet',
-    'update_menu_item',
-    'add_menu_item',
     'test_sheets_connection',
     'get_sheet_info',
-    'validate_menu_item',
 ]

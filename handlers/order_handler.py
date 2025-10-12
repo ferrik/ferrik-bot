@@ -1,325 +1,261 @@
 """
-Order Handler with Commission Processing
-Обробка замовлень з розрахунком комісій
+Updated order handler with personalization
+Integrate this with your existing order_handler.py
 """
-
 import logging
-import json
+import uuid
 from datetime import datetime
-from config import (
-    COMMISSION_CONFIG,
-    ORDER_EXTENSION_FIELDS,
-    PROMO_FIELDS,
-    format_commission_report
+from aiogram import Router, types
+from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command
+
+from storage.user_repository import UserRepository
+from services.personalization_service import PersonalizationService
+from utils.personalization_helpers import (
+    format_level_up_message,
+    format_discount_offer
 )
-from services.commission_service import (
-    CommissionProcessor,
-    PromoCodeManager,
-    PartnerAnalytics
-)
 
-logger = logging.getLogger('order_handler')
+logger = logging.getLogger(__name__)
+
+router = Router()
 
 
-class OrderManager:
-    """Управління замовленнями з комісіями"""
+async def process_order_completion(
+    user_id: int,
+    order_id: str,
+    restaurant_id: str,
+    items: list,
+    total_amount: float,
+    bot
+):
+    """
+    Process order completion and update user profile
+    Call this after successful order creation
     
-    def __init__(self, sheets_service, partners_data=None, promo_codes=None):
-        """
-        Args:
-            sheets_service: сервіс для роботи з Google Sheets
-            partners_data: список партнерів з таблиці
-            promo_codes: список промокодів з таблиці
-        """
-        self.sheets = sheets_service
-        self.partners_data = partners_data or []
-        self.promo_codes = promo_codes or []
-        self.commission_processor = CommissionProcessor()
-        self.promo_manager = PromoCodeManager()
-    
-    def create_order_with_commission(self, user_id, items, partner_id, promo_code=None):
-        """
-        Створює замовлення та розраховує комісію
+    Args:
+        user_id: Telegram user ID
+        order_id: Order ID
+        restaurant_id: Restaurant ID
+        items: List of ordered items (dictionaries with 'name', 'quantity', 'price')
+        total_amount: Total order amount
+        bot: aiogram Bot instance
+    """
+    try:
+        # Get current profile
+        profile = UserRepository.get_profile(user_id)
+        if not profile:
+            logger.warning(f"Profile not found for user {user_id}")
+            return
         
-        Args:
-            user_id: Telegram ID користувача
-            items: список товарів [{id, name, price, quantity}, ...]
-            partner_id: ID партнера (ресторану)
-            promo_code: промокод (опціонально)
+        # Extract dish names
+        dish_names = [item.get('name', 'Item') for item in items]
         
-        Returns:
-            {
-                'order_id': str,
-                'success': bool,
-                'message': str,
-                'commission_info': dict
-            }
-        """
+        # Store old level for comparison
+        old_level = profile.level
         
-        try:
-            # Розраховуємо загальну суму
-            order_total = sum(
-                float(item.get('price', 0)) * int(item.get('quantity', 1))
-                for item in items
-            )
-            
-            if order_total < COMMISSION_CONFIG['min_order_value']:
-                return {
-                    'success': False,
-                    'message': f"Мінімальна сума замовлення: {COMMISSION_CONFIG['min_order_value']} грн"
-                }
-            
-            # Знаходимо дані партнера
-            partner_data = next(
-                (p for p in self.partners_data if p.get('id') == partner_id),
-                None
-            )
-            
-            if not partner_data:
-                logger.warning(f"Partner {partner_id} not found")
-                partner_data = {'id': partner_id, 'commission_rate': COMMISSION_CONFIG['default_rate']}
-            
-            # Перевіряємо промокод
-            discount_amount = 0
-            if promo_code:
-                is_valid, discount_percent, error = self.promo_manager.validate_promo_code(
-                    promo_code,
-                    self.promo_codes
-                )
-                
-                if not is_valid:
-                    logger.warning(f"Invalid promo code: {promo_code} - {error}")
-                    # Продовжуємо без промокода, але сповіщаємо користувача
-                    promo_code = None
-                else:
-                    # Застосовуємо знижку
-                    from config import apply_promo_discount
-                    order_total, discount_amount = apply_promo_discount(order_total, discount_percent)
-            
-            # Розраховуємо комісію
-            order_data = {
-                'order_id': self._generate_order_id(),
-                'partner_id': partner_id,
-                'total_amount': order_total,
-                'promo_code': promo_code
-            }
-            
-            commission_info = self.commission_processor.process_order_commission(
-                order_data,
-                partner_data
-            )
-            
-            # Формуємо замовлення для таблиці
-            order_record = {
-                'order_id': commission_info['order_id'],
-                'user_id': user_id,
-                'partner_id': partner_id,
-                'items': json.dumps(items),  # JSON сериализация
-                'total_amount': commission_info['original_amount'],
-                'discount_amount': commission_info['discount_amount'],
-                'final_amount': commission_info['final_amount'],
-                'commission_rate': commission_info['commission_rate'],
-                'commission_amount': commission_info['commission_amount'],
-                'platform_revenue': commission_info['platform_revenue'],
-                'promo_code': promo_code or '',
-                'status': 'pending',
-                'created_at': datetime.now().isoformat()
-            }
-            
-            logger.info(f"Order {order_record['order_id']} created with commission {commission_info['commission_amount']} грн")
-            
-            return {
-                'success': True,
-                'order_id': commission_info['order_id'],
-                'message': 'Замовлення оформлене',
-                'commission_info': commission_info,
-                'order_record': order_record
-            }
-        
-        except Exception as e:
-            logger.error(f"Error creating order: {e}", exc_info=True)
-            return {
-                'success': False,
-                'message': 'Помилка при оформленні замовлення'
-            }
-    
-    def get_order_summary(self, order_data):
-        """
-        Форматує резюме замовлення для користувача
-        
-        Returns:
-            str - текст резюме для Telegram
-        """
-        
-        summary = f"""
-📋 РЕЗЮМЕ ЗАМОВЛЕННЯ
-
-ID: {order_data.get('order_id')}
-
-💰 Вартість:
-• Сума товарів: {order_data.get('original_amount', 0)} грн
-• Знижка: {order_data.get('discount_amount', 0)} грн
-• До сплати: {order_data.get('final_amount', 0)} грн
-
-📊 Деталі:
-• Партнер: {order_data.get('partner_name', 'N/A')}
-• Час доставки: {order_data.get('delivery_time', 'N/A')} хв
-• Статус: {order_data.get('status', 'обробка')}
-
-✅ Замовлення підтверджено
-🚚 Чекайте на доставку
-"""
-        return summary
-    
-    def get_partner_commission_summary(self, partner_id, orders_list):
-        """
-        Отримує резюме комісій для партнера
-        
-        Returns:
-            str - резюме для Telegram
-        """
-        
-        partner_data = next(
-            (p for p in self.partners_data if p.get('id') == partner_id),
-            None
+        # Update profile with order
+        profile.add_order(
+            amount=total_amount,
+            dish_names=dish_names,
+            restaurant_id=restaurant_id
         )
         
-        if not partner_data:
-            return "Партнер не знайдений"
+        # Save updated profile
+        UserRepository.save_profile(profile)
         
-        # Фільтруємо замовлення партнера
-        partner_orders = [o for o in orders_list if o.get('partner_id') == partner_id]
+        # Update order history
+        UserRepository.update_order_history(user_id, {
+            'order_id': order_id,
+            'restaurant_id': restaurant_id,
+            'items': dish_names,
+            'total_amount': total_amount
+        })
         
-        # Розраховуємо статистику
-        stats = CommissionProcessor.calculate_weekly_stats(partner_orders)
+        logger.info(f"✅ Order {order_id} recorded for user {user_id}")
         
-        partner_data.update(stats)
+        # Check if level changed
+        if profile.level != old_level:
+            logger.info(f"🎉 User {user_id} leveled up to {profile.level.value}")
+            
+            # Send level-up message
+            level_up_msg = format_level_up_message(profile)
+            try:
+                await bot.send_message(user_id, level_up_msg, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Failed to send level-up message: {e}")
         
-        return format_commission_report(partner_data)
-    
-    def _generate_order_id(self):
-        """Генерує унікальний ID замовлення"""
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        import random
-        random_part = random.randint(1000, 9999)
-        return f"ORD-{timestamp}-{random_part}"
+        # Check if eligible for discount offer
+        discount_offer = format_discount_offer(profile)
+        if discount_offer:
+            try:
+                await bot.send_message(user_id, discount_offer, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Failed to send discount offer: {e}")
+        
+    except Exception as e:
+        logger.error(f"Error processing order completion: {e}")
 
 
-class PromoCodeHandler:
-    """Обробка промокодів"""
+@router.message(Command("history"))
+async def cmd_order_history(message: types.Message):
+    """Show user order history"""
+    user_id = message.from_user.id
     
-    def __init__(self, sheets_service):
-        self.sheets = sheets_service
-        self.promo_manager = PromoCodeManager()
+    try:
+        order_history = UserRepository.get_user_order_history(user_id, limit=10)
+        
+        if not order_history:
+            await message.answer("📭 Історія замовлень порожня")
+            return
+        
+        from utils.personalization_helpers import format_order_history_message
+        history_text = format_order_history_message(order_history)
+        
+        await message.answer(history_text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Error showing order history: {e}")
+        await message.answer("❌ Помилка при завантаженні історії")
+
+
+@router.message(Command("stats"))
+async def cmd_user_stats(message: types.Message):
+    """Show user statistics"""
+    user_id = message.from_user.id
     
-    def apply_promo_to_order(self, promo_code, order_total, promo_codes_list):
-        """
-        Застосовує промокод до замовлення
+    try:
+        profile = UserRepository.get_profile(user_id)
         
-        Returns:
-            {
-                'success': bool,
-                'new_total': float,
-                'discount': float,
-                'message': str
-            }
-        """
+        if not profile:
+            await message.answer("❌ Профіль не знайдено")
+            return
         
-        is_valid, discount_percent, error = self.promo_manager.validate_promo_code(
-            promo_code,
-            promo_codes_list
-        )
+        from services.personalization_service import UserAnalyticsService
+        insights = UserAnalyticsService.get_user_insights(profile)
         
-        if not is_valid:
-            return {
-                'success': False,
-                'message': error or 'Промокод невалідний'
-            }
+        stats_text = "<b>📊 ТВОЯ СТАТИСТИКА</b>\n\n"
+        stats_text += f"📦 <b>Замовлень:</b> {insights['total_orders']}\n"
+        stats_text += f"💰 <b>Витрачено:</b> {insights['total_spent']:.2f} грн\n"
+        stats_text += f"💵 <b>Середній чек:</b> {insights['avg_order_value']:.2f} грн\n"
+        stats_text += f"🎁 <b>Рівень:</b> {profile.get_level_name()} {profile.get_level_emoji()}\n"
+        stats_text += f"🏆 <b>Бонус-балів:</b> {insights['points']}\n\n"
         
-        from config import apply_promo_discount
-        new_total, discount = apply_promo_discount(order_total, discount_percent)
+        if insights['days_since_last_order']:
+            stats_text += f"📅 <b>Останнє замовлення:</b> {insights['days_since_last_order']} днів тому\n"
         
-        return {
-            'success': True,
-            'new_total': new_total,
-            'discount': discount,
-            'discount_percent': discount_percent,
-            'message': f"Знижка {discount_percent}% застосована: економія {discount} грн"
+        if insights['favorite_category']:
+            stats_text += f"❤️ <b>Улюблена категорія:</b> {insights['favorite_category']}\n"
+        
+        await message.answer(stats_text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Error showing stats: {e}")
+        await message.answer("❌ Помилка при завантаженні статистики")
+
+
+@router.message(Command("favorites"))
+async def cmd_favorites(message: types.Message):
+    """Show favorite dishes"""
+    user_id = message.from_user.id
+    
+    try:
+        profile = UserRepository.get_profile(user_id)
+        
+        if not profile or not profile.favorite_dishes:
+            await message.answer("❌ У тебе поки немає улюблених страв\n\nЗроби кілька замовлень!")
+            return
+        
+        text = "⭐ <b>ТВОЇ УЛЮБЛЕНІ СТРАВИ:</b>\n\n"
+        
+        keyboard = {'inline_keyboard': []}
+        
+        for i, dish in enumerate(profile.favorite_dishes[:10], 1):
+            text += f"{i}. {dish}\n"
+            # Note: Adjust callback based on your menu structure
+            keyboard['inline_keyboard'].append([
+                {'text': f"🍕 {dish}", 'callback_data': f"search_dish_{i}"}
+            ])
+        
+        keyboard['inline_keyboard'].append([
+            {'text': '🔙 Назад в меню', 'callback_data': 'back_to_menu'}
+        ])
+        
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Error showing favorites: {e}")
+        await message.answer("❌ Помилка при завантаженні улюблених")
+
+
+@router.message(Command("quick_reorder"))
+async def cmd_quick_reorder(message: types.Message):
+    """Quick reorder favorite dish"""
+    user_id = message.from_user.id
+    
+    try:
+        profile = UserRepository.get_profile(user_id)
+        
+        if not profile or not profile.favorite_dishes:
+            await message.answer(
+                "❌ У тебе поки немає улюблених страв\n\n"
+                "Зробиш кілька замовлень і буду знати твої уподобання! 😊"
+            )
+            return
+        
+        favorite = profile.favorite_dishes[0]
+        
+        text = f"🍕 <b>ШВИДКЕ ЗАМОВЛЕННЯ</b>\n\n"
+        text += f"Замовити твою улюблену страву?\n"
+        text += f"<b>{favorite}</b>\n\n"
+        text += f"💡 Раніше ти замовляв цю страву {len([d for d in profile.favorite_dishes if d == favorite])} раз(и)"
+        
+        keyboard = {
+            'inline_keyboard': [
+                [
+                    {'text': '✅ Так, замовляю!', 'callback_data': f'quick_add_{favorite}'},
+                    {'text': '❌ Ні', 'callback_data': 'back_to_menu'}
+                ]
+            ]
         }
-    
-    def create_promo_for_partner(self, partner_id, discount_percent, usage_limit=None, expiry_days=30):
-        """
-        Створює новий промокод для партнера
         
-        Returns:
-            dict з деталями промокода
-        """
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
         
-        code = self.promo_manager.generate_promo_code()
-        
-        from datetime import timedelta
-        expiry_date = (datetime.now() + timedelta(days=expiry_days)).strftime('%Y-%m-%d')
-        
-        promo_data = {
-            'code': code,
-            'partner_id': partner_id,
-            'discount_percent': discount_percent,
-            'usage_limit': usage_limit or 0,  # 0 = неограниченно
-            'usage_count': 0,
-            'expiry_date': expiry_date,
-            'status': 'active',
-            'created_at': datetime.now().isoformat()
-        }
-        
-        logger.info(f"Promo code created: {code} for partner {partner_id}")
-        
-        return promo_data
+    except Exception as e:
+        logger.error(f"Error in quick reorder: {e}")
+        await message.answer("❌ Помилка при швидкому замовленні")
 
 
-class OrderAnalytics:
-    """Аналітика замовлень"""
+# Example of how to call process_order_completion
+# Use this in your existing order confirmation handler
+
+async def example_order_confirmation():
+    """
+    Example: How to integrate process_order_completion into your flow
     
-    @staticmethod
-    def get_order_completion_rate(orders_list):
-        """
-        Розраховує % завершених замовлень
-        
-        Returns:
-            float - відсоток від 0 до 100
-        """
-        
-        if not orders_list:
-            return 0.0
-        
-        completed = len([o for o in orders_list if o.get('status') == 'completed'])
-        return round((completed / len(orders_list)) * 100, 1)
+    Call this in your order confirmation handler:
+    """
     
-    @staticmethod
-    def get_average_order_value(orders_list):
-        """
-        Розраховує середню вартість замовлення
-        
-        Returns:
-            float - середня сума
-        """
-        
-        if not orders_list:
-            return 0.0
-        
-        total = sum(float(o.get('final_amount', 0)) for o in orders_list)
-        return round(total / len(orders_list), 2)
+    # After successful order creation:
+    user_id = 123456789
+    order_id = str(uuid.uuid4())
+    restaurant_id = "rest_001"
+    items = [
+        {'name': 'Pizza Margherita', 'quantity': 1, 'price': 150},
+        {'name': 'Salad Caesar', 'quantity': 1, 'price': 100}
+    ]
+    total_amount = 250.0
     
-    @staticmethod
-    def get_refund_rate(orders_list):
-        """
-        Розраховує % повернень коштів
-        
-        Returns:
-            float - відсоток від 0 до 100
-        """
-        
-        if not orders_list:
-            return 0.0
-        
-        refunded = len([o for o in orders_list if o.get('refund_status') == 'refunded'])
-        return round((refunded / len(orders_list)) * 100, 1)
+    # Call the function
+    # await process_order_completion(user_id, order_id, restaurant_id, items, total_amount, bot)
+    
+    # Then send confirmation to user
+    confirmation_text = f"""
+✅ <b>Замовлення прийнято!</b>
+
+🆔 Номер замовлення: {order_id}
+💰 Сума: {total_amount} грн
+
+Дякуємо за замовлення! 🙏
+    """
+    # await bot.send_message(user_id, confirmation_text, parse_mode="HTML")

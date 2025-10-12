@@ -3,6 +3,7 @@ Google Sheets Service
 Робота з Google Sheets API для меню та замовлень
 """
 
+import os
 import logging
 import json
 from datetime import datetime

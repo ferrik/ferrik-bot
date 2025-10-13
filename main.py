@@ -107,14 +107,6 @@ class State:
 
 logger.info("✅ Global variables initialized")
 
-# Спробуємо ініціалізувати персоналізацію якщо вона доступна
-if PERSONALIZATION_ENABLED:
-    try:
-        UserRepository.init_db()
-        logger.info("✅ Personalization database initialized")
-    except Exception as e:
-        logger.error(f"⚠️ Personalization DB init warning: {e}")
-
 # =============================================================================
 # HELPER ФУНКЦІЇ
 # =============================================================================

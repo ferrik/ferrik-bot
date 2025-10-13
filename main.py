@@ -585,4 +585,259 @@ def handle_phone_received(chat_id, phone):
     text = (
         f"✅ Номер збережено: <code>{phone}</code>\n\n"
         "📍 <b>Крок 2/3:</b> Надішліть адресу доставки\n\n"
-        "Наприклад: вул. Хрещатик, 1, кв
+        "Наприклад: вул. Хрещатик, 1, кв. 5"
+    )
+    keyboard = {"keyboard": [[{"text": "❌ Скасувати"}]], "resize_keyboard": True}
+    send_message(chat_id, text, reply_markup=keyboard)
+
+def handle_address_received(chat_id, address):
+    """Адреса отримана"""
+    if len(address) < 10:
+        send_message(chat_id, "❌ Адреса занадто коротка. Введіть повну адресу (мінімум 10 символів)")
+        return
+    
+    with user_states_lock:
+        if chat_id not in user_state_data:
+            user_state_data[chat_id] = {}
+        user_state_data[chat_id]['address'] = address
+    
+    set_state(chat_id, State.CHECKOUT_CONFIRM, address=address)
+    phone = get_state_data(chat_id, 'phone', 'N/A')
+    summary = format_cart_summary(chat_id)
+    text = (
+        f"{summary}\n\n"
+        f"━━━━━━━━━━━━━━━━━\n\n"
+        f"📞 Телефон: <code>{phone}</code>\n"
+        f"📍 Адреса: {safe_escape(address)}\n\n"
+        f"<b>Крок 3/3:</b> Підтвердіть замовлення"
+    )
+    keyboard = {
+        "keyboard": [
+            [{"text": "✅ Підтвердити замовлення"}],
+            [{"text": "❌ Скасувати"}]
+        ],
+        "resize_keyboard": True
+    }
+    send_message(chat_id, text, reply_markup=keyboard)
+
+def confirm_order(chat_id):
+    """Підтвердження замовлення з персоналізацією"""
+    
+    with user_carts_lock:
+        cart = user_carts.get(chat_id, {})
+    
+    if not cart:
+        send_message(chat_id, "❌ Корзина порожня")
+        handle_start(chat_id)
+        return
+    
+    try:
+        phone = get_state_data(chat_id, 'phone', 'N/A')
+        address = get_state_data(chat_id, 'address', 'N/A')
+        
+        total = 0.0
+        items_list = []
+        dish_names = []
+        
+        for item_name, quantity in cart.items():
+            item = find_item_by_name(item_name)
+            if item:
+                try:
+                    price = float(str(item.get('Ціна', 0)).replace(',', '.'))
+                    total += price * quantity
+                    items_list.append({
+                        'name': item_name,
+                        'quantity': quantity,
+                        'price': price
+                    })
+                    dish_names.append(item_name)
+                except Exception:
+                    pass
+        
+        order_id = str(uuid.uuid4())[:8]
+        
+        order_saved = db_service.save_order(
+            order_id=order_id,
+            user_id=chat_id,
+            username=None,
+            items=items_list,
+            total=f"{total:.2f}",
+            phone=phone,
+            address=address,
+            notes=""
+        )
+        
+        if not order_saved:
+            raise Exception("Database save failed")
+        
+        try:
+            profile = UserRepository.get_profile(chat_id)
+            if profile:
+                old_level = profile.level
+                UserRepository.add_order_to_profile(chat_id, {
+                    'order_id': order_id,
+                    'items': dish_names,
+                    'total': total,
+                    'timestamp': datetime.now().isoformat()
+                })
+                
+                profile = UserRepository.get_profile(chat_id)
+                if profile and profile.level > old_level:
+                    level_text = format_level_up_message(profile, old_level)
+                    send_message(chat_id, level_text)
+        except Exception as e:
+            logger.warning(f"Personalization update failed: {e}")
+        
+        summary = format_cart_summary(chat_id)
+        success_text = (
+            f"✅ <b>Замовлення успішно оформлено!</b>\n\n"
+            f"📦 <b>ID замовлення:</b> <code>{order_id}</code>\n"
+            f"📞 <b>Телефон:</b> <code>{phone}</code>\n"
+            f"📍 <b>Адреса:</b> {safe_escape(address)}\n\n"
+            f"{summary}\n\n"
+            f"🚚 Очікуйте доставки!\n"
+            f"Спасибі за замовлення! 😊"
+        )
+        
+        with user_carts_lock:
+            user_carts[chat_id] = {}
+        
+        clear_state(chat_id)
+        clear_navigation(chat_id)
+        
+        send_message(chat_id, success_text, reply_markup=create_main_keyboard())
+        
+    except Exception as e:
+        logger.error(f"Error confirming order: {e}")
+        send_message(chat_id, f"❌ Помилка при оформленні замовлення: {str(e)}")
+
+# =============================================================================
+# FLASK ROUTES
+# =============================================================================
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Webhook для Telegram"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False})
+        
+        update_id = data.get('update_id')
+        
+        if 'message' in data:
+            message = data['message']
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            first_name = message['chat'].get('first_name', 'User')
+            
+            if text == '/start':
+                handle_start(chat_id, first_name)
+            elif text == '/profile':
+                handle_profile(chat_id)
+            elif text == '/recommendations':
+                handle_recommendations(chat_id)
+            elif text == '/help':
+                handle_help(chat_id)
+            elif text == '/cancel' or text == '❌ Скасувати':
+                handle_cancel(chat_id)
+            elif text == '📋 Меню':
+                handle_menu(chat_id)
+            elif text == '👤 Профіль':
+                handle_profile(chat_id)
+            elif text == '⭐ Рекомендації':
+                handle_recommendations(chat_id)
+            elif text == '🛒 Корзина':
+                handle_cart(chat_id)
+            elif text == '🔍 Пошук':
+                handle_search(chat_id)
+            elif text == 'ℹ️ Допомога':
+                handle_help(chat_id)
+            elif text == '✅ Оформити замовлення':
+                start_checkout(chat_id)
+            elif text == '✅ Підтвердити замовлення':
+                confirm_order(chat_id)
+            elif text == '🔙 Продовжити покупки':
+                handle_menu(chat_id)
+            elif text == '🗑 Очистити корзину':
+                with user_carts_lock:
+                    user_carts[chat_id] = {}
+                send_message(chat_id, "🗑 Корзина очищена", reply_markup=create_main_keyboard())
+            elif 'contact' in message:
+                contact = message['contact']
+                phone = contact['phone_number']
+                handle_phone_received(chat_id, phone)
+            else:
+                state = get_state(chat_id)
+                if state == State.CHECKOUT_ADDRESS:
+                    handle_address_received(chat_id, text)
+                elif state == State.SEARCHING and AI_ENABLED:
+                    try:
+                        response = ai_service.search_dishes(text, get_menu())
+                        send_message(chat_id, response, reply_markup=create_main_keyboard())
+                    except Exception as e:
+                        logger.error(f"Search error: {e}")
+                        send_message(chat_id, "❌ Помилка пошуку. Спробуйте пізніше.")
+                else:
+                    send_message(chat_id, "ℹ️ Команда не розпізнана. Виберіть з меню:", reply_markup=create_main_keyboard())
+        
+        elif 'callback_query' in data:
+            callback = data['callback_query']
+            chat_id = callback['from']['id']
+            callback_data = callback.get('data', '')
+            
+            if callback_data == 'back_main':
+                handle_start(chat_id)
+            elif callback_data == 'back_categories':
+                handle_menu(chat_id)
+            elif callback_data == 'noop':
+                pass
+            elif callback_data == 'goto_cart':
+                handle_cart(chat_id)
+            elif callback_data == 'continue_shopping':
+                handle_menu(chat_id)
+            elif callback_data.startswith('cat:'):
+                category = callback_data[4:]
+                show_category(chat_id, category)
+            elif callback_data.startswith('add:'):
+                item_name = callback_data[4:]
+                add_to_cart(chat_id, item_name)
+            elif callback_data.startswith('item:'):
+                parts = callback_data[5:].split(':')
+                if len(parts) == 2:
+                    category = parts[0]
+                    index = int(parts[1])
+                    show_item(chat_id, category, index)
+        
+        return jsonify({"ok": True})
+        
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check"""
+    return jsonify({"status": "ok", "bot": "Hubsy v3.1.0"})
+
+@app.route('/', methods=['GET'])
+def index():
+    """Index page"""
+    return jsonify({
+        "name": "Hubsy Bot",
+        "version": "3.1.0",
+        "status": "running",
+        "endpoints": {
+            "webhook": "/webhook",
+            "health": "/health"
+        }
+    })
+
+# =============================================================================
+# ЗАПУСК
+# =============================================================================
+
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 5000))
+    logger.info(f"🌐 Starting server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)

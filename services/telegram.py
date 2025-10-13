@@ -6,7 +6,49 @@ from config import BOT_TOKEN, WEBHOOK_SECRET, RENDER_URL
 
 logger = logging.getLogger('telegram_service')
 
-def tg_send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
+def tg_send_photo(chat_id, photo_url, caption="", reply_markup=None, parse_mode="HTML"):
+    """Відправка фото з підписом"""
+    try:
+        if not BOT_TOKEN:
+            logger.error("❌ BOT_TOKEN not set")
+            return None
+        
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        payload = {
+            "chat_id": chat_id,
+            "photo": photo_url,
+            "parse_mode": parse_mode
+        }
+        
+        if caption:
+            payload["caption"] = caption
+        
+        if reply_markup:
+            if isinstance(reply_markup, str):
+                payload["reply_markup"] = json.loads(reply_markup)
+            else:
+                payload["reply_markup"] = reply_markup
+        
+        logger.debug(f"Sending photo to {chat_id}")
+        
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
+        if result.get("ok"):
+            logger.info(f"✅ Photo sent to {chat_id}")
+        else:
+            logger.error(f"❌ Telegram error: {result.get('description')}")
+        
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        error_text = e.response.text if hasattr(e, 'response') else str(e)
+        logger.error(f"❌ HTTP error: {error_text}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Send photo error: {e}")
+        return None
     """Відправка повідомлення"""
     try:
         if not BOT_TOKEN:

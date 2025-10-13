@@ -340,10 +340,6 @@ def create_cart_keyboard(has_items=False):
 def send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
     """Wrapper для відправки"""
     try:
-        state = get_state(chat_id)
-        if state != State.MAIN_MENU and not text.startswith('🏠'):
-            breadcrumbs = get_breadcrumbs(chat_id)
-            text = f"<i>{breadcrumbs}</i>\n\n{text}"
         return tg_service.tg_send_message(chat_id, text, reply_markup, parse_mode)
     except Exception as e:
         logger.error(f"Send message error: {e}")
@@ -692,13 +688,15 @@ def webhook():
         if not data:
             return jsonify({"ok": False})
         
-        update_id = data.get('update_id')
+        logger.info(f"Webhook received: {data.get('update_id')}")
         
         if 'message' in data:
             message = data['message']
             chat_id = message['chat']['id']
-            text = message.get('text', '')
+            text = message.get('text', '').strip()
             first_name = message['chat'].get('first_name', 'User')
+            
+            logger.info(f"Message from {chat_id}: {text}")
             
             if text == '/start':
                 handle_start(chat_id, first_name)
@@ -708,7 +706,7 @@ def webhook():
                 handle_recommendations(chat_id)
             elif text == '/help':
                 handle_help(chat_id)
-            elif text == '/cancel' or text == '❌ Скасувати':
+            elif text in ['/cancel', '❌ Скасувати']:
                 handle_cancel(chat_id)
             elif text == '📋 Меню':
                 handle_menu(chat_id)
@@ -744,7 +742,6 @@ def webhook():
                     try:
                         menu = get_menu()
                         menu_text = "\n".join([f"• {item.get('Назва Страви', '')} ({item.get('Ціна', '')} грн)" for item in menu])
-                        
                         response = ai_service.ask_gemini(f"Користувач шукає: {text}\n\nМеню:\n{menu_text}\n\nРекомендуй 2-3 страви з меню.")
                         send_message(chat_id, f"🔍 <b>Результати пошуку:</b>\n\n{response}", reply_markup=create_main_keyboard())
                     except Exception as e:
@@ -757,6 +754,8 @@ def webhook():
             callback = data['callback_query']
             chat_id = callback['from']['id']
             callback_data = callback.get('data', '')
+            
+            logger.info(f"Callback from {chat_id}: {callback_data}")
             
             if callback_data == 'back_main':
                 handle_start(chat_id)

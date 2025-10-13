@@ -31,12 +31,21 @@ logger.info("🚀 Starting Hubsy Bot v3.1.0 with Personalization...")
 # ІМПОРТИ
 # =============================================================================
 
+PERSONALIZATION_ENABLED = False
+AI_ENABLED = False
+
 try:
     import bot_config as config
     from services import telegram as tg_service
     from services import sheets as sheets_service
     from services import database as db_service
-    
+    logger.info("✅ Core services imported")
+except Exception as e:
+    logger.critical(f"❌ Critical import failed: {e}")
+    sys.exit(1)
+
+# Спробуємо завантажити персоналізацію - вона опціональна
+try:
     from storage.user_repository import UserRepository
     from models.user_profile import UserProfile
     from services.personalization_service import PersonalizationService, UserAnalyticsService
@@ -48,20 +57,20 @@ try:
         create_recommendations_keyboard,
         create_profile_keyboard
     )
-    
-    try:
-        from services import gemini as ai_service
-        AI_ENABLED = True
-        logger.info("✅ AI Service enabled")
-    except ImportError:
-        AI_ENABLED = False
-        logger.warning("⚠️  AI Service disabled")
-    
-    logger.info("✅ All imports successful")
-    
-except Exception as e:
-    logger.critical(f"❌ Import failed: {e}")
-    sys.exit(1)
+    PERSONALIZATION_ENABLED = True
+    logger.info("✅ Personalization service loaded")
+except Exception as pe:
+    PERSONALIZATION_ENABLED = False
+    logger.warning(f"⚠️  Personalization disabled: {pe}")
+
+# Спробуємо завантажити AI - вона опціональна
+try:
+    from services import gemini as ai_service
+    AI_ENABLED = True
+    logger.info("✅ AI Service enabled")
+except Exception as ae:
+    AI_ENABLED = False
+    logger.warning(f"⚠️  AI Service disabled: {ae}")
 
 app = Flask(__name__)
 
@@ -98,11 +107,13 @@ class State:
 
 logger.info("✅ Global variables initialized")
 
-try:
-    UserRepository.init_db()
-    logger.info("✅ Personalization database initialized")
-except Exception as e:
-    logger.error(f"⚠️ Personalization DB init warning: {e}")
+# Спробуємо ініціалізувати персоналізацію якщо вона доступна
+if PERSONALIZATION_ENABLED:
+    try:
+        UserRepository.init_db()
+        logger.info("✅ Personalization database initialized")
+    except Exception as e:
+        logger.error(f"⚠️ Personalization DB init warning: {e}")
 
 # =============================================================================
 # HELPER ФУНКЦІЇ

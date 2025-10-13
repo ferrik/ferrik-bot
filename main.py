@@ -362,62 +362,28 @@ def send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
 # =============================================================================
 
 def handle_start(chat_id, first_name=None):
-    """Команда /start з персоналізацією"""
+    """Команда /start"""
     clear_state(chat_id)
     clear_navigation(chat_id)
     set_state(chat_id, State.MAIN_MENU)
     
-    try:
-        profile = UserRepository.get_profile(chat_id)
-        if not profile:
-            profile = UserProfile(user_id=chat_id, name=first_name or "User")
-            UserRepository.save_profile(profile)
-        text = format_user_greeting_message(profile)
-    except Exception as e:
-        logger.error(f"Error in personalization: {e}")
-        text = (
-            "👋 <b>Вітаємо в Hubsy!</b>\n\n"
-            "🍽 Замовляйте смачну їжу онлайн\n"
-            "🚀 Швидка доставка\n"
-            "💳 Зручна оплата\n\n"
-            "Оберіть дію:"
-        )
+    text = (
+        "👋 <b>Вітаємо в Hubsy!</b>\n\n"
+        "🍽 Замовляйте смачну їжу онлайн\n"
+        "🚀 Швидка доставка\n"
+        "💳 Зручна оплата\n\n"
+        "Оберіть дію:"
+    )
+    
     send_message(chat_id, text, reply_markup=create_main_keyboard())
 
 def handle_profile(chat_id):
     """Показати профіль користувача"""
-    try:
-        profile = UserRepository.get_profile(chat_id)
-        if not profile:
-            send_message(chat_id, "❌ Профіль не знайдено. Напишіть /start")
-            return
-        
-        order_history = UserRepository.get_user_order_history(chat_id, limit=5)
-        profile_text = format_profile_message(profile, order_history)
-        keyboard = create_profile_keyboard()
-        send_message(chat_id, profile_text, reply_markup=keyboard)
-    except Exception as e:
-        logger.error(f"Error showing profile: {e}")
-        send_message(chat_id, "❌ Помилка при завантаженні профілю")
+    send_message(chat_id, "👤 <b>Профіль</b>\n\nУ вас 0 замовлень\n\nПродовжуйте покупки!", reply_markup=create_main_keyboard())
 
 def handle_recommendations(chat_id):
     """Показати рекомендації"""
-    try:
-        profile = UserRepository.get_profile(chat_id)
-        if not profile:
-            send_message(chat_id, "❌ Профіль не знайдено")
-            return
-        
-        menu = get_menu()
-        recommendations = PersonalizationService.get_recommendations(
-            profile=profile, all_menu_items=menu, limit=3
-        )
-        text = format_recommendations_message(recommendations)
-        keyboard = create_recommendations_keyboard(recommendations)
-        send_message(chat_id, text, reply_markup=keyboard)
-    except Exception as e:
-        logger.error(f"Error showing recommendations: {e}")
-        send_message(chat_id, "❌ Помилка при загруженні рекомендацій")
+    send_message(chat_id, "⭐ <b>Рекомендації</b>\n\nПерегляньте наше меню!", reply_markup=create_main_keyboard())
 
 def handle_menu(chat_id):
     """Показати категорії"""
@@ -784,8 +750,11 @@ def webhook():
                     handle_address_received(chat_id, text)
                 elif state == State.SEARCHING and AI_ENABLED:
                     try:
-                        response = ai_service.search_dishes(text, get_menu())
-                        send_message(chat_id, response, reply_markup=create_main_keyboard())
+                        menu = get_menu()
+                        menu_text = "\n".join([f"• {item.get('Назва Страви', '')} ({item.get('Ціна', '')} грн)" for item in menu])
+                        
+                        response = ai_service.ask_gemini(f"Користувач шукає: {text}\n\nМеню:\n{menu_text}\n\nРекомендуй 2-3 страви з меню.")
+                        send_message(chat_id, f"🔍 <b>Результати пошуку:</b>\n\n{response}", reply_markup=create_main_keyboard())
                     except Exception as e:
                         logger.error(f"Search error: {e}")
                         send_message(chat_id, "❌ Помилка пошуку. Спробуйте пізніше.")

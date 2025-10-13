@@ -1,5 +1,6 @@
 import os
 import requests
+import json
 import logging
 from config import BOT_TOKEN, WEBHOOK_SECRET, RENDER_URL
 
@@ -20,11 +21,25 @@ def tg_send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
         }
         
         if reply_markup:
-            payload["reply_markup"] = reply_markup
+            # Якщо це dict, передаємо як є (requests конвертує в JSON)
+            # Якщо це JSON string, парсимо назад в dict
+            if isinstance(reply_markup, str):
+                payload["reply_markup"] = json.loads(reply_markup)
+            else:
+                payload["reply_markup"] = reply_markup
+        
+        logger.debug(f"Sending to {chat_id}: {text[:50]}... with markup: {bool(reply_markup)}")
         
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
-        return response.json()
+        
+        result = response.json()
+        if result.get("ok"):
+            logger.info(f"✅ Message sent to {chat_id}")
+        else:
+            logger.error(f"❌ Telegram error: {result.get('description')}")
+        
+        return result
         
     except requests.exceptions.HTTPError as e:
         error_text = e.response.text if hasattr(e, 'response') else str(e)
@@ -75,7 +90,7 @@ def tg_set_webhook(url):
             f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
             json={
                 "url": webhook_url_full,
-                "secret_token": WEBHOOK_SECRET,  # Telegram відправить в X-Telegram-Bot-Api-Secret-Token
+                "secret_token": WEBHOOK_SECRET,
                 "drop_pending_updates": False,
                 "max_connections": 40
             },

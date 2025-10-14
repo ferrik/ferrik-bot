@@ -86,9 +86,14 @@ def safe_escape(text):
 
 def send_msg(chat_id, text, markup=None):
     try:
-        return tg_service.tg_send_message(chat_id, text, markup, "HTML")
+        logger.info(f"Sending to {chat_id}: {text[:50]}")
+        result = tg_service.tg_send_message(chat_id, text, markup, "HTML")
+        logger.info(f"Send result: {result}")
+        return result
     except Exception as e:
         logger.error(f"Send error: {e}")
+        logger.error(f"Text: {text}")
+        logger.error(f"Markup: {markup}")
 
 def format_item(item):
     name = safe_escape(item.get('Назва Страви', 'Без назви'))

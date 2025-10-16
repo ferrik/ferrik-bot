@@ -640,4 +640,4 @@ def handle_address(chat_id, address):
     except Exception as e:
         logger.error(f"Error in handle_address: {e}", exc_info=True)
 
-def confirm_order(chat_id
+def confirm_order(chat_id 

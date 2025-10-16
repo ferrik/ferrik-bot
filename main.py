@@ -5,26 +5,18 @@ Telegram бот для замовлення їжі з інтеграцією Goo
 
 import logging
 import os
+import time
 from flask import Flask, request, jsonify
 from typing import Dict, Any, List, Optional
 
 import config
 from services import sheets, gemini
-from services.telegram_service import (
-    send_message,
-    send_photo,
-    delete_message,
-    edit_message,
-    answer_callback_query
+from services.telegram import (
+    tg_send_message as send_message,
+    tg_send_photo as send_photo,
+    tg_answer_callback as answer_callback_query
 )
-from services.cart_service import (
-    add_to_cart,
-    get_cart,
-    clear_cart,
-    remove_from_cart,
-    get_cart_total
-)
-import database
+from services import database
 
 # Logging setup
 logging.basicConfig(
@@ -39,6 +31,57 @@ app = Flask(__name__)
 # Global data
 menu_data: List[Dict[str, Any]] = []
 user_states: Dict[int, Dict[str, Any]] = {}
+user_carts: Dict[int, List[Dict[str, Any]]] = {}  # In-memory cart storage
+
+# ============================================================================
+# CART FUNCTIONS (In-Memory)
+# ============================================================================
+
+def add_to_cart(user_id: int, item: Dict[str, Any]):
+    """Додати товар в кошик"""
+    if user_id not in user_carts:
+        user_carts[user_id] = []
+    
+    # Перевіряємо чи товар вже в кошику
+    for cart_item in user_carts[user_id]:
+        if cart_item.get('id') == item.get('id'):
+            cart_item['quantity'] = cart_item.get('quantity', 1) + 1
+            return
+    
+    # Додаємо новий товар
+    item['quantity'] = 1
+    user_carts[user_id].append(item)
+
+
+def get_cart(user_id: int) -> List[Dict[str, Any]]:
+    """Отримати кошик користувача"""
+    return user_carts.get(user_id, [])
+
+
+def clear_cart(user_id: int):
+    """Очистити кошик"""
+    if user_id in user_carts:
+        user_carts[user_id] = []
+
+
+def remove_from_cart(user_id: int, item_id: str):
+    """Видалити товар з кошика"""
+    if user_id in user_carts:
+        user_carts[user_id] = [
+            item for item in user_carts[user_id] 
+            if item.get('id') != item_id
+        ]
+
+
+def get_cart_total(user_id: int) -> float:
+    """Розрахувати загальну суму кошика"""
+    cart = get_cart(user_id)
+    total = sum(
+        item.get('price', 0) * item.get('quantity', 1) 
+        for item in cart
+    )
+    return total
+
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -147,7 +190,7 @@ def handle_start(chat_id: int, username: str):
 Оберіть дію з меню нижче 👇
 """
     
-    send_message(chat_id, welcome_message, markup=get_main_menu())
+    send_message(chat_id, welcome_message, reply_markup=get_main_menu())
     database.log_activity(chat_id, "start", {"username": username})
 
 
@@ -173,7 +216,7 @@ def handle_menu(chat_id: int):
     send_message(
         chat_id,
         message,
-        markup=get_category_menu(categories)
+        reply_markup=get_category_menu(categories)
     )
     
     set_user_state(chat_id, "selecting_category")
@@ -191,7 +234,7 @@ def handle_category(chat_id: int, category: str):
     message = f"🍽 <b>{category.upper()}</b>\n" + "─" * 30 + "\n\n"
     
     for item in items:
-        name = item.get('Назва Страви', 'Без назви')
+        name = item.get('Страви', item.get('Назва Страви', 'Без назви'))
         price = item.get('Ціна', 0)
         description = item.get('Опис', '')
         item_id = item.get('ID', '')
@@ -202,7 +245,7 @@ def handle_category(chat_id: int, category: str):
             message += f"📝 {description[:100]}...\n"
         message += "\n"
     
-    send_message(chat_id, message, markup=get_main_menu())
+    send_message(chat_id, message, reply_markup=get_main_menu())
     database.log_activity(chat_id, "view_category", {"category": category})
 
 
@@ -214,7 +257,7 @@ def handle_cart(chat_id: int):
         send_message(
             chat_id,
             "🛒 Ваш кошик порожній\n\nОберіть страви з меню 👇",
-            markup=get_main_menu()
+            reply_markup=get_main_menu()
         )
         return
     
@@ -233,7 +276,7 @@ def handle_cart(chat_id: int):
     message += "─" * 30 + "\n"
     message += f"💰 <b>Разом: {total} грн</b>"
     
-    send_message(chat_id, message, markup=get_cart_keyboard())
+    send_message(chat_id, message, reply_markup=get_cart_keyboard())
     database.log_activity(chat_id, "view_cart")
 
 
@@ -252,7 +295,7 @@ def handle_recommendations(chat_id: int):
         
         for dish_name, count in popular:
             # Знаходимо страву в меню
-            dish = next((item for item in menu_data if item.get('Назва Страви') == dish_name), None)
+            dish = next((item for item in menu_data if item.get('Страви') == dish_name or item.get('Назва Страви') == dish_name), None)
             if dish:
                 price = dish.get('Ціна', 0)
                 message += f"🔹 <b>{dish_name}</b>\n"
@@ -262,7 +305,7 @@ def handle_recommendations(chat_id: int):
         message = "⭐ <b>РЕКОМЕНДАЦІЇ</b>\n" + "─" * 30 + "\n\n"
         
         for item in menu_data[:5]:
-            name = item.get('Назва Страви', 'Без назви')
+            name = item.get('Страви', item.get('Назва Страви', 'Без назви'))
             price = item.get('Ціна', 0)
             description = item.get('Опис', '')
             
@@ -272,7 +315,7 @@ def handle_recommendations(chat_id: int):
                 message += f"   📝 {description[:80]}...\n"
             message += "\n"
     
-    send_message(chat_id, message, markup=get_main_menu())
+    send_message(chat_id, message, reply_markup=get_main_menu())
     database.log_activity(chat_id, "view_recommendations")
 
 
@@ -290,7 +333,7 @@ def handle_search(chat_id: int):
 Наприклад: "піца", "з куркою", "вегетаріанське"
 """
     
-    send_message(chat_id, message, markup={"remove_keyboard": True})
+    send_message(chat_id, message, reply_markup={"remove_keyboard": True})
     set_user_state(chat_id, "searching")
     database.log_activity(chat_id, "start_search")
 
@@ -303,7 +346,7 @@ def handle_my_orders(chat_id: int):
         send_message(
             chat_id,
             "📦 У вас поки немає замовлень\n\nОберіть страви з меню і зробіть перше замовлення! 🍽",
-            markup=get_main_menu()
+            reply_markup=get_main_menu()
         )
         return
     
@@ -328,7 +371,7 @@ def handle_my_orders(chat_id: int):
         message += f"   💰 {total} грн | 📅 {created_at[:16]}\n"
         message += f"   Статус: {status}\n\n"
     
-    send_message(chat_id, message, markup=get_main_menu())
+    send_message(chat_id, message, reply_markup=get_main_menu())
     database.log_activity(chat_id, "view_orders")
 
 
@@ -356,16 +399,17 @@ def handle_help(chat_id: int):
 📞 +380 XX XXX XX XX
 """
     
-    send_message(chat_id, help_text, markup=get_main_menu())
+    send_message(chat_id, help_text, reply_markup=get_main_menu())
     database.log_activity(chat_id, "view_help")
 
 
-def handle_checkout(chat_id: int):
+def handle_checkout(chat_id: int, callback_query_id: str = None):
     """Оформлення замовлення"""
     cart = get_cart(chat_id)
     
     if not cart:
-        answer_callback_query(request.json.get('callback_query', {}).get('id'), "🛒 Кошик порожній")
+        if callback_query_id:
+            answer_callback_query(callback_query_id, "🛒 Кошик порожній")
         return
     
     message = """
@@ -399,12 +443,12 @@ def handle_callback(callback_data: str, chat_id: int, message_id: int, callback_
     if callback_data.startswith("add_"):
         # Додати товар в кошик
         item_id = callback_data.replace("add_", "")
-        item = next((x for x in menu_data if x.get('ID') == item_id), None)
+        item = next((x for x in menu_data if str(x.get('ID')) == str(item_id)), None)
         
         if item:
             add_to_cart(chat_id, {
                 'id': item_id,
-                'name': item.get('Назва Страви', 'Без назви'),
+                'name': item.get('Страви', item.get('Назва Страви', 'Без назви')),
                 'price': item.get('Ціна', 0),
                 'quantity': 1
             })
@@ -414,7 +458,7 @@ def handle_callback(callback_data: str, chat_id: int, message_id: int, callback_
             answer_callback_query(callback_query_id, "❌ Товар не знайдено")
     
     elif callback_data == "checkout":
-        handle_checkout(chat_id)
+        handle_checkout(chat_id, callback_query_id)
         answer_callback_query(callback_query_id, "📝 Оформлення замовлення")
     
     elif callback_data == "clear_cart":
@@ -472,7 +516,7 @@ def webhook():
                 elif text == '📦 Мої замовлення':
                     handle_my_orders(chat_id)
                 elif text == '◀️ Назад':
-                    send_message(chat_id, "Головне меню:", markup=get_main_menu())
+                    send_message(chat_id, "Головне меню:", reply_markup=get_main_menu())
                     clear_user_state(chat_id)
                 
                 # Обробка станів
@@ -497,7 +541,7 @@ def webhook():
                                 response = f"🔍 <b>Знайдено {len(search_results)} страв:</b>\n\n"
                                 
                                 for item in search_results[:5]:  # Показуємо максимум 5
-                                    name = item.get('Назва Страви', 'Без назви')
+                                    name = item.get('Страви', item.get('Назва Страви', 'Без назви'))
                                     price = item.get('Ціна', 0)
                                     description = item.get('Опис', '')
                                     
@@ -507,7 +551,7 @@ def webhook():
                                         response += f"📝 {description[:100]}...\n"
                                     response += "\n"
                                 
-                                send_message(chat_id, response, markup=get_main_menu())
+                                send_message(chat_id, response, reply_markup=get_main_menu())
                                 
                                 # Додатково можна отримати AI коментар
                                 ai_comment = gemini.get_ai_response(query, menu_data)
@@ -519,7 +563,7 @@ def webhook():
                                     chat_id, 
                                     "❌ Не знайдено страв за вашим запитом 😕\n\n"
                                     "Спробуйте інше формулювання або оберіть категорію з меню.",
-                                    markup=get_main_menu()
+                                    reply_markup=get_main_menu()
                                 )
                             
                             clear_user_state(chat_id)
@@ -540,7 +584,6 @@ def webhook():
                                 total = get_cart_total(chat_id)
                                 
                                 # Генеруємо ID замовлення
-                                import time
                                 order_id = f"ORD{int(time.time())}"
                                 
                                 # Зберігаємо замовлення
@@ -572,7 +615,7 @@ def webhook():
 
 Ми зв'яжемося з вами найближчим часом!
 """
-                                    send_message(chat_id, confirmation, markup=get_main_menu())
+                                    send_message(chat_id, confirmation, reply_markup=get_main_menu())
                                     
                                     # Повідомлення оператору
                                     if config.OPERATOR_CHAT_ID:
@@ -696,4 +739,4 @@ if __name__ == '__main__':
         logger.info(f"🌐 Starting server on port {port}")
         app.run(host='0.0.0.0', port=port, debug=config.DEBUG)
     else:
-        logger.error("❌ Initialization failed. Exiting.") 
+        logger.error("❌ Initialization failed. Exiting.")

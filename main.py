@@ -616,4 +616,128 @@ def webhook():
                             if len(lines) >= 3:
                                 name = lines[0]
                                 phone = lines[1]
-         
+                                address = '\n'.join(lines[2:])
+                                
+                                cart = get_cart(chat_id)
+                                total = get_cart_total(chat_id)
+                                
+                                # Генеруємо ID замовлення
+                                order_id = f"ORD{int(time.time())}"
+                                
+                                # Зберігаємо замовлення
+                                success = database.save_order(
+                                    order_id=order_id,
+                                    user_id=chat_id,
+                                    username=username,
+                                    items=cart,
+                                    total=total,
+                                    phone=phone,
+                                    address=address,
+                                    notes=f"Name: {name}"
+                                )
+                                
+                                if success:
+                                    # Повідомлення клієнту
+                                    confirmation = f"""
+✅ <b>ЗАМОВЛЕННЯ ПРИЙНЯТО!</b>
+─────────────────────────────
+
+<b>Номер замовлення:</b> #{order_id}
+
+<b>Ваші дані:</b>
+👤 {name}
+📞 {phone}
+📍 {address}
+
+<b>Сума:</b> {total} грн
+
+Ми зв'яжемося з вами найближчим часом!
+"""
+                                    send_message(chat_id, confirmation, reply_markup=get_main_menu())
+                                    
+                                    # Повідомлення оператору
+                                    if config.OPERATOR_CHAT_ID:
+                                        operator_msg = f"""
+🆕 <b>НОВЕ ЗАМОВЛЕННЯ #{order_id}</b>
+
+👤 {name}
+📞 {phone}
+📍 {address}
+
+<b>Страви:</b>
+"""
+                                        for item in cart:
+                                            operator_msg += f"• {item['name']} x{item['quantity']} - {item['price']*item['quantity']} грн\n"
+                                        
+                                        operator_msg += f"\n💰 <b>Разом: {total} грн</b>"
+                                        
+                                        send_message(config.OPERATOR_CHAT_ID, operator_msg)
+                                    
+                                    # Очищаємо кошик
+                                    clear_cart(chat_id)
+                                    clear_user_state(chat_id)
+                                    
+                                    database.log_activity(chat_id, "order_placed", {"order_id": order_id, "total": total})
+                                else:
+                                    send_message(chat_id, "❌ Помилка збереження замовлення. Спробуйте ще раз.")
+                            else:
+                                send_message(chat_id, "❌ Неправильний формат. Спробуйте ще раз:\n\nІм'я\nТелефон\nАдреса")
+                        except Exception as e:
+                            logger.error(f"Checkout error: {e}")
+                            send_message(chat_id, "❌ Помилка оформлення. Спробуйте ще раз.")
+        
+        # Обробка callback query
+        elif 'callback_query' in update:
+            callback = update['callback_query']
+            chat_id = callback['message']['chat']['id']
+            message_id = callback['message']['message_id']
+            callback_data = callback['data']
+            callback_query_id = callback['id']
+            
+            logger.info(f"🔘 Callback: {callback_data} from {chat_id}")
+            
+            handle_callback(callback_data, chat_id, message_id, callback_query_id)
+        
+        return jsonify({"ok": True}), 200
+        
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ============================================================================
+# ROUTES
+# ============================================================================
+
+@app.route('/')
+def index():
+    """Health check"""
+    return jsonify({
+        "status": "ok",
+        "bot": "Hubsy Bot",
+        "version": "3.2.0"
+    })
+
+
+@app.route('/health')
+def health():
+    """Детальна перевірка здоров'я"""
+    db_ok, db_info = database.test_connection()
+    gemini_ok = gemini.test_gemini_connection()
+    
+    return jsonify({
+        "status": "healthy" if db_ok else "degraded",
+        "database": db_info,
+        "gemini": "ok" if gemini_ok else "unavailable",
+        "menu_items": len(menu_data)
+    })
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', config.PORT))
+    logger.info(f"🌐 Starting server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=config.DEBUG)

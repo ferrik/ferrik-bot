@@ -31,7 +31,42 @@ app = Flask(__name__)
 # Global data
 menu_data: List[Dict[str, Any]] = []
 user_states: Dict[int, Dict[str, Any]] = {}
-user_carts: Dict[int, List[Dict[str, Any]]] = {}  # In-memory cart storage
+user_carts: Dict[int, List[Dict[str, Any]]] = {}
+
+# ============================================================================
+# STARTUP - Ініціалізація при завантаженні модуля
+# ============================================================================
+
+def initialize():
+    """Ініціалізація при старті"""
+    global menu_data
+    
+    logger.info("🚀 Starting Hubsy Bot v3.2.0...")
+    
+    # Ініціалізація бази даних
+    if not database.init_database():
+        logger.error("❌ Database initialization failed")
+        return False
+    
+    logger.info("✅ Database initialized")
+    
+    # Завантаження меню
+    try:
+        menu_data = sheets.load_menu()
+        if menu_data:
+            logger.info(f"✅ Menu loaded: {len(menu_data)} items")
+        else:
+            logger.warning("⚠️ Menu is empty")
+    except Exception as e:
+        logger.error(f"❌ Menu loading failed: {e}")
+    
+    # Тест Gemini
+    gemini.test_gemini_connection()
+    
+    return True
+
+# Викликаємо ініціалізацію при завантаженні модуля
+initialize()
 
 # ============================================================================
 # CART FUNCTIONS (In-Memory)
@@ -695,48 +730,42 @@ def health():
     })
 
 
+# Ініціалізація при завантаженні модуля (для gunicorn)
 def initialize():
     """Ініціалізація при старті"""
     global menu_data
     
-    logger.info("🚀 Starting Hubsy Bot v3.2.0 with Enhanced UX...")
+    logger.info("🚀 Initializing Hubsy Bot v3.2.0...")
     
     # Ініціалізація бази даних
-    if not database.init_database():
-        logger.error("❌ Database initialization failed")
-        return False
+    try:
+        if database.init_database():
+            logger.info("✅ Database initialized")
+        else:
+            logger.error("❌ Database initialization failed")
+    except Exception as e:
+        logger.error(f"❌ Database init error: {e}")
     
     # Завантаження меню
     try:
         menu_data = sheets.load_menu()
         if menu_data:
             logger.info(f"✅ Menu loaded: {len(menu_data)} items")
-            
-            # Надсилаємо меню оператору при старті
-            if config.OPERATOR_CHAT_ID:
-                menu_preview = "📋 <b>НАШЕ МЕНЮ</b>\n" + "─" * 30 + "\n\n"
-                categories = list(set(item.get('Категорія', 'Інше') for item in menu_data[:10]))
-                menu_preview += f"Категорій: {len(categories)}\n"
-                menu_preview += f"Всього страв: {len(menu_data)}\n\n"
-                menu_preview += "Бот готовий до роботи! ✅"
-                
-                logger.info(f"📤 Sending to {config.OPERATOR_CHAT_ID}: {menu_preview[:100]}...")
-                send_message(config.OPERATOR_CHAT_ID, menu_preview)
         else:
             logger.warning("⚠️ Menu is empty")
     except Exception as e:
         logger.error(f"❌ Menu loading failed: {e}")
     
     # Тест Gemini
-    gemini.test_gemini_connection()
-    
-    return True
+    try:
+        gemini.test_gemini_connection()
+    except Exception as e:
+        logger.error(f"❌ Gemini test failed: {e}")
 
+# Викликаємо ініціалізацію
+initialize()
 
 if __name__ == '__main__':
-    if initialize():
-        port = int(os.environ.get('PORT', config.PORT))
-        logger.info(f"🌐 Starting server on port {port}")
-        app.run(host='0.0.0.0', port=port, debug=config.DEBUG)
-    else:
-        logger.error("❌ Initialization failed. Exiting.")
+    port = int(os.environ.get('PORT', config.PORT))
+    logger.info(f"🌐 Starting server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=config.DEBUG)

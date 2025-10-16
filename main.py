@@ -598,4 +598,102 @@ def webhook():
                                     
                                     database.log_activity(chat_id, "order_placed", {"order_id": order_id, "total": total})
                                 else:
-                                    send_mes
+                                    send_message(chat_id, "❌ Помилка збереження замовлення. Спробуйте ще раз.")
+                            else:
+                                send_message(chat_id, "❌ Неправильний формат. Спробуйте ще раз:\n\nІм'я\nТелефон\nАдреса")
+                        except Exception as e:
+                            logger.error(f"Checkout error: {e}")
+                            send_message(chat_id, "❌ Помилка оформлення. Спробуйте ще раз.")
+        
+        # Обробка callback query
+        elif 'callback_query' in update:
+            callback = update['callback_query']
+            chat_id = callback['message']['chat']['id']
+            message_id = callback['message']['message_id']
+            callback_data = callback['data']
+            callback_query_id = callback['id']
+            
+            logger.info(f"🔘 Callback: {callback_data} from {chat_id}")
+            
+            handle_callback(callback_data, chat_id, message_id, callback_query_id)
+        
+        return jsonify({"ok": True}), 200
+        
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ============================================================================
+# STARTUP
+# ============================================================================
+
+@app.route('/')
+def index():
+    """Health check"""
+    return jsonify({
+        "status": "ok",
+        "bot": "Hubsy Bot",
+        "version": "3.2.0"
+    })
+
+
+@app.route('/health')
+def health():
+    """Детальна перевірка здоров'я"""
+    db_ok, db_info = database.test_connection()
+    gemini_ok = gemini.test_gemini_connection()
+    
+    return jsonify({
+        "status": "healthy" if db_ok else "degraded",
+        "database": db_info,
+        "gemini": "ok" if gemini_ok else "unavailable",
+        "menu_items": len(menu_data)
+    })
+
+
+def initialize():
+    """Ініціалізація при старті"""
+    global menu_data
+    
+    logger.info("🚀 Starting Hubsy Bot v3.2.0 with Enhanced UX...")
+    
+    # Ініціалізація бази даних
+    if not database.init_database():
+        logger.error("❌ Database initialization failed")
+        return False
+    
+    # Завантаження меню
+    try:
+        menu_data = sheets.load_menu()
+        if menu_data:
+            logger.info(f"✅ Menu loaded: {len(menu_data)} items")
+            
+            # Надсилаємо меню оператору при старті
+            if config.OPERATOR_CHAT_ID:
+                menu_preview = "📋 <b>НАШЕ МЕНЮ</b>\n" + "─" * 30 + "\n\n"
+                categories = list(set(item.get('Категорія', 'Інше') for item in menu_data[:10]))
+                menu_preview += f"Категорій: {len(categories)}\n"
+                menu_preview += f"Всього страв: {len(menu_data)}\n\n"
+                menu_preview += "Бот готовий до роботи! ✅"
+                
+                logger.info(f"📤 Sending to {config.OPERATOR_CHAT_ID}: {menu_preview[:100]}...")
+                send_message(config.OPERATOR_CHAT_ID, menu_preview)
+        else:
+            logger.warning("⚠️ Menu is empty")
+    except Exception as e:
+        logger.error(f"❌ Menu loading failed: {e}")
+    
+    # Тест Gemini
+    gemini.test_gemini_connection()
+    
+    return True
+
+
+if __name__ == '__main__':
+    if initialize():
+        port = int(os.environ.get('PORT', config.PORT))
+        logger.info(f"🌐 Starting server on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=config.DEBUG)
+    else:
+        logger.error("❌ Initialization failed. Exiting.")

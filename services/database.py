@@ -244,19 +244,6 @@ def cleanup_old_data(days=90):
         with db_lock:
             with get_db() as conn:
                 cursor = conn.cursor()
-
-def test_connection():
-    """Перевірка з'єднання з базою даних при старті"""
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            result = cursor.fetchone()
-            if result:
-                return True, f"sqlite://{DB_PATH}"
-            return False, "No result from test query"
-    except Exception as e:
-        return False, str(e)
                 
                 # Видаляємо старі активності
                 cursor.execute("""
@@ -277,3 +264,16 @@ def test_connection():
                 
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
+
+def test_connection():
+    """Перевірка з'єднання з базою даних при старті"""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            if result:
+                return True, f"sqlite://{DB_PATH}"
+            return False, "No result from test query"
+    except Exception as e:
+        return False, str(e)

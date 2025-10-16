@@ -640,4 +640,224 @@ def handle_address(chat_id, address):
     except Exception as e:
         logger.error(f"Error in handle_address: {e}", exc_info=True)
 
-def confirm_order(chat_id 
+def confirm_order(chat_id):
+    """Підтвердження замовлення"""
+    try:
+        with user_carts_lock:
+            cart = user_carts.get(chat_id, {})
+        
+        if not cart:
+            send_msg(chat_id, "❌ Кошик порожній")
+            return
+        
+        phone = get_state_data(chat_id, 'phone', 'N/A')
+        address = get_state_data(chat_id, 'address', 'N/A')
+        
+        total = 0.0
+        items = []
+        
+        for name, qty in cart.items():
+            item = find_item_by_name(name)
+            if item:
+                try:
+                    price = float(str(item.get('Ціна', 0)).replace(',', '.'))
+                    total += price * qty
+                    items.append({"name": name, "quantity": qty, "price": price})
+                except:
+                    pass
+        
+        order_id = str(uuid.uuid4())[:8].upper()
+        
+        db_service.save_order(order_id, chat_id, None, items, f"{total:.2f}", phone, address, "")
+        
+        text = (
+            "🎉 <b>ЗАМОВЛЕННЯ ПРИЙНЯТО!</b>\n\n"
+            f"✅ ID: <code>{order_id}</code>\n\n"
+            f"💳 До оплати: {total:.2f} ₴\n\n"
+            "🚚 Доставка за 30-45 хв\n"
+            "📱 Оператор скоро зв'яжеться\n\n"
+            "🙏 Дякуємо! Приємного апетиту! 😋"
+        )
+        
+        with user_carts_lock:
+            user_carts[chat_id] = {}
+        
+        clear_state(chat_id)
+        send_msg(chat_id, text, kb_main())
+        
+        # Notify admin
+        try:
+            admin_id = int(os.getenv('ADMIN_TELEGRAM_ID', 0))
+            if admin_id:
+                admin_text = f"🆕 <b>Нове замовлення!</b>\n\nID: {order_id}\n👤 User: {chat_id}\n💰 Сума: {total:.2f} ₴\n📞 {phone}\n📍 {address}"
+                send_msg(admin_id, admin_text)
+        except:
+            pass
+            
+    except Exception as e:
+        logger.error(f"Error in confirm_order: {e}", exc_info=True)
+        send_msg(chat_id, "❌ Помилка оформлення")
+
+# =============================================================================
+# WEBHOOK
+# =============================================================================
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Webhook для Telegram"""
+    try:
+        data = request.get_json()
+        if not data:
+            logger.warning("Empty webhook request")
+            return jsonify({"ok": False})
+        
+        update_id = data.get('update_id', 'unknown')
+        logger.info(f"📥 Webhook: {update_id}")
+        
+        if 'message' in data:
+            msg = data['message']
+            chat_id = msg['chat']['id']
+            text = msg.get('text', '').strip()
+            first_name = msg['chat'].get('first_name', 'User')
+            
+            logger.info(f"📨 Message from {chat_id} ({first_name}): {text[:50]}")
+            
+            try:
+                # Обробка контакту
+                if 'contact' in msg:
+                    contact = msg['contact']
+                    phone = contact['phone_number']
+                    handle_phone(chat_id, phone)
+                
+                # Команди
+                elif text == '/start':
+                    handle_start(chat_id, first_name)
+                elif text == '📋 Меню':
+                    handle_menu(chat_id)
+                elif text == '👤 Профіль':
+                    handle_profile(chat_id)
+                elif text == '⭐ Рекомендації':
+                    handle_recommendations(chat_id)
+                elif text == '🛒 Кошик':
+                    handle_cart(chat_id)
+                elif text == '🆘 Допомога':
+                    handle_help(chat_id)
+                elif text == '🔍 Пошук':
+                    handle_search(chat_id)
+                elif text == '✅ Оформити':
+                    start_checkout(chat_id)
+                elif text == '✅ Підтвердити':
+                    confirm_order(chat_id)
+                elif text == '🗑️ Очистити':
+                    with user_carts_lock:
+                        user_carts[chat_id] = {}
+                    send_msg(chat_id, "🗑️ Кошик очищено ✨", kb_main())
+                elif text in ['📋 Продовжити покупки', '❌ Скасувати']:
+                    handle_start(chat_id)
+                
+                # Обробка станів
+                else:
+                    state = user_states.get(chat_id, State.MAIN_MENU)
+                    
+                    if state == State.CHECKOUT_ADDRESS:
+                        handle_address(chat_id, text)
+                    elif state == State.SEARCHING and AI_ENABLED:
+                        try:
+                            menu = get_menu()
+                            menu_text = "\n".join([f"• {item.get('Назва Страви', '')} ({item.get('Ціна', '')} ₴)" for item in menu[:20]])
+                            response = ai_service.ask_gemini(f"Користувач шукає: {text}\n\nМеню:\n{menu_text}\n\nПорадь 2-3 страви.")
+                            send_msg(chat_id, f"🔍 <b>Результати:</b>\n\n{response}", kb_main())
+                        except Exception as search_err:
+                            logger.error(f"Search error: {search_err}")
+                            send_msg(chat_id, "❌ Помилка пошуку 😕", kb_main())
+                    else:
+                        send_msg(chat_id, random_error(), kb_main())
+                        
+            except Exception as handler_err:
+                logger.error(f"❌ Handler error: {handler_err}", exc_info=True)
+                try:
+                    send_msg(chat_id, "❌ Сталася помилка. Спробуйте /start", kb_main())
+                except:
+                    pass
+                
+                # Notify admin
+                try:
+                    admin_id = int(os.getenv('ADMIN_TELEGRAM_ID', 0))
+                    if admin_id:
+                        error_text = f"🚨 <b>Помилка</b>\n\n👤 User: {chat_id}\n📝 Text: {text[:100]}\n\n❌ Error: {str(handler_err)[:200]}"
+                        send_msg(admin_id, error_text)
+                except:
+                    logger.error("Failed to notify admin")
+        
+        elif 'callback_query' in data:
+            cb = data['callback_query']
+            chat_id = cb['from']['id']
+            cb_data = cb.get('data', '')
+            cb_id = cb.get('id', '')
+            
+            logger.info(f"🔘 Callback from {chat_id}: {cb_data}")
+            
+            try:
+                if cb_data == 'back':
+                    handle_menu(chat_id)
+                elif cb_data == 'back_cat':
+                    handle_menu(chat_id)
+                elif cb_data == 'noop':
+                    pass
+                elif cb_data == 'cart':
+                    handle_cart(chat_id)
+                elif cb_data == 'menu':
+                    handle_menu(chat_id)
+                elif cb_data.startswith('cat:'):
+                    category = cb_data[4:]
+                    show_item(chat_id, category, 0)
+                elif cb_data.startswith('add:'):
+                    item_name = cb_data[4:]
+                    add_to_cart(chat_id, item_name)
+                elif cb_data.startswith('item:'):
+                    parts = cb_data[5:].split(':')
+                    if len(parts) == 2:
+                        category = parts[0]
+                        try:
+                            index = int(parts[1])
+                            show_item(chat_id, category, index)
+                        except ValueError:
+                            logger.error(f"Invalid index: {parts[1]}")
+                else:
+                    logger.warning(f"Unknown callback: {cb_data}")
+                    
+            except Exception as cb_err:
+                logger.error(f"❌ Callback error: {cb_err}", exc_info=True)
+                try:
+                    tg_service.tg_answer_callback(cb_id, "❌ Помилка", show_alert=True)
+                except:
+                    pass
+        
+        return jsonify({"ok": True})
+        
+    except Exception as webhook_err:
+        logger.error(f"❌ WEBHOOK ERROR: {webhook_err}", exc_info=True)
+        return jsonify({"ok": False, "error": str(webhook_err)})
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check"""
+    return jsonify({"status": "ok", "bot": "Hubsy v3.2"})
+
+@app.route('/', methods=['GET'])
+def index():
+    """Index page"""
+    return jsonify({
+        "name": "Hubsy Bot",
+        "version": "3.2.0",
+        "status": "running"
+    })
+
+# =============================================================================
+# ЗАПУСК
+# =============================================================================
+
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 5000))
+    logger.info(f"🌐 Starting Hubsy Bot on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)

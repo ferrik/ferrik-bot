@@ -127,7 +127,21 @@ def get_menu_from_sheet() -> List[Dict[str, Any]]:
         logger.info(f"📊 Loaded {len(raw_menu)} raw items from sheet")
         
         # КРИТИЧНО: Нормалізуємо поля через config.normalize_menu_list
-        normalized_menu = raw_menu
+        # Замість normalize_menu_list(raw_menu):
+normalized_menu = []
+for item in raw_menu:
+    # Перевіряємо чи активний
+    if item.get('Активний', '').lower() in ['так', 'yes', 'true', '1']:
+        # Конвертуємо ціну
+        try:
+            item['Ціна'] = float(item.get('Ціна', 0))
+        except:
+            item['Ціна'] = 0
+        
+        normalized_menu.append(item)
+
+logger.info(f"✅ Menu normalized: {len(normalized_menu)} items")
+return normalized_menu
         
         logger.info(f"✅ Menu normalized: {len(normalized_menu)} items")
         return normalized_menu

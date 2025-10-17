@@ -6,6 +6,7 @@ Gemini AI Service
 - Санітизація user input
 - Кращa обробка помилок
 - Fallback механізм
+- Використання GEMINI_MODEL_NAME з environment variables
 """
 
 import logging
@@ -17,8 +18,12 @@ from utils.html_formatter import sanitize_user_input
 
 logger = logging.getLogger(__name__)
 
-# Gemini API endpoint
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+# Gemini API endpoint - використовує модель зі змінної середовища
+GEMINI_MODEL = getattr(config, 'GEMINI_MODEL_NAME', 'gemini-1.5-flash')
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+logger.info(f"🤖 Using Gemini model: {GEMINI_MODEL}")
+
 
 def get_ai_response(query: str, menu: List[Dict[str, Any]]) -> Optional[str]:
     """
@@ -44,7 +49,7 @@ def get_ai_response(query: str, menu: List[Dict[str, Any]]) -> Optional[str]:
     try:
         # Формуємо prompt
         menu_text = "\n".join([
-            f"- {item.get('Назва Страви', 'N/A')}: {item.get('Опис', 'Без опису')}"
+            f"- {item.get('Страви', item.get('Назва Страви', 'N/A'))}: {item.get('Опис', 'Без опису')}"
             for item in menu[:50]  # Обмежуємо кількість для context
         ])
         
@@ -117,7 +122,7 @@ def search_menu(query: str, menu: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     
     # Спочатку пробуємо простий пошук (завжди працює)
     for item in menu:
-        name = (item.get('Назва Страви', '') or '').lower()
+        name = (item.get('Страви', '') or item.get('Назва Страви', '') or '').lower()
         description = (item.get('Опис', '') or '').lower()
         category = (item.get('Категорія', '') or '').lower()
         
@@ -169,7 +174,7 @@ def extract_items_from_ai_response(ai_text: str, menu: List[Dict[str, Any]]) -> 
     
     # Шукаємо згадки страв з меню в AI відповіді
     for item in menu:
-        name = (item.get('Назва Страви', '') or '').lower()
+        name = (item.get('Страви', '') or item.get('Назва Страви', '') or '').lower()
         
         if name and name in ai_text_lower:
             results.append(item)
@@ -196,7 +201,7 @@ def get_ai_recommendation(user_preferences: Dict[str, Any], menu: List[Dict[str,
         prefs_text = ", ".join([f"{k}: {v}" for k, v in user_preferences.items()])
         
         menu_text = "\n".join([
-            f"- {item.get('Назва Страви')}: {item.get('Опис', 'Без опису')}"
+            f"- {item.get('Страви', item.get('Назва Страви', 'N/A'))}: {item.get('Опис', 'Без опису')}"
             for item in menu[:30]
         ])
         
@@ -244,7 +249,7 @@ def test_gemini_connection() -> bool:
         True якщо API доступний
     """
     if not config.GEMINI_API_KEY:
-        logger.warning("Gemini API key not configured")
+        logger.warning("⚠️  Gemini API key not configured")
         return False
     
     try:
@@ -263,10 +268,11 @@ def test_gemini_connection() -> bool:
         )
         
         if response.status_code == 200:
-            logger.info("✅ Gemini API connection OK")
+            logger.info(f"✅ Gemini API connection OK (model: {GEMINI_MODEL})")
             return True
         else:
             logger.error(f"❌ Gemini API returned {response.status_code}")
+            logger.error(f"Response: {response.text}")
             return False
             
     except Exception as e:

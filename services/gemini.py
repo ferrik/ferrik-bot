@@ -18,7 +18,7 @@ from utils.html_formatter import sanitize_user_input
 logger = logging.getLogger(__name__)
 
 # Gemini API endpoint
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
 
 def get_ai_response(query: str, menu: List[Dict[str, Any]]) -> Optional[str]:
     """

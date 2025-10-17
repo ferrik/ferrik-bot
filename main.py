@@ -238,15 +238,33 @@ def handle_menu(chat_id: int):
         send_message(chat_id, "❌ Меню тимчасово недоступне. Спробуйте пізніше.")
         return
     
-    # Отримуємо унікальні категорії
-    categories = list(set(
-        item.get('Категорія', 'Інше') 
-        for item in menu_data 
-        if item.get('Категорія')
-    ))
+    # Debug: подивимося що в меню
+    logger.info(f"Menu data sample: {menu_data[0] if menu_data else 'empty'}")
     
+    # Отримуємо унікальні категорії - з fallback
+    categories = []
+    for item in menu_data:
+        cat = item.get('Категорія') or item.get('категорія') or item.get('Category') or 'Інше'
+        if cat and cat not in categories:
+            categories.append(cat)
+    
+    # Якщо немає категорій - показуємо всі страви
     if not categories:
-        send_message(chat_id, "❌ Категорії не знайдено")
+        logger.warning("No categories found, showing all items")
+        message = "🍽 <b>НАШЕ МЕНЮ</b>\n" + "─" * 30 + "\n\n"
+        
+        for item in menu_data:
+            name = item.get('Страви', item.get('Назва Страви', 'Без назви'))
+            price = item.get('Ціна', 0)
+            description = item.get('Опис', '')
+            
+            message += f"🔹 <b>{name}</b>\n"
+            message += f"💰 {price} грн\n"
+            if description:
+                message += f"📝 {description[:100]}...\n"
+            message += "\n"
+        
+        send_message(chat_id, message, reply_markup=get_main_menu())
         return
     
     message = "📋 <b>НАШЕ МЕНЮ</b>\n" + "─" * 30 + "\n\nОберіть категорію:"

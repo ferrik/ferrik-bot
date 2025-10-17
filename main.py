@@ -54,7 +54,7 @@ def initialize():
     
     # Завантаження меню
     try:
-        menu_data = sheets.load_menu()
+        menu_data = sheets.get_menu_from_sheet()
         if menu_data:
             logger.info(f"✅ Menu loaded: {len(menu_data)} items")
         else:

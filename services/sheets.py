@@ -127,7 +127,7 @@ def get_menu_from_sheet() -> List[Dict[str, Any]]:
         logger.info(f"📊 Loaded {len(raw_menu)} raw items from sheet")
         
         # КРИТИЧНО: Нормалізуємо поля через config.normalize_menu_list
-        normalized_menu = normalize_menu_list(raw_menu)
+        normalized_menu = raw_menu
         
         logger.info(f"✅ Menu normalized: {len(normalized_menu)} items")
         return normalized_menu

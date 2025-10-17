@@ -15,7 +15,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 import config
-from config import normalize_menu_list, create_legacy_compatible_item
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,6 @@ def get_sheets_service():
     
     try:
         # Парсимо credentials з JSON
-        # ВИПРАВЛЕННЯ: Использувати GOOGLE_CREDENTIALS замість GOOGLE_CREDENTIALS_JSON
         creds_json = config.GOOGLE_CREDENTIALS or os.getenv('GOOGLE_CREDENTIALS', '')
         
         if not creds_json:
@@ -82,10 +80,10 @@ def get_menu_from_sheet() -> List[Dict[str, Any]]:
         service = get_sheets_service()
         sheet = service.spreadsheets()
         
-        # Читаємо заголовки (перший рядок) - листа називається "Меню"
+        # Читаємо заголовки (перший рядок)
         headers_result = sheet.values().get(
             spreadsheetId=config.GOOGLE_SHEET_ID,
-            range='Меню!A1:L1'  # ВИПРАВЛЕННЯ: Українське ім'я листа
+            range='Меню!A1:L1'
         ).execute()
         
         headers = headers_result.get('values', [[]])[0]
@@ -126,24 +124,36 @@ def get_menu_from_sheet() -> List[Dict[str, Any]]:
         
         logger.info(f"📊 Loaded {len(raw_menu)} raw items from sheet")
         
-        # КРИТИЧНО: Нормалізуємо поля через config.normalize_menu_list
-        # Замість normalize_menu_list(raw_menu):
-normalized_menu = []
-for item in raw_menu:
-    # Перевіряємо чи активний
-    if item.get('Активний', '').lower() in ['так', 'yes', 'true', '1']:
-        # Конвертуємо ціну
-        try:
-            item['Ціна'] = float(item.get('Ціна', 0))
-        except:
-            item['Ціна'] = 0
-        
-        normalized_menu.append(item)
-
-logger.info(f"✅ Menu normalized: {len(normalized_menu)} items")
-return normalized_menu
+        # Нормалізуємо меню
+        normalized_menu = []
+        for item in raw_menu:
+            # Перевіряємо чи активний (так/Так/yes/true/1)
+            is_active = item.get('Активний', '').lower() in ['так', 'yes', 'true', '1']
+            
+            if is_active:
+                # Конвертуємо ціну в число
+                try:
+                    price_str = str(item.get('Ціна', '0')).strip()
+                    item['Ціна'] = float(price_str) if price_str else 0.0
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid price for {item.get('Страви')}: {item.get('Ціна')}")
+                    item['Ціна'] = 0.0
+                
+                # Конвертуємо рейтинг
+                try:
+                    rating_str = str(item.get('Рейтинг', '0')).replace(',', '.').strip()
+                    item['Рейтинг'] = float(rating_str) if rating_str else 0.0
+                except (ValueError, TypeError):
+                    item['Рейтинг'] = 0.0
+                
+                normalized_menu.append(item)
         
         logger.info(f"✅ Menu normalized: {len(normalized_menu)} items")
+        
+        # Debug: показуємо перший елемент
+        if normalized_menu:
+            logger.info(f"📋 First item: {normalized_menu[0]}")
+        
         return normalized_menu
         
     except HttpError as e:
@@ -175,12 +185,12 @@ def save_order_to_sheets(order_id: str, user_id: int, cart: Dict, contact_info: 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # Конвертуємо cart в JSON
-        cart_json = json.dumps(cart)
+        cart_json = json.dumps(cart, ensure_ascii=False)
         
         # Розраховуємо суму
         total_amount = sum(
-            float(item.get('price', 0)) * int(qty)
-            for item, qty in cart.items()
+            float(item.get('price', 0)) * int(item.get('quantity', 1))
+            for item in cart
         )
         
         # Готуємо row для запису

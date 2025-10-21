@@ -766,6 +766,54 @@ def health():
         "menu_items": len(menu_data)
     })
 
+@app.route('/sync-menu', methods=['POST'])
+def sync_menu():
+    """Ручна синхронізація меню з Google Sheets"""
+    try:
+        global menu_data
+        
+        if database.USE_POSTGRES:
+            # Синхронізуємо
+            if database.sync_menu_from_sheets():
+                # Перезавантажуємо меню
+                menu_data = database.get_menu_from_postgres()
+                return jsonify({
+                    "status": "success",
+                    "message": f"Menu synced: {len(menu_data)} items"
+                }), 200
+            else:
+                return jsonify({
+                    "status": "error",
+                    "message": "Sync failed"
+                }), 500
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Not using PostgreSQL"
+            }), 400
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+```
+
+## 🚀 Крок 4: Деплой
+
+1. ✅ Переконайтеся що `psycopg2-binary==2.9.9` є в `requirements.txt`
+2. ✅ Додайте `DATABASE_URL` в Environment Variables
+3. ✅ Задеплойте
+
+## 📊 Після деплою побачите в логах:
+```
+🐘 Using PostgreSQL for menu storage
+📥 Syncing menu from Google Sheets...
+✅ Synced 4/4 menu items to PostgreSQL
+📊 Loaded 4 items from PostgreSQL
+✅ Menu loaded: 4 items
+📋 First item: Маргарита
+
 
 # ============================================================================
 # MAIN

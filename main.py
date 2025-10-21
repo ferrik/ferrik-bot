@@ -54,9 +54,28 @@ def initialize():
     
     # Завантаження меню
     try:
-        menu_data = sheets.get_menu_from_sheet()
+        if database.USE_POSTGRES:
+            # PostgreSQL: синхронізуємо з Sheets, потім читаємо з БД
+            logger.info("🐘 Using PostgreSQL for menu storage")
+            
+            # Синхронізуємо меню з Google Sheets
+            if database.sync_menu_from_sheets():
+                # Читаємо з PostgreSQL
+                menu_data = database.get_menu_from_postgres()
+            else:
+                # Fallback: читаємо з Sheets якщо синхронізація не вдалася
+                logger.warning("⚠️ Sync failed, reading from Sheets")
+                menu_data = sheets.get_menu_from_sheet()
+        else:
+            # SQLite: читаємо напряму з Sheets
+            logger.info("📁 Using Google Sheets for menu")
+            menu_data = sheets.get_menu_from_sheet()
+        
         if menu_data:
             logger.info(f"✅ Menu loaded: {len(menu_data)} items")
+            # Debug: показуємо перший елемент
+            if menu_data:
+                logger.info(f"📋 First item: {menu_data[0].get('Страви', 'N/A')}")
         else:
             logger.warning("⚠️ Menu is empty")
     except Exception as e:
@@ -67,10 +86,7 @@ def initialize():
         gemini.test_gemini_connection()
     except Exception as e:
         logger.error(f"❌ Gemini test failed: {e}")
-
-# Викликаємо ініціалізацію при завантаженні модуля
-initialize()
-
+        
 # ============================================================================
 # CART FUNCTIONS (In-Memory)
 # ============================================================================

@@ -122,6 +122,19 @@ def tg_answer_callback(callback_id, text, show_alert=False):
         logger.error(f"❌ Answer callback error: {e}")
         return None
 
+def tg_edit_message(chat_id, message_id, text=None, reply_markup=None):
+    """Редагування повідомлення"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup"
+        payload = {"chat_id": chat_id, "message_id": message_id}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup if isinstance(reply_markup, dict) else json.loads(reply_markup)
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        logger.error(f"Edit error: {e}")
+        return None
+        
 def tg_set_webhook(url):
     """Встановлення webhook з secret_token"""
     try:

@@ -414,6 +414,126 @@ def cleanup_old_data(days=90):
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
 
+def sync_menu_from_sheets():
+    """Синхронізує меню з Google Sheets в PostgreSQL"""
+    if not USE_POSTGRES:
+        logger.info("Skipping menu sync - not using PostgreSQL")
+        return False
+    
+    try:
+        from services.sheets import get_menu_from_sheet
+        
+        logger.info("📥 Syncing menu from Google Sheets...")
+        menu_items = get_menu_from_sheet()
+        
+        with db_lock:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                
+                # Створюємо таблицю якщо не існує
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS menu (
+                        id TEXT PRIMARY KEY,
+                        category TEXT,
+                        name TEXT NOT NULL,
+                        description TEXT,
+                        price DECIMAL(10,2),
+                        restaurant TEXT,
+                        delivery_time INTEGER,
+                        photo_url TEXT,
+                        is_active BOOLEAN DEFAULT true,
+                        prep_time INTEGER,
+                        allergens TEXT,
+                        rating DECIMAL(3,1),
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Вставляємо/оновлюємо кожен елемент
+                synced = 0
+                for item in menu_items:
+                    try:
+                        cursor.execute("""
+                            INSERT INTO menu (
+                                id, category, name, description, price, 
+                                restaurant, delivery_time, photo_url, is_active,
+                                prep_time, allergens, rating
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (id) DO UPDATE SET
+                                category = EXCLUDED.category,
+                                name = EXCLUDED.name,
+                                description = EXCLUDED.description,
+                                price = EXCLUDED.price,
+                                restaurant = EXCLUDED.restaurant,
+                                delivery_time = EXCLUDED.delivery_time,
+                                photo_url = EXCLUDED.photo_url,
+                                is_active = EXCLUDED.is_active,
+                                prep_time = EXCLUDED.prep_time,
+                                allergens = EXCLUDED.allergens,
+                                rating = EXCLUDED.rating,
+                                updated_at = CURRENT_TIMESTAMP
+                        """, (
+                            item.get('ID'),
+                            item.get('Категорія'),
+                            item.get('Страви'),
+                            item.get('Опис'),
+                            item.get('Ціна', 0),
+                            item.get('Ресторан'),
+                            int(str(item.get('Час Доставки (хв)', 0) or 0)),
+                            item.get('Фото URL'),
+                            True,
+                            int(str(item.get('Час_приготування', 0) or 0)),
+                            item.get('Аллергени'),
+                            float(str(item.get('Рейтинг', 0) or 0).replace(',', '.'))
+                        ))
+                        synced += 1
+                    except Exception as e:
+                        logger.error(f"Error syncing item {item.get('ID')}: {e}")
+                
+                conn.commit()
+                logger.info(f"✅ Synced {synced}/{len(menu_items)} menu items to PostgreSQL")
+                return True
+                
+    except Exception as e:
+        logger.error(f"❌ Menu sync error: {e}", exc_info=True)
+        return False
+
+
+def get_menu_from_postgres() -> List[Dict[str, Any]]:
+    """Читає меню з PostgreSQL"""
+    if not USE_POSTGRES:
+        logger.warning("Not using PostgreSQL, returning empty menu")
+        return []
+    
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("""
+                SELECT 
+                    id as "ID",
+                    category as "Категорія",
+                    name as "Страви",
+                    description as "Опис",
+                    price as "Ціна",
+                    restaurant as "Ресторан",
+                    delivery_time as "Час Доставки (хв)",
+                    photo_url as "Фото URL",
+                    is_active as "Активний",
+                    prep_time as "Час_приготування",
+                    allergens as "Аллергени",
+                    rating as "Рейтинг"
+                FROM menu
+                WHERE is_active = true
+                ORDER BY category, name
+            """)
+            
+            menu = [dict(row) for row in cursor.fetchall()]
+            logger.info(f"📊 Loaded {len(menu)} items from PostgreSQL")
+            return menu
+            
+    except Exception as e:
+        logger.error(f"❌ Error loading menu from PostgreSQL: {e}")
+        return []
 
 def test_connection():
     """Перевірка з'єднання з базою даних при старті"""

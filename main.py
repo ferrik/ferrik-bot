@@ -398,4 +398,54 @@ def webhook():
                 elif user_data.get("state") == "checkout_phone":
                     profile = database.get_user_profile(chat_id)
                     if profile:
-                        
+                        database.save_user_profile(chat_id, username, profile.get('full_name'), phone)
+                    else:
+                        database.save_user_profile(chat_id, username, username, phone)
+                    send_message(chat_id, "✅ Номер збережено!\n\nВведіть адресу:", reply_markup=get_location_keyboard())
+                    set_user_state(chat_id, "checkout_address")
+            
+            if 'location' in msg:
+                user_data = get_user_state(chat_id)
+                
+                if user_data.get("state") == "checkout_address":
+                    lat = msg['location']['latitude']
+                    lon = msg['location']['longitude']
+                    address = f"📍 {lat:.6f}, {lon:.6f}"
+                    
+                    send_message(chat_id, f"📍 Локація отримана!\n\nПідтвердіть або уточніть адресу:", reply_markup={"remove_keyboard": True})
+                    set_user_state(chat_id, "checkout_confirm", {"latitude": lat, "longitude": lon, "address": address})
+        
+        elif 'callback_query' in update:
+            cb = update['callback_query']
+            handle_callback(cb['data'], cb['message']['chat']['id'], cb['message']['message_id'], cb['id'])
+        
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return jsonify({"ok": False}), 500
+
+@app.route('/')
+def index():
+    return jsonify({"status": "ok", "bot": "Hubsy Bot", "version": "3.3.0"})
+
+@app.route('/health')
+def health():
+    db_ok, db_info = database.test_connection()
+    return jsonify({"status": "healthy" if db_ok else "degraded", "database": db_info, "menu_items": len(menu_data)})
+
+@app.route('/sync-menu', methods=['POST'])
+def sync_menu():
+    global menu_data
+    try:
+        if database.USE_POSTGRES:
+            if database.sync_menu_from_sheets():
+                menu_data = database.get_menu_from_postgres()
+                return jsonify({"status": "success", "message": f"Synced: {len(menu_data)} items"}), 200
+            return jsonify({"status": "error", "message": "Sync failed"}), 500
+        return jsonify({"status": "error", "message": "Not using PostgreSQL"}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', config.PORT))
+    app.run(host='0.0.0.0', port=port, debug=config.DEBUG)

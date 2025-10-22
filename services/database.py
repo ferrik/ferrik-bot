@@ -260,6 +260,59 @@ def get_user_orders(user_id, limit=10):
     except Exception as e:
         logger.error(f"Get user orders error: {e}")
         return []
+# Таблиця профілів користувачів
+if USE_POSTGRES:
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            phone TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_addresses (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            address TEXT NOT NULL,
+            latitude DECIMAL(10, 8),
+            longitude DECIMAL(11, 8),
+            is_default BOOLEAN DEFAULT false,
+            last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_profiles(user_id)
+        )
+    """)
+    
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_addresses_user ON user_addresses(user_id)")
+else:
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            phone TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_addresses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            address TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            is_default INTEGER DEFAULT 0,
+            last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_profiles(user_id)
+        )
+    """)
+    
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_addresses_user ON user_addresses(user_id)")
 
 
 def log_activity(user_id, action, data=None):

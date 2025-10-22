@@ -535,6 +535,139 @@ def get_menu_from_postgres() -> List[Dict[str, Any]]:
         logger.error(f"❌ Error loading menu from PostgreSQL: {e}")
         return []
 
+def get_user_profile(user_id):
+    """Отримати профіль користувача"""
+    try:
+        with get_db() as conn:
+            if USE_POSTGRES:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute("SELECT * FROM user_profiles WHERE user_id = %s", (user_id,))
+            else:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
+            
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"Get profile error: {e}")
+        return None
+
+
+def save_user_profile(user_id, username=None, full_name=None, phone=None):
+    """Зберегти/оновити профіль користувача"""
+    try:
+        with db_lock:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                
+                if USE_POSTGRES:
+                    cursor.execute("""
+                        INSERT INTO user_profiles (user_id, username, full_name, phone)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            username = EXCLUDED.username,
+                            full_name = COALESCE(EXCLUDED.full_name, user_profiles.full_name),
+                            phone = COALESCE(EXCLUDED.phone, user_profiles.phone),
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (user_id, username, full_name, phone))
+                else:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO user_profiles (user_id, username, full_name, phone)
+                        VALUES (?, ?, ?, ?)
+                    """, (user_id, username, full_name, phone))
+                
+                conn.commit()
+                logger.info(f"Profile saved for user {user_id}")
+                return True
+    except Exception as e:
+        logger.error(f"Save profile error: {e}")
+        return False
+
+
+def get_user_addresses(user_id, limit=5):
+    """Отримати адреси користувача"""
+    try:
+        with get_db() as conn:
+            if USE_POSTGRES:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute("""
+                    SELECT * FROM user_addresses 
+                    WHERE user_id = %s 
+                    ORDER BY is_default DESC, last_used DESC 
+                    LIMIT %s
+                """, (user_id, limit))
+            else:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM user_addresses 
+                    WHERE user_id = ? 
+                    ORDER BY is_default DESC, last_used DESC 
+                    LIMIT ?
+                """, (user_id, limit))
+            
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        logger.error(f"Get addresses error: {e}")
+        return []
+
+
+def save_user_address(user_id, address, latitude=None, longitude=None, is_default=False):
+    """Зберегти адресу користувача"""
+    try:
+        with db_lock:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                
+                # Якщо це default адреса - скидаємо інші
+                if is_default:
+                    if USE_POSTGRES:
+                        cursor.execute("UPDATE user_addresses SET is_default = false WHERE user_id = %s", (user_id,))
+                    else:
+                        cursor.execute("UPDATE user_addresses SET is_default = 0 WHERE user_id = ?", (user_id,))
+                
+                if USE_POSTGRES:
+                    cursor.execute("""
+                        INSERT INTO user_addresses (user_id, address, latitude, longitude, is_default)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (user_id, address, latitude, longitude, is_default))
+                else:
+                    cursor.execute("""
+                        INSERT INTO user_addresses (user_id, address, latitude, longitude, is_default)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (user_id, address, latitude, longitude, 1 if is_default else 0))
+                
+                conn.commit()
+                logger.info(f"Address saved for user {user_id}")
+                return True
+    except Exception as e:
+        logger.error(f"Save address error: {e}")
+        return False
+
+
+def update_address_last_used(user_id, address):
+    """Оновити час використання адреси"""
+    try:
+        with db_lock:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                
+                if USE_POSTGRES:
+                    cursor.execute("""
+                        UPDATE user_addresses 
+                        SET last_used = CURRENT_TIMESTAMP 
+                        WHERE user_id = %s AND address = %s
+                    """, (user_id, address))
+                else:
+                    cursor.execute("""
+                        UPDATE user_addresses 
+                        SET last_used = CURRENT_TIMESTAMP 
+                        WHERE user_id = ? AND address = ?
+                    """, (user_id, address))
+                
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Update address error: {e}")
+
 def test_connection():
     """Перевірка з'єднання з базою даних при старті"""
     try:

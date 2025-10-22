@@ -149,6 +149,394 @@ def get_cart_keyboard():
     return {"inline_keyboard": [[{"text": "✅ Оформити", "callback_data": "checkout"}], [{"text": "🗑 Очистити", "callback_data": "clear_cart"}], [{"text": "◀️ Назад", "callback_data": "back_to_menu"}]]}
 
 # ============================================================================
+# ДОДАЙТЕ ЦІ ФУНКЦІЇ В main.py після keyboards
+# ============================================================================
+
+def get_address_keyboard(user_id: int):
+    """Клавіатура з попередніми адресами"""
+    addresses = database.get_user_addresses(user_id, limit=3)
+    
+    keyboard = []
+    for addr in addresses:
+        # Скорочуємо адресу для кнопки
+        short_addr = addr['address'][:30] + "..." if len(addr['address']) > 30 else addr['address']
+        keyboard.append([f"📍 {short_addr}"])
+    
+    keyboard.append(["📍 Нова адреса", "📲 Відправити геолокацію"])
+    keyboard.append(["◀️ Назад"])
+    
+    return {
+        "keyboard": keyboard,
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+
+
+def get_contact_keyboard():
+    """Клавіатура для запиту контакту"""
+    return {
+        "keyboard": [
+            [{"text": "📱 Поділитися номером", "request_contact": True}],
+            ["◀️ Скасувати"]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+
+
+def get_location_keyboard():
+    """Клавіатура для запиту локації"""
+    return {
+        "keyboard": [
+            [{"text": "📍 Відправити локацію", "request_location": True}],
+            ["✍️ Ввести вручну", "◀️ Назад"]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+
+
+# ============================================================================
+# ОНОВІТЬ handle_start
+# ============================================================================
+
+def handle_start(chat_id: int, username: str):
+    """Обробник команди /start з перевіркою профілю"""
+    
+    # Перевіряємо чи є профіль
+    profile = database.get_user_profile(chat_id)
+    
+    if not profile:
+        # Новий користувач - запитуємо ім'я
+        send_message(
+            chat_id, 
+            "👋 Вітаємо в <b>Hubsy Bot</b>!\n\n"
+            "Для зручного замовлення давайте познайомимось.\n\n"
+            "Як вас звати?",
+            reply_markup={"remove_keyboard": True}
+        )
+        set_user_state(chat_id, "registering_name", {"username": username})
+        database.log_activity(chat_id, "start_registration", {"username": username})
+    else:
+        # Існуючий користувач
+        name = profile.get('full_name', username)
+        send_message(
+            chat_id,
+            f"👋 Вітаємо знову, <b>{name}</b>!\n\n"
+            "Оберіть дію з меню нижче 👇",
+            reply_markup=get_main_menu()
+        )
+        database.log_activity(chat_id, "start", {"username": username})
+
+
+# ============================================================================
+# ОНОВІТЬ handle_checkout
+# ============================================================================
+
+def handle_checkout(chat_id: int, callback_query_id: str = None):
+    """Оформлення замовлення з перевіркою профілю"""
+    cart = get_cart(chat_id)
+    
+    if not cart:
+        if callback_query_id:
+            answer_callback_query(callback_query_id, "🛒 Кошик порожній")
+        return
+    
+    # Отримуємо профіль
+    profile = database.get_user_profile(chat_id)
+    
+    if not profile or not profile.get('phone'):
+        # Немає телефону - запитуємо
+        send_message(
+            chat_id,
+            "📝 <b>ОФОРМЛЕННЯ ЗАМОВЛЕННЯ</b>\n"
+            "─────────────────────────────\n\n"
+            "Для оформлення потрібен ваш номер телефону.\n\n"
+            "Поділіться номером або введіть вручну:",
+            reply_markup=get_contact_keyboard()
+        )
+        set_user_state(chat_id, "checkout_phone")
+    else:
+        # Є профіль - показуємо адреси
+        addresses = database.get_user_addresses(chat_id, limit=3)
+        
+        if addresses:
+            msg = (
+                "📝 <b>ОФОРМЛЕННЯ ЗАМОВЛЕННЯ</b>\n"
+                "─────────────────────────────\n\n"
+                f"👤 <b>{profile.get('full_name', 'Ім\'я')}</b>\n"
+                f"📞 <b>{profile.get('phone')}</b>\n\n"
+                "Оберіть адресу доставки або введіть нову:"
+            )
+        else:
+            msg = (
+                "📝 <b>ОФОРМЛЕННЯ ЗАМОВЛЕННЯ</b>\n"
+                "─────────────────────────────\n\n"
+                f"👤 <b>{profile.get('full_name', 'Ім\'я')}</b>\n"
+                f"📞 <b>{profile.get('phone')}</b>\n\n"
+                "Введіть адресу доставки або відправте геолокацію:"
+            )
+        
+        send_message(chat_id, msg, reply_markup=get_address_keyboard(chat_id))
+        set_user_state(chat_id, "checkout_address", {"profile": profile})
+    
+    database.log_activity(chat_id, "start_checkout")
+
+
+# ============================================================================
+# ДОДАЙТЕ В WEBHOOK ОБРОБКУ КОНТАКТУ ТА ЛОКАЦІЇ
+# ============================================================================
+
+# В функції webhook() після обробки текстових повідомлень додайте:
+
+            # Обробка контакту
+            if 'contact' in msg:
+                user_data = get_user_state(chat_id)
+                
+                if user_data.get("state") == "registering_phone":
+                    phone = msg['contact']['phone_number']
+                    full_name = user_data.get('full_name', username)
+                    
+                    # Зберігаємо профіль
+                    database.save_user_profile(chat_id, username, full_name, phone)
+                    
+                    send_message(
+                        chat_id,
+                        f"✅ Дякуємо, <b>{full_name}</b>!\n\n"
+                        "Ваш профіль створено. Тепер ви можете робити замовлення!",
+                        reply_markup=get_main_menu()
+                    )
+                    clear_user_state(chat_id)
+                    
+                elif user_data.get("state") == "checkout_phone":
+                    phone = msg['contact']['phone_number']
+                    
+                    # Оновлюємо профіль
+                    profile = database.get_user_profile(chat_id)
+                    if profile:
+                        database.save_user_profile(chat_id, username, profile.get('full_name'), phone)
+                    else:
+                        database.save_user_profile(chat_id, username, username, phone)
+                    
+                    # Продовжуємо оформлення
+                    send_message(
+                        chat_id,
+                        "✅ Номер збережено!\n\n"
+                        "Тепер введіть адресу доставки або відправте геолокацію:",
+                        reply_markup=get_location_keyboard()
+                    )
+                    set_user_state(chat_id, "checkout_address")
+            
+            # Обробка локації
+            if 'location' in msg:
+                user_data = get_user_state(chat_id)
+                
+                if user_data.get("state") == "checkout_address":
+                    latitude = msg['location']['latitude']
+                    longitude = msg['location']['longitude']
+                    
+                    # Формуємо адресу з координат (можна додати reverse geocoding)
+                    address = f"📍 Координати: {latitude:.6f}, {longitude:.6f}"
+                    
+                    send_message(
+                        chat_id,
+                        f"📍 Локація отримана!\n\n"
+                        f"<b>Координати:</b> {latitude:.6f}, {longitude:.6f}\n\n"
+                        "Підтвердіть замовлення чи уточніть адресу:\n"
+                        "(Напишіть назву вулиці, будинок, квартиру)",
+                        reply_markup={"remove_keyboard": True}
+                    )
+                    
+                    # Зберігаємо локацію
+                    set_user_state(chat_id, "checkout_confirm", {
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "address": address
+                    })
+
+
+# ============================================================================
+# ОНОВІТЬ ОБРОБКУ СТАНІВ В WEBHOOK
+# ============================================================================
+
+# Додайте ці стани в блок else (обробка станів):
+
+                    elif user_data.get("state") == "registering_name":
+                        # Реєстрація - отримали ім'я
+                        full_name = text.strip()
+                        
+                        send_message(
+                            chat_id,
+                            f"Приємно познайомитись, <b>{full_name}</b>! 👋\n\n"
+                            "Тепер поділіться номером телефону для зв'язку:",
+                            reply_markup=get_contact_keyboard()
+                        )
+                        set_user_state(chat_id, "registering_phone", {
+                            "username": user_data.get('username'),
+                            "full_name": full_name
+                        })
+                    
+                    elif user_data.get("state") == "registering_phone":
+                        # Реєстрація - ввели телефон вручну
+                        phone = text.strip()
+                        full_name = user_data.get('full_name', username)
+                        
+                        # Зберігаємо профіль
+                        database.save_user_profile(chat_id, username, full_name, phone)
+                        
+                        send_message(
+                            chat_id,
+                            f"✅ Дякуємо, <b>{full_name}</b>!\n\n"
+                            "Ваш профіль створено. Тепер ви можете робити замовлення!",
+                            reply_markup=get_main_menu()
+                        )
+                        clear_user_state(chat_id)
+                    
+                    elif user_data.get("state") == "checkout_phone":
+                        # Оформлення - ввели телефон
+                        phone = text.strip()
+                        
+                        profile = database.get_user_profile(chat_id)
+                        if profile:
+                            database.save_user_profile(chat_id, username, profile.get('full_name'), phone)
+                        
+                        send_message(
+                            chat_id,
+                            "✅ Номер збережено!\n\n"
+                            "Введіть адресу доставки або відправте геолокацію:",
+                            reply_markup=get_location_keyboard()
+                        )
+                        set_user_state(chat_id, "checkout_address")
+                    
+                    elif user_data.get("state") == "checkout_address":
+                        # Оформлення - вибрали/ввели адресу
+                        if text == "📍 Нова адреса":
+                            send_message(
+                                chat_id,
+                                "Введіть нову адресу доставки або відправте геолокацію:",
+                                reply_markup=get_location_keyboard()
+                            )
+                            return
+                        elif text == "📲 Відправити геолокацію":
+                            send_message(
+                                chat_id,
+                                "Відправте вашу геолокацію:",
+                                reply_markup=get_location_keyboard()
+                            )
+                            return
+                        elif text == "✍️ Ввести вручну":
+                            send_message(
+                                chat_id,
+                                "Введіть адресу (вулиця, будинок, квартира):",
+                                reply_markup={"remove_keyboard": True}
+                            )
+                            return
+                        elif text.startswith("📍"):
+                            # Вибрали існуючу адресу
+                            address = text.replace("📍 ", "").replace("...", "")
+                            # Знаходимо повну адресу
+                            addresses = database.get_user_addresses(chat_id)
+                            full_address = next((a['address'] for a in addresses if a['address'].startswith(address)), text)
+                            address = full_address
+                        else:
+                            # Ввели нову адресу
+                            address = text.strip()
+                        
+                        # Оформлюємо замовлення
+                        profile = database.get_user_profile(chat_id)
+                        cart = get_cart(chat_id)
+                        total = get_cart_total(chat_id)
+                        order_id = f"ORD{int(time.time())}"
+                        
+                        if database.save_order(
+                            order_id, chat_id, username, cart, total,
+                            profile.get('phone'), address, f"Name: {profile.get('full_name')}"
+                        ):
+                            # Зберігаємо адресу
+                            database.save_user_address(chat_id, address)
+                            database.update_address_last_used(chat_id, address)
+                            
+                            send_message(
+                                chat_id,
+                                f"✅ <b>ЗАМОВЛЕННЯ #{order_id}</b>\n\n"
+                                f"👤 {profile.get('full_name')}\n"
+                                f"📞 {profile.get('phone')}\n"
+                                f"📍 {address}\n\n"
+                                f"💰 {total} грн\n\n"
+                                "Ми зв'яжемося з вами найближчим часом!",
+                                reply_markup=get_main_menu()
+                            )
+                            
+                            # Повідомлення оператору
+                            if config.OPERATOR_CHAT_ID:
+                                op_msg = (
+                                    f"🆕 <b>#{order_id}</b>\n\n"
+                                    f"👤 {profile.get('full_name')}\n"
+                                    f"📞 {profile.get('phone')}\n"
+                                    f"📍 {address}\n\n"
+                                    "<b>Страви:</b>\n"
+                                )
+                                for item in cart:
+                                    op_msg += f"• {item['name']} x{item['quantity']} - {item['price']*item['quantity']} грн\n"
+                                op_msg += f"\n💰 {total} грн"
+                                send_message(config.OPERATOR_CHAT_ID, op_msg)
+                            
+                            clear_cart(chat_id)
+                            clear_user_state(chat_id)
+                    
+                    elif user_data.get("state") == "checkout_confirm":
+                        # Підтвердження з уточненням адреси
+                        address_details = text.strip()
+                        latitude = user_data.get('latitude')
+                        longitude = user_data.get('longitude')
+                        
+                        # Формуємо повну адресу
+                        if address_details.lower() not in ['ok', 'так', 'підтверджую']:
+                            address = address_details
+                        else:
+                            address = user_data.get('address')
+                        
+                        # Оформлюємо замовлення (аналогічно як вище)
+                        profile = database.get_user_profile(chat_id)
+                        cart = get_cart(chat_id)
+                        total = get_cart_total(chat_id)
+                        order_id = f"ORD{int(time.time())}"
+                        
+                        if database.save_order(
+                            order_id, chat_id, username, cart, total,
+                            profile.get('phone'), address, f"Name: {profile.get('full_name')}"
+                        ):
+                            database.save_user_address(chat_id, address, latitude, longitude)
+                            
+                            send_message(
+                                chat_id,
+                                f"✅ <b>ЗАМОВЛЕННЯ #{order_id}</b>\n\n"
+                                f"👤 {profile.get('full_name')}\n"
+                                f"📞 {profile.get('phone')}\n"
+                                f"📍 {address}\n\n"
+                                f"💰 {total} грн\n\n"
+                                "Дякуємо за замовлення!",
+                                reply_markup=get_main_menu()
+                            )
+                            
+                            if config.OPERATOR_CHAT_ID:
+                                op_msg = (
+                                    f"🆕 <b>#{order_id}</b>\n\n"
+                                    f"👤 {profile.get('full_name')}\n"
+                                    f"📞 {profile.get('phone')}\n"
+                                    f"📍 {address}\n"
+                                    f"🗺 Координати: {latitude}, {longitude}\n\n"
+                                    "<b>Страви:</b>\n"
+                                )
+                                for item in cart:
+                                    op_msg += f"• {item['name']} x{item['quantity']} - {item['price']*item['quantity']} грн\n"
+                                op_msg += f"\n💰 {total} грн"
+                                send_message(config.OPERATOR_CHAT_ID, op_msg)
+                            
+                            clear_cart(chat_id)
+                            clear_user_state(chat_id)
+
+# ============================================================================
 # HANDLERS
 # ============================================================================
 

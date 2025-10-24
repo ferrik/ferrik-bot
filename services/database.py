@@ -114,12 +114,66 @@ def init_database():
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_user ON user_activity(user_id)")
             
+            # ✨ НОВІ ТАБЛИЦІ для профілів та адрес
+            if USE_POSTGRES:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_profiles (
+                        user_id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        full_name TEXT,
+                        phone TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_addresses (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        address TEXT NOT NULL,
+                        latitude DECIMAL(10, 8),
+                        longitude DECIMAL(11, 8),
+                        is_default BOOLEAN DEFAULT false,
+                        last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (user_id) REFERENCES user_profiles(user_id)
+                    )
+                """)
+                
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_addresses_user ON user_addresses(user_id)")
+            else:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_profiles (
+                        user_id INTEGER PRIMARY KEY,
+                        username TEXT,
+                        full_name TEXT,
+                        phone TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_addresses (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        address TEXT NOT NULL,
+                        latitude REAL,
+                        longitude REAL,
+                        is_default INTEGER DEFAULT 0,
+                        last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (user_id) REFERENCES user_profiles(user_id)
+                    )
+                """)
+                
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_addresses_user ON user_addresses(user_id)")
+            
             conn.commit()
-            logger.info("Database initialized")
+            logger.info("✅ Database initialized")
             return True
             
     except Exception as e:
-        logger.error(f"Database init error: {e}", exc_info=True)
+        logger.error(f"❌ Database init error: {e}", exc_info=True)
         return False
 
 
@@ -145,11 +199,11 @@ def save_order(order_id, user_id, username, items, total, phone="", address="", 
                 
                 conn.commit()
                 
-        logger.info(f"Order saved: {order_id}")
+        logger.info(f"✅ Order saved: {order_id}")
         return True
         
     except Exception as e:
-        logger.error(f"Save order error: {e}", exc_info=True)
+        logger.error(f"❌ Save order error: {e}", exc_info=True)
         return False
 
 
@@ -172,7 +226,7 @@ def get_order(order_id):
             return None
             
     except Exception as e:
-        logger.error(f"Get order error: {e}")
+        logger.error(f"❌ Get order error: {e}")
         return None
 
 
@@ -198,11 +252,11 @@ def update_order_status(order_id, status):
                 
                 conn.commit()
                 
-        logger.info(f"Order {order_id} status: {status}")
+        logger.info(f"✅ Order {order_id} status: {status}")
         return True
         
     except Exception as e:
-        logger.error(f"Update status error: {e}")
+        logger.error(f"❌ Update status error: {e}")
         return False
 
 
@@ -230,7 +284,7 @@ def get_orders_by_status(status="new", limit=50):
             return [dict(row) for row in cursor.fetchall()]
             
     except Exception as e:
-        logger.error(f"Get orders error: {e}")
+        logger.error(f"❌ Get orders error: {e}")
         return []
 
 
@@ -258,61 +312,8 @@ def get_user_orders(user_id, limit=10):
             return [dict(row) for row in cursor.fetchall()]
             
     except Exception as e:
-        logger.error(f"Get user orders error: {e}")
+        logger.error(f"❌ Get user orders error: {e}")
         return []
-# Таблиця профілів користувачів
-if USE_POSTGRES:
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            phone TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_addresses (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            address TEXT NOT NULL,
-            latitude DECIMAL(10, 8),
-            longitude DECIMAL(11, 8),
-            is_default BOOLEAN DEFAULT false,
-            last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES user_profiles(user_id)
-        )
-    """)
-    
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_addresses_user ON user_addresses(user_id)")
-else:
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            phone TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_addresses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            address TEXT NOT NULL,
-            latitude REAL,
-            longitude REAL,
-            is_default INTEGER DEFAULT 0,
-            last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES user_profiles(user_id)
-        )
-    """)
-    
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_addresses_user ON user_addresses(user_id)")
 
 
 def log_activity(user_id, action, data=None):
@@ -336,7 +337,7 @@ def log_activity(user_id, action, data=None):
                 conn.commit()
                 
     except Exception as e:
-        logger.error(f"Log activity error: {e}")
+        logger.error(f"❌ Log activity error: {e}")
 
 
 def get_statistics(days=1):
@@ -387,7 +388,7 @@ def get_statistics(days=1):
             return stats
             
     except Exception as e:
-        logger.error(f"Get statistics error: {e}")
+        logger.error(f"❌ Get statistics error: {e}")
         return {}
 
 
@@ -425,47 +426,27 @@ def get_popular_items(limit=5):
             return sorted_items[:limit]
             
     except Exception as e:
-        logger.error(f"Get popular items error: {e}")
+        logger.error(f"❌ Get popular items error: {e}")
         return []
 
 
-def cleanup_old_data(days=90):
-    """Очистка старих даних"""
+def test_connection():
+    """Перевірка з'єднання з базою даних при старті"""
     try:
-        with db_lock:
-            with get_db() as conn:
-                cursor = conn.cursor()
-                
-                if USE_POSTGRES:
-                    cursor.execute("""
-                        DELETE FROM user_activity
-                        WHERE timestamp < CURRENT_TIMESTAMP - INTERVAL '%s days'
-                    """, (days,))
-                    
-                    cursor.execute("""
-                        UPDATE orders
-                        SET status = 'archived'
-                        WHERE status IN ('completed', 'cancelled')
-                        AND created_at < CURRENT_TIMESTAMP - INTERVAL '%s days'
-                    """, (days,))
-                else:
-                    cursor.execute("""
-                        DELETE FROM user_activity
-                        WHERE timestamp < datetime('now', '-' || ? || ' days')
-                    """, (days,))
-                    
-                    cursor.execute("""
-                        UPDATE orders
-                        SET status = 'archived'
-                        WHERE status IN ('completed', 'cancelled')
-                        AND created_at < datetime('now', '-' || ? || ' days')
-                    """, (days,))
-                
-                conn.commit()
-                logger.info(f"Cleaned up data older than {days} days")
-                
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            if result:
+                db_type = "PostgreSQL" if USE_POSTGRES else "SQLite"
+                db_info = DATABASE_URL.split('@')[1].split('/')[0] if USE_POSTGRES else f"sqlite://{DB_PATH}"
+                logger.info(f"✅ {db_type}: {db_info}")
+                return True, f"{db_type}: {db_info}"
+            return False, "No result from test query"
     except Exception as e:
-        logger.error(f"Cleanup error: {e}")
+        logger.error(f"❌ Connection test failed: {e}")
+        return False, str(e)
+
 
 def sync_menu_from_sheets():
     """Синхронізує меню з Google Sheets в PostgreSQL"""
@@ -588,6 +569,7 @@ def get_menu_from_postgres() -> List[Dict[str, Any]]:
         logger.error(f"❌ Error loading menu from PostgreSQL: {e}")
         return []
 
+
 def get_user_profile(user_id):
     """Отримати профіль користувача"""
     try:
@@ -602,7 +584,7 @@ def get_user_profile(user_id):
             row = cursor.fetchone()
             return dict(row) if row else None
     except Exception as e:
-        logger.error(f"Get profile error: {e}")
+        logger.error(f"❌ Get profile error: {e}")
         return None
 
 
@@ -618,7 +600,7 @@ def save_user_profile(user_id, username=None, full_name=None, phone=None):
                         INSERT INTO user_profiles (user_id, username, full_name, phone)
                         VALUES (%s, %s, %s, %s)
                         ON CONFLICT (user_id) DO UPDATE SET
-                            username = EXCLUDED.username,
+                            username = COALESCE(EXCLUDED.username, user_profiles.username),
                             full_name = COALESCE(EXCLUDED.full_name, user_profiles.full_name),
                             phone = COALESCE(EXCLUDED.phone, user_profiles.phone),
                             updated_at = CURRENT_TIMESTAMP
@@ -630,10 +612,10 @@ def save_user_profile(user_id, username=None, full_name=None, phone=None):
                     """, (user_id, username, full_name, phone))
                 
                 conn.commit()
-                logger.info(f"Profile saved for user {user_id}")
+                logger.info(f"✅ Profile saved for user {user_id}")
                 return True
     except Exception as e:
-        logger.error(f"Save profile error: {e}")
+        logger.error(f"❌ Save profile error: {e}")
         return False
 
 
@@ -660,7 +642,7 @@ def get_user_addresses(user_id, limit=5):
             
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
-        logger.error(f"Get addresses error: {e}")
+        logger.error(f"❌ Get addresses error: {e}")
         return []
 
 
@@ -690,10 +672,10 @@ def save_user_address(user_id, address, latitude=None, longitude=None, is_defaul
                     """, (user_id, address, latitude, longitude, 1 if is_default else 0))
                 
                 conn.commit()
-                logger.info(f"Address saved for user {user_id}")
+                logger.info(f"✅ Address saved for user {user_id}")
                 return True
     except Exception as e:
-        logger.error(f"Save address error: {e}")
+        logger.error(f"❌ Save address error: {e}")
         return False
 
 
@@ -719,19 +701,4 @@ def update_address_last_used(user_id, address):
                 
                 conn.commit()
     except Exception as e:
-        logger.error(f"Update address error: {e}")
-
-def test_connection():
-    """Перевірка з'єднання з базою даних при старті"""
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            result = cursor.fetchone()
-            if result:
-                db_type = "PostgreSQL" if USE_POSTGRES else "SQLite"
-                db_info = DATABASE_URL.split('@')[1].split('/')[0] if USE_POSTGRES else f"sqlite://{DB_PATH}"
-                return True, f"{db_type}: {db_info}"
-            return False, "No result from test query"
-    except Exception as e:
-        return False, str(e)
+        logger.error(f"❌ Update address error: {e}")

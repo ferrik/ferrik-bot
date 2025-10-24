@@ -1,23 +1,17 @@
 """
-Hubsy Bot - Main Application
-Telegram бот для замовлення їжі з профілями користувачів
+Hubsy Bot - ВИПРАВЛЕНА ВЕРСІЯ
+Telegram бот для замовлення їжі з прямим добавленням товарів
 """
 
 import logging
 import os
 import time
+import json
 from flask import Flask, request, jsonify
 from typing import Dict, Any, List, Optional
 
 import config
-from services import sheets, gemini
-from services.telegram import (
-    tg_send_message as send_message,
-    tg_send_photo as send_photo,
-    tg_answer_callback as answer_callback_query,
-    tg_edit_message as edit_message
-)
-from services import database
+from services import sheets, gemini, database, telegram
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),
@@ -33,44 +27,56 @@ user_carts: Dict[int, List[Dict[str, Any]]] = {}
 
 def initialize():
     global menu_data
-    logger.info("🚀 Starting Hubsy Bot v3.3.0...")
+    logger.info("🚀 Starting Hubsy Bot v3.4.0 (FIXED)...")
+    
     try:
         if database.init_database():
             logger.info("✅ Database initialized")
     except Exception as e:
         logger.error(f"❌ Database error: {e}")
+    
     try:
-        if database.USE_POSTGRES:
-            logger.info("🐘 Using PostgreSQL")
-            if database.sync_menu_from_sheets():
-                menu_data = database.get_menu_from_postgres()
-            else:
-                menu_data = sheets.get_menu_from_sheet()
-        else:
-            menu_data = sheets.get_menu_from_sheet()
+        menu_data = sheets.get_menu_from_sheet()
         if menu_data:
             logger.info(f"✅ Menu loaded: {len(menu_data)} items")
     except Exception as e:
         logger.error(f"❌ Menu loading failed: {e}")
+    
     try:
         gemini.test_gemini_connection()
     except Exception as e:
-        logger.error(f"❌ Gemini test failed: {e}")
+        logger.error(f"⚠️  Gemini test failed: {e}")
 
 initialize()
 
 def add_to_cart(user_id: int, item: Dict[str, Any]):
     if user_id not in user_carts:
         user_carts[user_id] = []
+    
     for cart_item in user_carts[user_id]:
         if cart_item.get('id') == item.get('id'):
             cart_item['quantity'] = cart_item.get('quantity', 1) + 1
+            logger.info(f"Updated qty for {item.get('name')} in cart {user_id}")
             return
+    
     item['quantity'] = 1
     user_carts[user_id].append(item)
+    logger.info(f"Added {item.get('name')} to cart {user_id}")
 
 def get_cart(user_id: int) -> List[Dict[str, Any]]:
     return user_carts.get(user_id, [])
+
+def get_cart_total(user_id: int) -> float:
+    cart = get_cart(user_id)
+    total = 0
+    for item in cart:
+        try:
+            price = float(str(item.get('price', 0)).replace(',', '.'))
+            qty = int(item.get('quantity', 1))
+            total += price * qty
+        except (ValueError, TypeError):
+            continue
+    return round(total, 2)
 
 def clear_cart(user_id: int):
     if user_id in user_carts:
@@ -80,12 +86,9 @@ def remove_from_cart(user_id: int, item_id: str):
     if user_id in user_carts:
         user_carts[user_id] = [item for item in user_carts[user_id] if item.get('id') != item_id]
 
-def get_cart_total(user_id: int) -> float:
-    return sum(item.get('price', 0) * item.get('quantity', 1) for item in get_cart(user_id))
-
 def get_user_state(user_id: int) -> Dict[str, Any]:
     if user_id not in user_states:
-        user_states[user_id] = {"state": None, "data": {}, "selected_restaurant": None}
+        user_states[user_id] = {"state": None, "data": {}}
     return user_states[user_id]
 
 def set_user_state(user_id: int, state: str, data: Dict[str, Any] = None):
@@ -93,358 +96,330 @@ def set_user_state(user_id: int, state: str, data: Dict[str, Any] = None):
     current["state"] = state
     if data:
         current.update(data)
-    user_states[user_id] = current
 
 def clear_user_state(user_id: int):
     if user_id in user_states:
-        user_states[user_id] = {"state": None, "data": {}, "selected_restaurant": None}
+        user_states[user_id] = {"state": None, "data": {}}
 
-def get_main_menu():
-    return {"keyboard": [["📋 Меню", "🛒 Кошик"], ["⭐ Рекомендації", "🔍 Пошук"], ["📦 Мої замовлення", "🆘 Допомога"]], "resize_keyboard": True}
+# ============================================================================
+# ✨ НОВА ФУНКЦІЯ: Показати товари з inline кнопками для додавання
+# ============================================================================
 
-def get_restaurants_keyboard():
-    restaurants = list(set(item.get('Ресторан') for item in menu_data if item.get('Ресторан')))
-    keyboard = [restaurants[i:i+2] for i in range(0, len(restaurants), 2)]
-    keyboard.append(["◀️ Назад"])
-    return {"keyboard": keyboard, "resize_keyboard": True}
+def show_menu_with_buttons(chat_id: int, category: str = None):
+    """Показує меню з кнопками ➕ для додавання в кошик"""
+    try:
+        items = menu_data
+        if category:
+            items = [item for item in items if item.get('Категорія') == category]
+        
+        if not items:
+            telegram.tg_send_message(chat_id, "❌ Товари не знайдені")
+            return
+        
+        # Показуємо перші 5 товарів
+        telegram.tg_send_message(chat_id, f"🍽️ <b>Меню {category if category else 'всього'}</b>\n({len(items)} позицій)")
+        
+        for item in items[:5]:
+            item_id = item.get('ID')
+            name = item.get('Страви', 'N/A')
+            price = item.get('Ціна', 0)
+            desc = item.get('Опис', '')
+            
+            text = f"<b>{name}</b>\n💰 {price} грн"
+            if desc:
+                text += f"\n📝 {desc}"
+            
+            keyboard = {
+                "inline_keyboard": [[
+                    {"text": "➕ Додати", "callback_data": f"add_item_{item_id}"},
+                    {"text": f"ℹ️ {price}грн", "callback_data": f"noop_{item_id}"}
+                ]]
+            }
+            
+            telegram.tg_send_message(chat_id, text, keyboard)
+        
+        # Кнопка для перегляду кошика
+        show_cart_button = {
+            "inline_keyboard": [[
+                {"text": "🛒 Переглянути кошик", "callback_data": "show_cart"},
+                {"text": "✅ Оформити", "callback_data": "checkout"}
+            ]]
+        }
+        telegram.tg_send_message(chat_id, "─" * 30, show_cart_button)
+        
+    except Exception as e:
+        logger.error(f"Error showing menu: {e}")
+        telegram.tg_send_message(chat_id, f"❌ Помилка: {e}")
 
-def get_category_menu_for_restaurant(restaurant: str):
-    items = [item for item in menu_data if item.get('Ресторан') == restaurant]
-    categories = list(set(item.get('Категорія') for item in items if item.get('Категорія')))
-    keyboard = [categories[i:i+2] for i in range(0, len(categories), 2)]
-    keyboard.append(["🛒 Кошик", "◀️ Назад"])
-    return {"keyboard": keyboard, "resize_keyboard": True}
-
-def get_dish_inline_keyboard(item_id: str, in_cart: bool = False):
-    if not in_cart:
-        return {"inline_keyboard": [[{"text": "➕ Додати", "callback_data": f"add_{item_id}"}], [{"text": "◀️ Назад", "callback_data": "back_to_category"}]]}
-    return {"inline_keyboard": [[{"text": "➖", "callback_data": f"remove_one_{item_id}"}, {"text": "✅ В кошику", "callback_data": "noop"}, {"text": "➕", "callback_data": f"add_{item_id}"}], [{"text": "◀️ Назад", "callback_data": "back_to_category"}]]}
-
-def get_cart_keyboard():
-    return {"inline_keyboard": [[{"text": "✅ Оформити", "callback_data": "checkout"}], [{"text": "🗑 Очистити", "callback_data": "clear_cart"}], [{"text": "◀️ Назад", "callback_data": "back_to_menu"}]]}
-
-def get_contact_keyboard():
-    return {"keyboard": [[{"text": "📱 Поділитися номером", "request_contact": True}], ["◀️ Скасувати"]], "resize_keyboard": True, "one_time_keyboard": True}
-
-def get_location_keyboard():
-    return {"keyboard": [[{"text": "📍 Відправити локацію", "request_location": True}], ["✍️ Ввести вручну", "◀️ Назад"]], "resize_keyboard": True, "one_time_keyboard": True}
-
-def get_address_keyboard(user_id: int):
-    addresses = database.get_user_addresses(user_id, limit=3)
-    keyboard = []
-    for addr in addresses:
-        short = addr['address'][:30] + "..." if len(addr['address']) > 30 else addr['address']
-        keyboard.append([f"📍 {short}"])
-    keyboard.append(["📍 Нова адреса", "📲 Відправити геолокацію"])
-    keyboard.append(["◀️ Назад"])
-    return {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": True}
-
-def handle_start(chat_id: int, username: str):
-    profile = database.get_user_profile(chat_id)
-    if not profile:
-        send_message(chat_id, "👋 Вітаємо в <b>Hubsy Bot</b>!\n\nДля зручного замовлення давайте познайомимось.\n\nЯк вас звати?", reply_markup={"remove_keyboard": True})
-        set_user_state(chat_id, "registering_name", {"username": username})
-        database.log_activity(chat_id, "start_registration", {"username": username})
-    else:
-        name = profile.get('full_name', username)
-        send_message(chat_id, f"👋 Вітаємо знову, <b>{name}</b>!\n\nОберіть дію з меню нижче 👇", reply_markup=get_main_menu())
-        database.log_activity(chat_id, "start", {"username": username})
-
-def handle_menu(chat_id: int):
-    if not menu_data:
-        send_message(chat_id, "❌ Меню тимчасово недоступне.")
-        return
-    restaurants = list(set(item.get('Ресторан') for item in menu_data if item.get('Ресторан')))
-    if not restaurants:
-        send_message(chat_id, "❌ Ресторани не знайдено")
-        return
-    msg = "🏪 <b>ОБЕРІТЬ ЗАКЛАД</b>\n" + "─" * 30 + "\n\n"
-    for r in restaurants:
-        count = len([x for x in menu_data if x.get('Ресторан') == r])
-        msg += f"🍽 <b>{r}</b>\n   {count} страв\n\n"
-    send_message(chat_id, msg, reply_markup=get_restaurants_keyboard())
-    set_user_state(chat_id, "selecting_restaurant")
-
-def handle_restaurant_selection(chat_id: int, restaurant: str):
-    user_data = get_user_state(chat_id)
-    user_data['selected_restaurant'] = restaurant
-    set_user_state(chat_id, "selecting_category", user_data)
-    cart = get_cart(chat_id)
-    if cart and cart[0].get('restaurant') != restaurant:
-        clear_cart(chat_id)
-        send_message(chat_id, "🗑 Кошик очищено - страви мають бути з одного ресторану.")
-    msg = f"🏪 <b>{restaurant.upper()}</b>\n" + "─" * 30 + "\n\nОберіть категорію:"
-    send_message(chat_id, msg, reply_markup=get_category_menu_for_restaurant(restaurant))
-
-def handle_category(chat_id: int, category: str):
-    user_data = get_user_state(chat_id)
-    restaurant = user_data.get('selected_restaurant')
-    if not restaurant:
-        send_message(chat_id, "❌ Оберіть ресторан")
-        handle_menu(chat_id)
-        return
-    items = [item for item in menu_data if item.get('Ресторан') == restaurant and item.get('Категорія') == category]
-    if not items:
-        send_message(chat_id, f"❌ Немає страв у '{category}'")
-        return
-    cart = get_cart(chat_id)
-    cart_ids = [i.get('id') for i in cart]
-    for item in items:
-        item_id = item.get('ID')
-        name = item.get('Страви', 'Без назви')
-        price = item.get('Ціна', 0)
-        desc = item.get('Опис', '')
-        photo = item.get('Фото URL', '')
-        rating = item.get('Рейтинг', 0)
-        prep = item.get('Час_приготування', 0)
-        msg = f"🍽 <b>{name}</b>\n\n"
-        if desc:
-            msg += f"📝 {desc}\n\n"
-        msg += f"💰 <b>{price} грн</b>\n"
-        if rating:
-            msg += f"⭐ {rating}/5\n"
-        if prep:
-            msg += f"⏱ {prep} хв\n"
-        in_cart = item_id in cart_ids
-        if photo:
-            send_photo(chat_id, photo, caption=msg, reply_markup=get_dish_inline_keyboard(item_id, in_cart))
-        else:
-            send_message(chat_id, msg, reply_markup=get_dish_inline_keyboard(item_id, in_cart))
-    send_message(chat_id, f"{'─' * 30}\n📊 {len(items)} страв" + (f"\n🛒 В кошику: {len(cart)}" if cart else ""), reply_markup=get_category_menu_for_restaurant(restaurant))
-
-def handle_cart(chat_id: int):
+def show_cart_preview(chat_id: int):
+    """Показує кошик"""
     cart = get_cart(chat_id)
     if not cart:
-        send_message(chat_id, "🛒 Кошик порожній\n\nОберіть страви з меню 👇", reply_markup=get_main_menu())
+        telegram.tg_send_message(chat_id, "🛒 Кошик порожній\n\n[Натисніть 📖 Меню]")
         return
+    
     total = get_cart_total(chat_id)
-    restaurant = cart[0].get('restaurant', 'Невідомий')
-    msg = f"🛒 <b>ВАШ КОШИК</b>\n🏪 <b>{restaurant}</b>\n{'─' * 30}\n\n"
+    text = "🛒 <b>Ваш кошик:</b>\n\n"
+    
     for item in cart:
-        msg += f"🔹 <b>{item.get('name')}</b>\n   {item.get('quantity')} x {item.get('price')} = {item.get('quantity') * item.get('price')} грн\n\n"
-    msg += f"{'─' * 30}\n💰 <b>Разом: {total} грн</b>"
-    send_message(chat_id, msg, reply_markup=get_cart_keyboard())
+        name = item.get('name', 'N/A')
+        price = item.get('price', 0)
+        qty = item.get('quantity', 1)
+        text += f"• {name} x{qty} = {float(price) * qty:.0f} грн\n"
+    
+    text += f"\n<b>Разом: {total:.2f} грн</b>"
+    
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "✅ Оформити замовлення", "callback_data": "checkout"}],
+            [{"text": "🍽️ Додати ще", "callback_data": "show_menu"}],
+            [{"text": "🗑️ Очистити", "callback_data": "clear_cart"}]
+        ]
+    }
+    
+    telegram.tg_send_message(chat_id, text, keyboard)
 
-def handle_checkout(chat_id: int, callback_query_id: str = None):
+# ============================================================================
+# ✨ НОВА ФУНКЦІЯ: Оформлення замовлення з контактними даними
+# ============================================================================
+
+def start_checkout(chat_id: int, callback_id: str = None):
+    """Запускає процес оформлення з запитом контактних даних"""
     cart = get_cart(chat_id)
+    
     if not cart:
-        if callback_query_id:
-            answer_callback_query(callback_query_id, "🛒 Кошик порожній")
+        if callback_id:
+            telegram.tg_answer_callback(callback_id, "🛒 Кошик порожній", show_alert=True)
         return
-    profile = database.get_user_profile(chat_id)
-    if not profile or not profile.get('phone'):
-        send_message(chat_id, "📝 <b>ОФОРМЛЕННЯ ЗАМОВЛЕННЯ</b>\n─────────────────────────────\n\nДля оформлення потрібен ваш номер телефону.\n\nПоділіться номером або введіть вручну:", reply_markup=get_contact_keyboard())
-        set_user_state(chat_id, "checkout_phone")
-    else:
-        addresses = database.get_user_addresses(chat_id, limit=3)
-        if addresses:
-            msg = f"📝 <b>ОФОРМЛЕННЯ ЗАМОВЛЕННЯ</b>\n─────────────────────────────\n\n👤 <b>{profile.get('full_name')}</b>\n📞 <b>{profile.get('phone')}</b>\n\nОберіть адресу доставки або введіть нову:"
-        else:
-            msg = f"📝 <b>ОФОРМЛЕННЯ ЗАМОВЛЕННЯ</b>\n─────────────────────────────\n\n👤 <b>{profile.get('full_name')}</b>\n📞 <b>{profile.get('phone')}</b>\n\nВведіть адресу доставки або відправте геолокацію:"
-        send_message(chat_id, msg, reply_markup=get_address_keyboard(chat_id))
-        set_user_state(chat_id, "checkout_address", {"profile": profile})
-    database.log_activity(chat_id, "start_checkout")
+    
+    total = get_cart_total(chat_id)
+    
+    # Мінімальна сума
+    MIN_ORDER = 200
+    if total < MIN_ORDER:
+        telegram.tg_send_message(chat_id, 
+            f"⚠️ Мінімальна сума замовлення: {MIN_ORDER} грн\n"
+            f"У вас: {total:.2f} грн\n"
+            f"Додайте ще на {MIN_ORDER - total:.2f} грн")
+        return
+    
+    # Запитуємо телефон
+    telegram.tg_send_message(chat_id, 
+        "📱 <b>ОФОРМЛЕННЯ ЗАМОВЛЕННЯ</b>\n\n"
+        "Введіть ваш номер телефону:\n"
+        "<code>+380971234567</code>")
+    
+    set_user_state(chat_id, "checkout_phone")
 
-def handle_callback(callback_data: str, chat_id: int, message_id: int, callback_query_id: str):
-    if callback_data.startswith("add_"):
-        item_id = callback_data.replace("add_", "")
-        item = next((x for x in menu_data if str(x.get('ID')) == str(item_id)), None)
-        if item:
-            user_data = get_user_state(chat_id)
-            restaurant = user_data.get('selected_restaurant') or item.get('Ресторан')
-            cart = get_cart(chat_id)
-            if cart and cart[0].get('restaurant') != restaurant:
-                answer_callback_query(callback_query_id, "❌ Тільки з одного ресторану!", show_alert=True)
-                return
-            add_to_cart(chat_id, {'id': item_id, 'name': item.get('Страви', 'Без назви'), 'price': item.get('Ціна', 0), 'restaurant': restaurant, 'quantity': 1})
-            qty = sum(x['quantity'] for x in get_cart(chat_id) if x.get('id') == item_id)
-            answer_callback_query(callback_query_id, f"✅ Додано! {qty} шт")
-            try:
-                edit_message(chat_id, message_id, reply_markup=get_dish_inline_keyboard(item_id, True))
-            except:
-                pass
-    elif callback_data.startswith("remove_one_"):
-        item_id = callback_data.replace("remove_one_", "")
-        for item in get_cart(chat_id):
-            if item.get('id') == item_id:
-                if item['quantity'] > 1:
-                    item['quantity'] -= 1
-                    answer_callback_query(callback_query_id, f"✅ {item['quantity']} шт")
-                else:
-                    remove_from_cart(chat_id, item_id)
-                    answer_callback_query(callback_query_id, "🗑 Видалено")
-                    try:
-                        edit_message(chat_id, message_id, reply_markup=get_dish_inline_keyboard(item_id, False))
-                    except:
-                        pass
-                break
-    elif callback_data == "checkout":
-        handle_checkout(chat_id, callback_query_id)
-    elif callback_data == "clear_cart":
+def handle_phone_input(chat_id: int, text: str):
+    """Обробляє введений телефон"""
+    phone = text.strip()
+    
+    if not phone:
+        telegram.tg_send_message(chat_id, "❌ Введіть номер телефону")
+        return
+    
+    # Зберігаємо телефон
+    set_user_state(chat_id, "checkout_address", {"phone": phone})
+    
+    telegram.tg_send_message(chat_id,
+        f"✅ Номер прийнято: {phone}\n\n"
+        "📍 Введіть адресу доставки:\n"
+        "<i>вул. Руська, 12, кв. 5</i>")
+
+def handle_address_input(chat_id: int, text: str):
+    """Обробляє введену адресу і завершує замовлення"""
+    address = text.strip()
+    state_data = get_user_state(chat_id)
+    phone = state_data.get("data", {}).get("phone", "N/A")
+    
+    cart = get_cart(chat_id)
+    total = get_cart_total(chat_id)
+    
+    if not cart:
+        telegram.tg_send_message(chat_id, "❌ Кошик порожній")
+        return
+    
+    # Генеруємо ID замовлення
+    order_id = f"ORD-{int(time.time())}"
+    
+    # Форматуємо товари
+    items_text = "\n".join([
+        f"• {item.get('name')} x{item.get('quantity', 1)} = {float(item.get('price', 0)) * item.get('quantity', 1):.0f} грн"
+        for item in cart
+    ])
+    
+    # ✨ ВИРІШЕННЯ: Зберігаємо замовлення в базу
+    order_saved = database.save_order(
+        order_id=order_id,
+        user_id=chat_id,
+        username=chat_id,
+        items=cart,
+        total=total,
+        phone=phone,
+        address=address,
+        notes=""
+    )
+    
+    if order_saved:
+        # Підтвердження користувачу
+        confirmation = (
+            f"✅ <b>ЗАМОВЛЕННЯ #{order_id}</b>\n\n"
+            f"<b>Товари:</b>\n{items_text}\n\n"
+            f"<b>Сума:</b> {total:.2f} грн\n"
+            f"<b>Телефон:</b> {phone}\n"
+            f"<b>Адреса:</b> {address}\n\n"
+            f"Дякуємо за замовлення! 😊"
+        )
+        
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "📖 Меню", "callback_data": "show_menu"},
+                {"text": "📞 Контакти", "callback_data": "contacts"}
+            ]]
+        }
+        
+        telegram.tg_send_message(chat_id, confirmation, keyboard)
+        
+        # Повідомлення оператору
+        if config.OPERATOR_CHAT_ID:
+            op_msg = (
+                f"🔔 <b>НОВЕ ЗАМОВЛЕННЯ #{order_id}</b>\n\n"
+                f"👤 Користувач: {chat_id}\n"
+                f"📞 Телефон: {phone}\n"
+                f"📍 Адреса: {address}\n\n"
+                f"<b>Товари:</b>\n{items_text}\n\n"
+                f"💰 <b>Сума: {total:.2f} грн</b>"
+            )
+            telegram.tg_send_message(config.OPERATOR_CHAT_ID, op_msg)
+        
+        # Очищаємо кошик
         clear_cart(chat_id)
-        answer_callback_query(callback_query_id, "🗑 Очищено")
-        handle_cart(chat_id)
-    elif callback_data == "back_to_menu":
-        handle_menu(chat_id)
-    elif callback_data == "back_to_category":
-        user_data = get_user_state(chat_id)
-        if user_data.get('selected_restaurant'):
-            handle_restaurant_selection(chat_id, user_data['selected_restaurant'])
-        else:
-            handle_menu(chat_id)
+        clear_user_state(chat_id)
+    else:
+        telegram.tg_send_message(chat_id, "❌ Помилка при збереженні замовлення")
+
+# ============================================================================
+# WEBHOOK
+# ============================================================================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         update = request.json
-        logger.info(f"📥 Webhook: {update.get('update_id')}")
         
+        # Перевірка webhook secret
+        if config.WEBHOOK_SECRET:
+            secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+            if secret_token != config.WEBHOOK_SECRET:
+                logger.warning("❌ Invalid webhook secret")
+                return jsonify({"ok": False}), 401
+        
+        logger.info(f"📥 Update: {update.get('update_id')}")
+        
+        # ============ ПОВІДОМЛЕННЯ ============
         if 'message' in update:
             msg = update['message']
             chat_id = msg['chat']['id']
-            username = msg['from'].get('username', 'Unknown')
+            text = msg.get('text', '').strip()
             
-            if 'text' in msg:
-                text = msg['text']
-                
-                if text == '/start':
-                    handle_start(chat_id, username)
-                elif text in ['/menu', '📋 Меню']:
-                    handle_menu(chat_id)
-                elif text in ['/cart', '🛒 Кошик']:
-                    handle_cart(chat_id)
-                elif text == '◀️ Назад' or text == '◀️ Скасувати':
-                    send_message(chat_id, "Головне меню:", reply_markup=get_main_menu())
-                    clear_user_state(chat_id)
-                else:
-                    user_data = get_user_state(chat_id)
-                    
-                    if user_data.get("state") == "registering_name":
-                        full_name = text.strip()
-                        send_message(chat_id, f"Приємно познайомитись, <b>{full_name}</b>! 👋\n\nТепер поділіться номером телефону:", reply_markup=get_contact_keyboard())
-                        set_user_state(chat_id, "registering_phone", {"username": user_data.get('username'), "full_name": full_name})
-                    
-                    elif user_data.get("state") == "registering_phone":
-                        phone = text.strip()
-                        full_name = user_data.get('full_name', username)
-                        database.save_user_profile(chat_id, username, full_name, phone)
-                        send_message(chat_id, f"✅ Дякуємо, <b>{full_name}</b>!\n\nВаш профіль створено!", reply_markup=get_main_menu())
-                        clear_user_state(chat_id)
-                    
-                    elif user_data.get("state") == "checkout_phone":
-                        phone = text.strip()
-                        profile = database.get_user_profile(chat_id)
-                        if profile:
-                            database.save_user_profile(chat_id, username, profile.get('full_name'), phone)
-                        send_message(chat_id, "✅ Номер збережено!\n\nВведіть адресу або відправте геолокацію:", reply_markup=get_location_keyboard())
-                        set_user_state(chat_id, "checkout_address")
-                    
-                    elif user_data.get("state") == "selecting_restaurant":
-                        handle_restaurant_selection(chat_id, text)
-                    
-                    elif user_data.get("state") == "selecting_category":
-                        if text == "🛒 Кошик":
-                            handle_cart(chat_id)
-                        elif text == "◀️ Назад":
-                            handle_menu(chat_id)
-                        else:
-                            handle_category(chat_id, text)
-                    
-                    elif user_data.get("state") == "checkout_address":
-                        if text == "📍 Нова адреса":
-                            send_message(chat_id, "Введіть адресу або відправте геолокацію:", reply_markup=get_location_keyboard())
-                            return
-                        elif text == "📲 Відправити геолокацію":
-                            send_message(chat_id, "Відправте геолокацію:", reply_markup=get_location_keyboard())
-                            return
-                        elif text == "✍️ Ввести вручну":
-                            send_message(chat_id, "Введіть адресу (вулиця, будинок, квартира):", reply_markup={"remove_keyboard": True})
-                            return
-                        elif text.startswith("📍"):
-                            address = text.replace("📍 ", "").replace("...", "")
-                            addresses = database.get_user_addresses(chat_id)
-                            address = next((a['address'] for a in addresses if a['address'].startswith(address)), text)
-                        else:
-                            address = text.strip()
-                        
-                        profile = database.get_user_profile(chat_id)
-                        cart = get_cart(chat_id)
-                        total = get_cart_total(chat_id)
-                        order_id = f"ORD{int(time.time())}"
-                        
-                        if database.save_order(order_id, chat_id, username, cart, total, profile.get('phone'), address, f"Name: {profile.get('full_name')}"):
-                            database.save_user_address(chat_id, address)
-                            database.update_address_last_used(chat_id, address)
-                            send_message(chat_id, f"✅ <b>ЗАМОВЛЕННЯ #{order_id}</b>\n\n👤 {profile.get('full_name')}\n📞 {profile.get('phone')}\n📍 {address}\n\n💰 {total} грн\n\nДякуємо!", reply_markup=get_main_menu())
-                            if config.OPERATOR_CHAT_ID:
-                                op_msg = f"🆕 <b>#{order_id}</b>\n\n👤 {profile.get('full_name')}\n📞 {profile.get('phone')}\n📍 {address}\n\n<b>Страви:</b>\n"
-                                for item in cart:
-                                    op_msg += f"• {item['name']} x{item['quantity']} - {item['price']*item['quantity']} грн\n"
-                                op_msg += f"\n💰 {total} грн"
-                                send_message(config.OPERATOR_CHAT_ID, op_msg)
-                            clear_cart(chat_id)
-                            clear_user_state(chat_id)
+            user_state = get_user_state(chat_id).get("state")
             
-            if 'contact' in msg:
-                user_data = get_user_state(chat_id)
-                phone = msg['contact']['phone_number']
-                
-                if user_data.get("state") == "registering_phone":
-                    full_name = user_data.get('full_name', username)
-                    database.save_user_profile(chat_id, username, full_name, phone)
-                    send_message(chat_id, f"✅ Дякуємо, <b>{full_name}</b>!\n\nПрофіль створено!", reply_markup=get_main_menu())
-                    clear_user_state(chat_id)
-                
-                elif user_data.get("state") == "checkout_phone":
-                    profile = database.get_user_profile(chat_id)
-                    if profile:
-                        database.save_user_profile(chat_id, username, profile.get('full_name'), phone)
-                    else:
-                        database.save_user_profile(chat_id, username, username, phone)
-                    send_message(chat_id, "✅ Номер збережено!\n\nВведіть адресу:", reply_markup=get_location_keyboard())
-                    set_user_state(chat_id, "checkout_address")
+            # Обробляємо стани
+            if user_state == "checkout_phone":
+                handle_phone_input(chat_id, text)
+                return jsonify({"ok": True})
             
-            if 'location' in msg:
-                user_data = get_user_state(chat_id)
+            elif user_state == "checkout_address":
+                handle_address_input(chat_id, text)
+                return jsonify({"ok": True})
+            
+            # Команди
+            if text == '/start':
+                telegram.tg_send_message(chat_id,
+                    "👋 Вітаємо в <b>Hubsy Bot</b>!\n\n"
+                    "Оберіть дію:",
+                    {"keyboard": [
+                        ["📖 Меню", "🛒 Кошик"],
+                        ["🆘 Допомога"]
+                    ], "resize_keyboard": True})
                 
-                if user_data.get("state") == "checkout_address":
-                    lat = msg['location']['latitude']
-                    lon = msg['location']['longitude']
-                    address = f"📍 {lat:.6f}, {lon:.6f}"
-                    
-                    send_message(chat_id, f"📍 Локація отримана!\n\nПідтвердіть або уточніть адресу:", reply_markup={"remove_keyboard": True})
-                    set_user_state(chat_id, "checkout_confirm", {"latitude": lat, "longitude": lon, "address": address})
+            elif text in ['📖 Меню', '/menu']:
+                show_menu_with_buttons(chat_id)
+            
+            elif text in ['🛒 Кошик', '/cart']:
+                show_cart_preview(chat_id)
+            
+            elif text == '🆘 Допомога' or text == '/help':
+                telegram.tg_send_message(chat_id, "ℹ️ Допомога в розробці")
         
+        # ============ CALLBACK QUERIES (inline кнопки) ============
         elif 'callback_query' in update:
             cb = update['callback_query']
-            handle_callback(cb['data'], cb['message']['chat']['id'], cb['message']['message_id'], cb['id'])
+            chat_id = cb['message']['chat']['id']
+            callback_data = cb.get('data', '')
+            callback_id = cb['id']
+            
+            logger.info(f"Callback: {callback_data}")
+            
+            # Додавання товару в кошик
+            if callback_data.startswith("add_item_"):
+                item_id = callback_data.replace("add_item_", "")
+                item = next((x for x in menu_data if str(x.get('ID')) == str(item_id)), None)
+                
+                if item:
+                    add_to_cart(chat_id, {
+                        'id': item_id,
+                        'name': item.get('Страви', 'N/A'),
+                        'price': item.get('Ціна', 0)
+                    })
+                    
+                    cart_count = sum(i.get('quantity', 1) for i in get_cart(chat_id))
+                    telegram.tg_answer_callback(callback_id, 
+                        f"✅ {item.get('Страви')} додано!\n🛒 У кошику: {cart_count} поз.")
+            
+            # Показати кошик
+            elif callback_data == "show_cart":
+                show_cart_preview(chat_id)
+                telegram.tg_answer_callback(callback_id)
+            
+            # Оформити замовлення
+            elif callback_data == "checkout":
+                start_checkout(chat_id, callback_id)
+                telegram.tg_answer_callback(callback_id)
+            
+            # Показати меню
+            elif callback_data == "show_menu":
+                show_menu_with_buttons(chat_id)
+                telegram.tg_answer_callback(callback_id)
+            
+            # Очистити кошик
+            elif callback_data == "clear_cart":
+                clear_cart(chat_id)
+                telegram.tg_answer_callback(callback_id, "🗑️ Кошик очищено")
+                show_cart_preview(chat_id)
+            
+            else:
+                telegram.tg_answer_callback(callback_id)
         
         return jsonify({"ok": True}), 200
+    
     except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"ok": False}), 500
 
 @app.route('/')
 def index():
-    return jsonify({"status": "ok", "bot": "Hubsy Bot", "version": "3.3.0"})
+    return jsonify({"status": "ok", "bot": "Hubsy Bot", "version": "3.4.0"})
 
 @app.route('/health')
 def health():
     db_ok, db_info = database.test_connection()
-    return jsonify({"status": "healthy" if db_ok else "degraded", "database": db_info, "menu_items": len(menu_data)})
-
-@app.route('/sync-menu', methods=['POST'])
-def sync_menu():
-    global menu_data
-    try:
-        if database.USE_POSTGRES:
-            if database.sync_menu_from_sheets():
-                menu_data = database.get_menu_from_postgres()
-                return jsonify({"status": "success", "message": f"Synced: {len(menu_data)} items"}), 200
-            return jsonify({"status": "error", "message": "Sync failed"}), 500
-        return jsonify({"status": "error", "message": "Not using PostgreSQL"}), 400
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({
+        "status": "healthy" if db_ok else "degraded",
+        "database": db_info,
+        "menu_items": len(menu_data)
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', config.PORT))

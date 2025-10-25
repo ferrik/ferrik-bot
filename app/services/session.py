@@ -2,6 +2,7 @@
 🗄️ Управління сесіями та станами користувачів
 
 Зберігає стани в БД замість глобальних словників
+ВИПРАВЛЕНО: Автоматично створює SQLite підключення
 """
 import json
 import logging
@@ -20,12 +21,35 @@ class SessionManager:
     - Кошик покупок
     """
     
-    def __init__(self, database):
+    def __init__(self, database=None, db_path='bot.db'):
         """
         Args:
             database: Об'єкт database з методами execute, fetchone, commit
+                      АБО None (тоді створить власне SQLite підключення)
+            db_path: Шлях до SQLite БД (якщо database=None)
         """
-        self.db = database
+        if database is None:
+            # Створити власне SQLite підключення
+            import sqlite3
+            self.db = sqlite3.connect(db_path, check_same_thread=False)
+            self.db.row_factory = sqlite3.Row
+            self._own_connection = True
+            logger.info("✅ SessionManager: Created own SQLite connection")
+        else:
+            # Використати передане підключення
+            # Перевірити чи це справжнє підключення
+            if hasattr(database, 'execute') and hasattr(database, 'commit'):
+                self.db = database
+                self._own_connection = False
+                logger.info("✅ SessionManager: Using provided database connection")
+            else:
+                # Fallback: створити власне підключення
+                import sqlite3
+                self.db = sqlite3.connect(db_path, check_same_thread=False)
+                self.db.row_factory = sqlite3.Row
+                self._own_connection = True
+                logger.warning("⚠️ SessionManager: Provided object has no execute(), creating own connection")
+        
         self._ensure_tables()
     
     def _ensure_tables(self):
@@ -101,7 +125,7 @@ class SessionManager:
             """, (user_id, state, state_data, datetime.now()))
             
             self.db.commit()
-            logger.info(f"✅ State set for {user_id}: {state}")
+            logger.debug(f"✅ State set for {user_id}: {state}")
             
         except Exception as e:
             logger.error(f"❌ Error setting state for {user_id}: {e}")
@@ -155,7 +179,7 @@ class SessionManager:
                 """, (user_id, item_id, quantity, price, datetime.now()))
             
             self.db.commit()
-            logger.info(f"✅ Added to cart: user={user_id}, item={item_id}, qty={quantity}")
+            logger.debug(f"✅ Added to cart: user={user_id}, item={item_id}, qty={quantity}")
             return True
             
         except Exception as e:
@@ -213,7 +237,7 @@ class SessionManager:
                 WHERE user_id = ? AND item_id = ?
             """, (user_id, item_id))
             self.db.commit()
-            logger.info(f"🗑️ Removed from cart: user={user_id}, item={item_id}")
+            logger.debug(f"🗑️ Removed from cart: user={user_id}, item={item_id}")
             return True
             
         except Exception as e:
@@ -263,39 +287,15 @@ class SessionManager:
         except Exception as e:
             logger.error(f"❌ Error getting cart count: {e}")
             return 0
-
-
-# ============================================================================
-# Міграція зі старих глобальних словників
-# ============================================================================
-
-def migrate_from_globals(session_manager, old_user_states: dict, old_user_carts: dict):
-    """
-    Міграція даних зі старих глобальних словників
     
-    Використовується один раз при переході на нову систему
-    """
-    logger.info("🔄 Starting migration from global dicts...")
-    
-    # Міграція станів
-    for user_id, state_info in old_user_states.items():
-        if isinstance(state_info, dict):
-            state = state_info.get('state', 'STATE_IDLE')
-            data = state_info.get('data', {})
-        else:
-            state = state_info
-            data = {}
-        
-        session_manager.set_state(user_id, state, data)
-    
-    # Міграція кошиків
-    for user_id, cart in old_user_carts.items():
-        for item_id, item_data in cart.items():
-            qty = item_data.get('quantity', 1)
-            price = item_data.get('price', 0)
-            session_manager.add_to_cart(user_id, item_id, qty, price)
-    
-    logger.info("✅ Migration completed!")
+    def close(self):
+        """Закрити підключення якщо воно власне"""
+        if self._own_connection and self.db:
+            try:
+                self.db.close()
+                logger.info("✅ SessionManager: Database connection closed")
+            except Exception as e:
+                logger.error(f"❌ Error closing database: {e}")
 
 
 # ============================================================================

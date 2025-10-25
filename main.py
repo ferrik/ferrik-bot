@@ -127,16 +127,18 @@ menu_data = []
 
 # SessionManager або fallback словники
 if NEW_SYSTEM_ENABLED:
-    session_manager = SessionManager(database)
+    # Ініціалізувати SessionManager (він сам створить підключення)
+    session_manager = SessionManager(db_path='bot.db')
+    
     from app.services.session import LegacyDictWrapper
     user_states = LegacyDictWrapper(session_manager, 'states')
     user_carts = LegacyDictWrapper(session_manager, 'carts')
-    logger.info("✅ Using SessionManager")
+    logger.info("✅ Using SessionManager with auto-created SQLite connection")
 else:
     user_states = {}
     user_carts = {}
     logger.info("📦 Using in-memory storage (legacy)")
-
+    
 # Константи станів
 STATE_IDLE = 'STATE_IDLE'
 STATE_AWAITING_PHONE = 'STATE_AWAITING_PHONE'

@@ -432,43 +432,43 @@ def webhook():
                     telegram.tg_send_message(chat_id, info_text)
         
         # Message
-elif 'message' in data:
-    msg = data['message']
-    chat_id = msg['chat']['id']
-    text = msg.get('text', '').strip()
-    
-    # Логування
-    logger.info(f"📥 Message from {chat_id}: {text}")
-    
-    current_state = get_user_state(chat_id)
-    
-    # Команди (з підтримкою текстових варіантів)
-    if text.startswith('/start') or text.lower() == 'start':
-        clear_user_state(chat_id)
-        telegram.tg_send_message(
-            chat_id,
-            "👋 Вітаємо в Ferrik Bot!\n\n" +
-            "Використовуйте команди:\n" +
-            "/menu - Каталог товарів\n" +
-            "/cart - Кошик"
-        )
-    
-    elif text.startswith('/menu') or text.lower() in ['меню', 'menu', '📋 меню']:
-        show_menu_with_buttons(chat_id)
-    
-    elif text.startswith('/cart') or text.lower() in ['кошик', 'cart', '🛒 кошик']:
-        show_cart_preview(chat_id)
-    
-    elif text.startswith('/help') or text.lower() == 'help':
-        telegram.tg_send_message(
-            chat_id,
-            "📖 *Допомога*\n\n" +
-            "Доступні команди:\n" +
-            "/start - Почати роботу\n" +
-            "/menu - Переглянути каталог\n" +
-            "/cart - Відкрити кошик\n" +
-            "/help - Ця довідка"
-        )
+        elif 'message' in data:
+            msg = data['message']
+            chat_id = msg['chat']['id']
+            text = msg.get('text', '').strip()
+            
+            # Логування
+            logger.info(f"📥 Message from {chat_id}: {text}")
+            
+            current_state = get_user_state(chat_id)
+            
+            # Команди (з підтримкою текстових варіантів)
+            if text.startswith('/start') or text.lower() == 'start':
+                clear_user_state(chat_id)
+                telegram.tg_send_message(
+                    chat_id,
+                    "👋 Вітаємо в Ferrik Bot!\n\n" +
+                    "Використовуйте команди:\n" +
+                    "/menu - Каталог товарів\n" +
+                    "/cart - Кошик"
+                )
+            
+            elif text.startswith('/menu') or text.lower() in ['меню', 'menu', '📋 меню']:
+                show_menu_with_buttons(chat_id)
+            
+            elif text.startswith('/cart') or text.lower() in ['кошик', 'cart', '🛒 кошик']:
+                show_cart_preview(chat_id)
+            
+            elif text.startswith('/help') or text.lower() == 'help':
+                telegram.tg_send_message(
+                    chat_id,
+                    "📖 *Допомога*\n\n" +
+                    "Доступні команди:\n" +
+                    "/start - Почати роботу\n" +
+                    "/menu - Переглянути каталог\n" +
+                    "/cart - Відкрити кошик\n" +
+                    "/help - Ця довідка"
+                )
             
             elif current_state == STATE_AWAITING_PHONE:
                 handle_phone_input(chat_id, text)

@@ -1,426 +1,561 @@
 """
-Hubsy Bot - ВИПРАВЛЕНА ВЕРСІЯ
-Telegram бот для замовлення їжі з прямим добавленням товарів
+🤖 Ferrik Bot - RENDER READY VERSION
+
+Готовий до deploy на Render без локального тестування
+Автоматично створює БД при першому запуску
 """
-
-import logging
 import os
-import time
-import json
+import sys
+import logging
 from flask import Flask, request, jsonify
-from typing import Dict, Any, List, Optional
 
-import config
-from services import sheets, gemini, database, telegram
-
+# ============================================================================
+# Logging Setup
+# ============================================================================
 logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL),
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# Auto-initialize Database (ПЕРЕД імпортами!)
+# ============================================================================
+def ensure_database():
+    """Автоматично створює БД якщо її немає"""
+    import sqlite3
+    
+    db_path = 'bot.db'
+    
+    if not os.path.exists(db_path):
+        logger.info("🔧 Database not found, initializing...")
+        
+        conn = sqlite3.connect(db_path)
+        
+        # Спроба завантажити з файлу міграції
+        sql_file = 'migrations/001_create_tables.sql'
+        if os.path.exists(sql_file):
+            try:
+                with open(sql_file, 'r', encoding='utf-8') as f:
+                    conn.executescript(f.read())
+                logger.info("✅ Database initialized from migration file")
+            except Exception as e:
+                logger.error(f"❌ Error loading migration: {e}")
+                # Fallback до базових таблиць
+                create_basic_tables(conn)
+        else:
+            logger.warning("⚠️ Migration file not found, creating basic tables")
+            create_basic_tables(conn)
+        
+        conn.commit()
+        conn.close()
+        logger.info("✅ Database ready!")
+    else:
+        logger.info("✅ Database already exists")
+
+def create_basic_tables(conn):
+    """Створити мінімальні таблиці якщо міграція не знайдена"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_states (
+            user_id INTEGER PRIMARY KEY,
+            state TEXT DEFAULT 'STATE_IDLE',
+            state_data TEXT DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_carts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            quantity INTEGER DEFAULT 1 CHECK(quantity > 0),
+            price REAL DEFAULT 0 CHECK(price >= 0),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, item_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_carts_user ON user_carts(user_id)")
+    logger.info("✅ Basic tables created")
+
+# Запустити ініціалізацію БД
+ensure_database()
+
+# ============================================================================
+# Import New Modules (з fallback на старий код)
+# ============================================================================
+NEW_SYSTEM_ENABLED = False
+
+try:
+    from app.config.settings import (
+        config, 
+        UserState, 
+        MIN_ORDER_AMOUNT
+    )
+    from app.services.session import SessionManager
+    from app.utils.validators import (
+        safe_parse_price,
+        validate_phone,
+        normalize_phone,
+        validate_address,
+        sanitize_input
+    )
+    NEW_SYSTEM_ENABLED = True
+    logger.info("✅ New system modules loaded")
+except ImportError as e:
+    logger.warning(f"⚠️ New modules not available, using legacy mode: {e}")
+    # Встановити fallback значення
+    MIN_ORDER_AMOUNT = 100
+
+# ============================================================================
+# Import Services
+# ============================================================================
+import services.telegram as telegram
+import services.sheets as sheets
+import services.database as database
+
+# ============================================================================
+# Flask App
+# ============================================================================
 app = Flask(__name__)
 
-menu_data: List[Dict[str, Any]] = []
-user_states: Dict[int, Dict[str, Any]] = {}
-user_carts: Dict[int, List[Dict[str, Any]]] = {}
+# ============================================================================
+# Global Variables
+# ============================================================================
+menu_data = []
 
-def initialize():
-    global menu_data
-    logger.info("🚀 Starting Hubsy Bot v3.4.0 (FIXED)...")
-    
-    try:
-        if database.init_database():
-            logger.info("✅ Database initialized")
-    except Exception as e:
-        logger.error(f"❌ Database error: {e}")
-    
-    try:
-        menu_data = sheets.get_menu_from_sheet()
-        if menu_data:
-            logger.info(f"✅ Menu loaded: {len(menu_data)} items")
-    except Exception as e:
-        logger.error(f"❌ Menu loading failed: {e}")
-    
-    try:
-        gemini.test_gemini_connection()
-    except Exception as e:
-        logger.error(f"⚠️  Gemini test failed: {e}")
+# SessionManager або fallback словники
+if NEW_SYSTEM_ENABLED:
+    session_manager = SessionManager(database)
+    from app.services.session import LegacyDictWrapper
+    user_states = LegacyDictWrapper(session_manager, 'states')
+    user_carts = LegacyDictWrapper(session_manager, 'carts')
+    logger.info("✅ Using SessionManager")
+else:
+    user_states = {}
+    user_carts = {}
+    logger.info("📦 Using in-memory storage (legacy)")
 
-initialize()
-
-def add_to_cart(user_id: int, item: Dict[str, Any]):
-    if user_id not in user_carts:
-        user_carts[user_id] = []
-    
-    for cart_item in user_carts[user_id]:
-        if cart_item.get('id') == item.get('id'):
-            cart_item['quantity'] = cart_item.get('quantity', 1) + 1
-            logger.info(f"Updated qty for {item.get('name')} in cart {user_id}")
-            return
-    
-    item['quantity'] = 1
-    user_carts[user_id].append(item)
-    logger.info(f"Added {item.get('name')} to cart {user_id}")
-
-def get_cart(user_id: int) -> List[Dict[str, Any]]:
-    return user_carts.get(user_id, [])
-
-def get_cart_total(user_id: int) -> float:
-    cart = get_cart(user_id)
-    total = 0
-    for item in cart:
-        try:
-            price = float(str(item.get('price', 0)).replace(',', '.'))
-            qty = int(item.get('quantity', 1))
-            total += price * qty
-        except (ValueError, TypeError):
-            continue
-    return round(total, 2)
-
-def clear_cart(user_id: int):
-    if user_id in user_carts:
-        user_carts[user_id] = []
-
-def remove_from_cart(user_id: int, item_id: str):
-    if user_id in user_carts:
-        user_carts[user_id] = [item for item in user_carts[user_id] if item.get('id') != item_id]
-
-def get_user_state(user_id: int) -> Dict[str, Any]:
-    if user_id not in user_states:
-        user_states[user_id] = {"state": None, "data": {}}
-    return user_states[user_id]
-
-def set_user_state(user_id: int, state: str, data: Dict[str, Any] = None):
-    current = get_user_state(user_id)
-    current["state"] = state
-    if data:
-        current.update(data)
-
-def clear_user_state(user_id: int):
-    if user_id in user_states:
-        user_states[user_id] = {"state": None, "data": {}}
+# Константи станів
+STATE_IDLE = 'STATE_IDLE'
+STATE_AWAITING_PHONE = 'STATE_AWAITING_PHONE'
+STATE_AWAITING_ADDRESS = 'STATE_AWAITING_ADDRESS'
 
 # ============================================================================
-# ✨ НОВА ФУНКЦІЯ: Показати товари з inline кнопками для додавання
+# Helper Functions
 # ============================================================================
 
-def show_menu_with_buttons(chat_id: int, category: str = None):
-    """Показує меню з кнопками ➕ для додавання в кошик"""
+def get_user_state(chat_id):
+    """Отримати стан користувача"""
+    if NEW_SYSTEM_ENABLED:
+        return session_manager.get_state(chat_id)
+    return user_states.get(chat_id, STATE_IDLE)
+
+def set_user_state(chat_id, state, data=None):
+    """Встановити стан"""
+    if NEW_SYSTEM_ENABLED:
+        session_manager.set_state(chat_id, state, data or {})
+    else:
+        user_states[chat_id] = {'state': state, 'data': data or {}}
+
+def clear_user_state(chat_id):
+    """Очистити стан"""
+    if NEW_SYSTEM_ENABLED:
+        session_manager.clear_state(chat_id)
+    else:
+        user_states.pop(chat_id, None)
+
+def parse_price(value):
+    """Безпечний парсинг ціни"""
+    if NEW_SYSTEM_ENABLED:
+        return safe_parse_price(value)
     try:
-        items = menu_data
-        if category:
-            items = [item for item in items if item.get('Категорія') == category]
-        
-        if not items:
-            telegram.tg_send_message(chat_id, "❌ Товари не знайдені")
-            return
-        
-        # Показуємо перші 5 товарів
-        telegram.tg_send_message(chat_id, f"🍽️ <b>Меню {category if category else 'всього'}</b>\n({len(items)} позицій)")
-        
-        for item in items[:5]:
-            item_id = item.get('ID')
-            name = item.get('Страви', 'N/A')
-            price = item.get('Ціна', 0)
-            desc = item.get('Опис', '')
-            
-            text = f"<b>{name}</b>\n💰 {price} грн"
-            if desc:
-                text += f"\n📝 {desc}"
-            
-            keyboard = {
-                "inline_keyboard": [[
-                    {"text": "➕ Додати", "callback_data": f"add_item_{item_id}"},
-                    {"text": f"ℹ️ {price}грн", "callback_data": f"noop_{item_id}"}
-                ]]
+        return float(str(value).replace('грн', '').replace(' ', '').replace(',', '.').strip())
+    except:
+        return 0.0
+
+def add_to_cart(chat_id, item):
+    """Додати товар в кошик"""
+    item_id = str(item['id'])
+    price = parse_price(item.get('Ціна', 0))
+    
+    if NEW_SYSTEM_ENABLED:
+        return session_manager.add_to_cart(chat_id, item_id, 1, price)
+    else:
+        if chat_id not in user_carts:
+            user_carts[chat_id] = {}
+        if item_id in user_carts[chat_id]:
+            user_carts[chat_id][item_id]['quantity'] += 1
+        else:
+            user_carts[chat_id][item_id] = {
+                'name': item.get('Назва', 'Unknown'),
+                'price': price,
+                'quantity': 1
             }
-            
-            telegram.tg_send_message(chat_id, text, keyboard)
-        
-        # Кнопка для перегляду кошика
-        show_cart_button = {
-            "inline_keyboard": [[
-                {"text": "🛒 Переглянути кошик", "callback_data": "show_cart"},
-                {"text": "✅ Оформити", "callback_data": "checkout"}
-            ]]
-        }
-        telegram.tg_send_message(chat_id, "─" * 30, show_cart_button)
-        
-    except Exception as e:
-        logger.error(f"Error showing menu: {e}")
-        telegram.tg_send_message(chat_id, f"❌ Помилка: {e}")
+        return True
 
-def show_cart_preview(chat_id: int):
-    """Показує кошик"""
-    cart = get_cart(chat_id)
-    if not cart:
-        telegram.tg_send_message(chat_id, "🛒 Кошик порожній\n\n[Натисніть 📖 Меню]")
-        return
+def get_cart(chat_id):
+    """Отримати кошик"""
+    if NEW_SYSTEM_ENABLED:
+        cart_items = session_manager.get_cart(chat_id)
+        enriched = []
+        for cart_item in cart_items:
+            menu_item = next((m for m in menu_data if str(m['id']) == cart_item['id']), None)
+            if menu_item:
+                enriched.append({
+                    'id': cart_item['id'],
+                    'name': menu_item.get('Назва', 'Unknown'),
+                    'price': cart_item['price'],
+                    'quantity': cart_item['quantity']
+                })
+        return enriched
+    return user_carts.get(chat_id, {})
+
+def get_cart_total(chat_id):
+    """Сума кошика"""
+    if NEW_SYSTEM_ENABLED:
+        return session_manager.get_cart_total(chat_id)
     
-    total = get_cart_total(chat_id)
-    text = "🛒 <b>Ваш кошик:</b>\n\n"
-    
-    for item in cart:
-        name = item.get('name', 'N/A')
-        price = item.get('price', 0)
-        qty = item.get('quantity', 1)
-        text += f"• {name} x{qty} = {float(price) * qty:.0f} грн\n"
-    
-    text += f"\n<b>Разом: {total:.2f} грн</b>"
-    
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "✅ Оформити замовлення", "callback_data": "checkout"}],
-            [{"text": "🍽️ Додати ще", "callback_data": "show_menu"}],
-            [{"text": "🗑️ Очистити", "callback_data": "clear_cart"}]
-        ]
-    }
-    
-    telegram.tg_send_message(chat_id, text, keyboard)
+    cart = user_carts.get(chat_id, {})
+    total = 0
+    for item in cart.values():
+        try:
+            total += float(item.get('price', 0)) * int(item.get('quantity', 1))
+        except:
+            pass
+    return total
+
+def clear_cart(chat_id):
+    """Очистити кошик"""
+    if NEW_SYSTEM_ENABLED:
+        session_manager.clear_cart(chat_id)
+    else:
+        user_carts[chat_id] = {}
+
+def get_cart_count(chat_id):
+    """Кількість товарів"""
+    if NEW_SYSTEM_ENABLED:
+        return session_manager.get_cart_count(chat_id)
+    return len(user_carts.get(chat_id, {}))
 
 # ============================================================================
-# ✨ НОВА ФУНКЦІЯ: Оформлення замовлення з контактними даними
+# Menu Display
 # ============================================================================
 
-def start_checkout(chat_id: int, callback_id: str = None):
-    """Запускає процес оформлення з запитом контактних даних"""
+def show_menu_with_buttons(chat_id, category=None):
+    """Показати меню"""
+    if not menu_data:
+        telegram.tg_send_message(chat_id, "❌ Меню не завантажене")
+        return
+    
+    items = [i for i in menu_data if not category or i.get('category') == category]
+    if not items:
+        telegram.tg_send_message(chat_id, "❌ Товари не знайдені")
+        return
+    
+    buttons = []
+    for item in items[:10]:  # Перші 10
+        item_id = str(item.get('id', ''))
+        name = item.get('Назва', 'Без назви')
+        price = parse_price(item.get('Ціна', 0))
+        
+        buttons.append([
+            {'text': f"ℹ️ {name} — {price:.0f}грн", 'callback_data': f"info_{item_id}"},
+            {'text': "➕", 'callback_data': f"add_{item_id}"}
+        ])
+    
+    cart_count = get_cart_count(chat_id)
+    buttons.append([{'text': f"🛒 Кошик ({cart_count})", 'callback_data': "view_cart"}])
+    
+    telegram.tg_send_message(chat_id, "📋 *Меню*\nОберіть товар:", buttons)
+
+def show_cart_preview(chat_id):
+    """Показати кошик"""
     cart = get_cart(chat_id)
     
-    if not cart:
-        if callback_id:
-            telegram.tg_answer_callback(callback_id, "🛒 Кошик порожній", show_alert=True)
+    if not cart or (isinstance(cart, dict) and len(cart) == 0):
+        telegram.tg_send_message(chat_id, "🛒 Ваш кошик порожній")
         return
+    
+    cart_text = "🛒 *Ваш кошик:*\n\n"
+    
+    if NEW_SYSTEM_ENABLED and isinstance(cart, list):
+        for item in cart:
+            cart_text += f"• {item['name']} x{item['quantity']} = {item['price'] * item['quantity']:.0f} грн\n"
+    else:
+        for item_data in cart.values():
+            cart_text += f"• {item_data['name']} x{item_data['quantity']} = {item_data['price'] * item_data['quantity']:.0f} грн\n"
     
     total = get_cart_total(chat_id)
+    cart_text += f"\n💰 *Всього: {total:.0f} грн*"
     
-    # Мінімальна сума
-    MIN_ORDER = 200
-    if total < MIN_ORDER:
-        telegram.tg_send_message(chat_id, 
-            f"⚠️ Мінімальна сума замовлення: {MIN_ORDER} грн\n"
-            f"У вас: {total:.2f} грн\n"
-            f"Додайте ще на {MIN_ORDER - total:.2f} грн")
-        return
+    buttons = []
+    if total >= MIN_ORDER_AMOUNT:
+        buttons.append([{'text': '✅ Оформити', 'callback_data': 'checkout'}])
+    else:
+        cart_text += f"\n\n⚠️ Мін. сума: {MIN_ORDER_AMOUNT} грн"
     
-    # Запитуємо телефон
-    telegram.tg_send_message(chat_id, 
-        "📱 <b>ОФОРМЛЕННЯ ЗАМОВЛЕННЯ</b>\n\n"
-        "Введіть ваш номер телефону:\n"
-        "<code>+380971234567</code>")
-    
-    set_user_state(chat_id, "checkout_phone")
-
-def handle_phone_input(chat_id: int, text: str):
-    """Обробляє введений телефон"""
-    phone = text.strip()
-    
-    if not phone:
-        telegram.tg_send_message(chat_id, "❌ Введіть номер телефону")
-        return
-    
-    # Зберігаємо телефон
-    set_user_state(chat_id, "checkout_address", {"phone": phone})
-    
-    telegram.tg_send_message(chat_id,
-        f"✅ Номер прийнято: {phone}\n\n"
-        "📍 Введіть адресу доставки:\n"
-        "<i>вул. Руська, 12, кв. 5</i>")
-
-def handle_address_input(chat_id: int, text: str):
-    """Обробляє введену адресу і завершує замовлення"""
-    address = text.strip()
-    state_data = get_user_state(chat_id)
-    phone = state_data.get("data", {}).get("phone", "N/A")
-    
-    cart = get_cart(chat_id)
-    total = get_cart_total(chat_id)
-    
-    if not cart:
-        telegram.tg_send_message(chat_id, "❌ Кошик порожній")
-        return
-    
-    # Генеруємо ID замовлення
-    order_id = f"ORD-{int(time.time())}"
-    
-    # Форматуємо товари
-    items_text = "\n".join([
-        f"• {item.get('name')} x{item.get('quantity', 1)} = {float(item.get('price', 0)) * item.get('quantity', 1):.0f} грн"
-        for item in cart
+    buttons.append([
+        {'text': '🔙 Меню', 'callback_data': 'back_to_menu'},
+        {'text': '🗑️ Очистити', 'callback_data': 'clear_cart'}
     ])
     
-    # ✨ ВИРІШЕННЯ: Зберігаємо замовлення в базу
-    order_saved = database.save_order(
-        order_id=order_id,
-        user_id=chat_id,
-        username=chat_id,
-        items=cart,
-        total=total,
-        phone=phone,
-        address=address,
-        notes=""
-    )
-    
-    if order_saved:
-        # Підтвердження користувачу
-        confirmation = (
-            f"✅ <b>ЗАМОВЛЕННЯ #{order_id}</b>\n\n"
-            f"<b>Товари:</b>\n{items_text}\n\n"
-            f"<b>Сума:</b> {total:.2f} грн\n"
-            f"<b>Телефон:</b> {phone}\n"
-            f"<b>Адреса:</b> {address}\n\n"
-            f"Дякуємо за замовлення! 😊"
-        )
-        
-        keyboard = {
-            "inline_keyboard": [[
-                {"text": "📖 Меню", "callback_data": "show_menu"},
-                {"text": "📞 Контакти", "callback_data": "contacts"}
-            ]]
-        }
-        
-        telegram.tg_send_message(chat_id, confirmation, keyboard)
-        
-        # Повідомлення оператору
-        if config.OPERATOR_CHAT_ID:
-            op_msg = (
-                f"🔔 <b>НОВЕ ЗАМОВЛЕННЯ #{order_id}</b>\n\n"
-                f"👤 Користувач: {chat_id}\n"
-                f"📞 Телефон: {phone}\n"
-                f"📍 Адреса: {address}\n\n"
-                f"<b>Товари:</b>\n{items_text}\n\n"
-                f"💰 <b>Сума: {total:.2f} грн</b>"
-            )
-            telegram.tg_send_message(config.OPERATOR_CHAT_ID, op_msg)
-        
-        # Очищаємо кошик
-        clear_cart(chat_id)
-        clear_user_state(chat_id)
-    else:
-        telegram.tg_send_message(chat_id, "❌ Помилка при збереженні замовлення")
+    telegram.tg_send_message(chat_id, cart_text, buttons)
 
 # ============================================================================
-# WEBHOOK
+# Checkout
+# ============================================================================
+
+def start_checkout(chat_id):
+    """Початок оформлення"""
+    set_user_state(chat_id, STATE_AWAITING_PHONE)
+    telegram.tg_send_message(chat_id, "📞 Введіть номер телефону:")
+
+def handle_phone_input(chat_id, phone):
+    """Обробка телефону"""
+    if NEW_SYSTEM_ENABLED:
+        phone = sanitize_input(phone, 20)
+        if not validate_phone(phone):
+            telegram.tg_send_message(chat_id, "❌ Невірний формат\nПриклад: +380501234567")
+            return
+        phone = normalize_phone(phone)
+    else:
+        if len(phone) < 10:
+            telegram.tg_send_message(chat_id, "❌ Занадто короткий номер")
+            return
+    
+    set_user_state(chat_id, STATE_AWAITING_ADDRESS, {'phone': phone})
+    telegram.tg_send_message(chat_id, "📍 Введіть адресу доставки:")
+
+def handle_address_input(chat_id, address):
+    """Обробка адреси"""
+    if NEW_SYSTEM_ENABLED:
+        address = sanitize_input(address, 200)
+        if not validate_address(address):
+            telegram.tg_send_message(chat_id, "❌ Занадто коротка адреса")
+            return
+        state_data = session_manager.get_state_data(chat_id)
+        phone = state_data.get('phone', 'N/A')
+    else:
+        phone = user_states.get(chat_id, {}).get('data', {}).get('phone', 'N/A')
+    
+    cart = get_cart(chat_id)
+    total = get_cart_total(chat_id)
+    
+    order_text = f"""✅ *Замовлення оформлене!*
+
+📞 {phone}
+📍 {address}
+
+🛒 *Товари:*
+"""
+    
+    if NEW_SYSTEM_ENABLED and isinstance(cart, list):
+        items_list = []
+        for item in cart:
+            order_text += f"• {item['name']} x{item['quantity']}\n"
+            items_list.append({'name': item['name'], 'quantity': item['quantity'], 'price': item['price']})
+    else:
+        items_list = []
+        for item_data in cart.values():
+            order_text += f"• {item_data['name']} x{item_data['quantity']}\n"
+            items_list.append({'name': item_data['name'], 'quantity': item_data['quantity'], 'price': item_data['price']})
+    
+    order_text += f"\n💰 Всього: {total:.0f} грн\n\n✨ Зв'яжемося найближчим часом!"
+    
+    telegram.tg_send_message(chat_id, order_text)
+    
+    try:
+        database.save_order(str(chat_id), phone, address, items_list, total)
+        logger.info(f"✅ Order saved for {chat_id}")
+    except Exception as e:
+        logger.error(f"❌ Order save error: {e}")
+    
+    clear_cart(chat_id)
+    clear_user_state(chat_id)
+
+# ============================================================================
+# Webhook
 # ============================================================================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """Головний webhook handler"""
     try:
-        update = request.json
+        secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+        expected = os.getenv('WEBHOOK_SECRET', 'default_secret')
         
-        # Перевірка webhook secret
-        if config.WEBHOOK_SECRET:
-            secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-            if secret_token != config.WEBHOOK_SECRET:
-                logger.warning("❌ Invalid webhook secret")
-                return jsonify({"ok": False}), 401
+        if secret != expected:
+            logger.warning("⚠️ Invalid secret")
+            return jsonify({'ok': False}), 403
         
-        logger.info(f"📥 Update: {update.get('update_id')}")
+        data = request.json
         
-        # ============ ПОВІДОМЛЕННЯ ============
-        if 'message' in update:
-            msg = update['message']
-            chat_id = msg['chat']['id']
-            text = msg.get('text', '').strip()
+        # Callback query
+        if 'callback_query' in data:
+            callback = data['callback_query']
+            callback_id = callback['id']
+            chat_id = callback['message']['chat']['id']
+            callback_data = callback['data']
             
-            user_state = get_user_state(chat_id).get("state")
+            telegram.tg_answer_callback(callback_id)
             
-            # Обробляємо стани
-            if user_state == "checkout_phone":
-                handle_phone_input(chat_id, text)
-                return jsonify({"ok": True})
-            
-            elif user_state == "checkout_address":
-                handle_address_input(chat_id, text)
-                return jsonify({"ok": True})
-            
-            # Команди
-            if text == '/start':
-                telegram.tg_send_message(chat_id,
-                    "👋 Вітаємо в <b>Hubsy Bot</b>!\n\n"
-                    "Оберіть дію:",
-                    {"keyboard": [
-                        ["📖 Меню", "🛒 Кошик"],
-                        ["🆘 Допомога"]
-                    ], "resize_keyboard": True})
-                
-            elif text in ['📖 Меню', '/menu']:
-                show_menu_with_buttons(chat_id)
-            
-            elif text in ['🛒 Кошик', '/cart']:
-                show_cart_preview(chat_id)
-            
-            elif text == '🆘 Допомога' or text == '/help':
-                telegram.tg_send_message(chat_id, "ℹ️ Допомога в розробці")
-        
-        # ============ CALLBACK QUERIES (inline кнопки) ============
-        elif 'callback_query' in update:
-            cb = update['callback_query']
-            chat_id = cb['message']['chat']['id']
-            callback_data = cb.get('data', '')
-            callback_id = cb['id']
-            
-            logger.info(f"Callback: {callback_data}")
-            
-            # Додавання товару в кошик
-            if callback_data.startswith("add_item_"):
-                item_id = callback_data.replace("add_item_", "")
-                item = next((x for x in menu_data if str(x.get('ID')) == str(item_id)), None)
-                
+            if callback_data.startswith('add_'):
+                item_id = callback_data.split('_')[1]
+                item = next((i for i in menu_data if str(i['id']) == item_id), None)
                 if item:
-                    add_to_cart(chat_id, {
-                        'id': item_id,
-                        'name': item.get('Страви', 'N/A'),
-                        'price': item.get('Ціна', 0)
-                    })
-                    
-                    cart_count = sum(i.get('quantity', 1) for i in get_cart(chat_id))
-                    telegram.tg_answer_callback(callback_id, 
-                        f"✅ {item.get('Страви')} додано!\n🛒 У кошику: {cart_count} поз.")
+                    add_to_cart(chat_id, item)
+                    telegram.tg_send_message(chat_id, f"✅ Додано: {item.get('Назва')}")
             
-            # Показати кошик
-            elif callback_data == "show_cart":
+            elif callback_data == 'view_cart':
                 show_cart_preview(chat_id)
-                telegram.tg_answer_callback(callback_id)
             
-            # Оформити замовлення
-            elif callback_data == "checkout":
-                start_checkout(chat_id, callback_id)
-                telegram.tg_answer_callback(callback_id)
-            
-            # Показати меню
-            elif callback_data == "show_menu":
+            elif callback_data == 'back_to_menu':
                 show_menu_with_buttons(chat_id)
-                telegram.tg_answer_callback(callback_id)
             
-            # Очистити кошик
-            elif callback_data == "clear_cart":
+            elif callback_data == 'clear_cart':
                 clear_cart(chat_id)
-                telegram.tg_answer_callback(callback_id, "🗑️ Кошик очищено")
+                telegram.tg_send_message(chat_id, "🗑️ Кошик очищено")
+            
+            elif callback_data == 'checkout':
+                start_checkout(chat_id)
+            
+            elif callback_data.startswith('info_'):
+                item_id = callback_data.split('_')[1]
+                item = next((i for i in menu_data if str(i['id']) == item_id), None)
+                if item:
+                    price = parse_price(item.get('Ціна', 0))
+                    info_text = f"📦 *{item.get('Назва')}*\n\n💰 {price:.0f} грн\n📝 {item.get('Опис', 'Опис відсутній')}"
+                    telegram.tg_send_message(chat_id, info_text)
+        
+        # Message
+        elif 'message' in data:
+            msg = data['message']
+            chat_id = msg['chat']['id']
+            text = msg.get('text', '')
+            
+            current_state = get_user_state(chat_id)
+            
+            if text == '/start':
+                clear_user_state(chat_id)
+                telegram.tg_send_message(chat_id, "👋 Вітаємо! Використовуйте /menu")
+            
+            elif text == '/menu':
+                show_menu_with_buttons(chat_id)
+            
+            elif text == '/cart':
                 show_cart_preview(chat_id)
+            
+            elif current_state == STATE_AWAITING_PHONE:
+                handle_phone_input(chat_id, text)
+            
+            elif current_state == STATE_AWAITING_ADDRESS:
+                handle_address_input(chat_id, text)
             
             else:
-                telegram.tg_answer_callback(callback_id)
+                telegram.tg_send_message(chat_id, "❓ Невідома команда. Спробуйте /menu")
         
-        return jsonify({"ok": True}), 200
-    
+        return jsonify({'ok': True}), 200
+        
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
-        return jsonify({"ok": False}), 500
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+# ============================================================================
+# Health Check
+# ============================================================================
 
 @app.route('/')
 def index():
-    return jsonify({"status": "ok", "bot": "Hubsy Bot", "version": "3.4.0"})
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'ok',
+        'bot': 'Ferrik Bot',
+        'version': '2.0',
+        'new_system': NEW_SYSTEM_ENABLED,
+        'menu_items': len(menu_data)
+    })
 
 @app.route('/health')
 def health():
-    db_ok, db_info = database.test_connection()
+    """Detailed health check"""
+    import os
+    
     return jsonify({
-        "status": "healthy" if db_ok else "degraded",
-        "database": db_info,
-        "menu_items": len(menu_data)
+        'status': 'healthy',
+        'database': os.path.exists('bot.db'),
+        'menu_loaded': len(menu_data) > 0,
+        'new_system': NEW_SYSTEM_ENABLED,
+        'environment': os.getenv('ENVIRONMENT', 'unknown')
     })
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', config.PORT))
-    app.run(host='0.0.0.0', port=port, debug=config.DEBUG)
+# ============================================================================
+# Initialization
+# ============================================================================
+
+def initialize():
+    """Ініціалізація бота"""
+    global menu_data
+    
+    logger.info("=" * 60)
+    logger.info("🚀 Initializing Ferrik Bot")
+    logger.info("=" * 60)
+    
+    # Завантажити меню
+    try:
+        menu_data = sheets.get_menu_from_sheet()
+        logger.info(f"✅ Menu loaded: {len(menu_data)} items")
+    except Exception as e:
+        logger.error(f"❌ Menu load error: {e}")
+        menu_data = []
+    
+    # Налаштувати webhook
+    try:
+        webhook_url = os.getenv('WEBHOOK_URL')
+        
+        if not webhook_url:
+            # Render встановлює RENDER_EXTERNAL_URL автоматично
+            render_url = os.getenv('RENDER_EXTERNAL_URL')
+            if render_url:
+                webhook_url = f"{render_url}/webhook"
+        
+        if webhook_url:
+            telegram.tg_set_webhook(webhook_url)
+            logger.info(f"✅ Webhook set: {webhook_url}")
+        else:
+            logger.warning("⚠️ No webhook URL configured")
+    
+    except Exception as e:
+        logger.error(f"❌ Webhook setup error: {e}")
+    
+    logger.info("=" * 60)
+    logger.info("✅ Bot initialization complete!")
+    logger.info("=" * 60)
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+if __name__ == "__main__":
+    # Отримати порт (Render встановлює PORT автоматично)
+    port = int(os.getenv('PORT', 10000))
+    debug = os.getenv('DEBUG', 'false').lower() == 'true'
+    
+    # Показати конфігурацію
+    logger.info("=" * 60)
+    logger.info("🤖 CONFIGURATION")
+    logger.info("=" * 60)
+    logger.info(f"Port: {port}")
+    logger.info(f"Debug: {debug}")
+    logger.info(f"New System: {NEW_SYSTEM_ENABLED}")
+    logger.info(f"Environment: {os.getenv('ENVIRONMENT', 'unknown')}")
+    logger.info(f"Database: {'bot.db'}")
+    logger.info("=" * 60)
+    
+    # Ініціалізація (ТІЛЬКИ тут, не при імпорті!)
+    initialize()
+    
+    # Запуск Flask
+    logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port, debug=debug)

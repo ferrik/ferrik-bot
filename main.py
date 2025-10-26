@@ -632,6 +632,8 @@ def admin_sync_menu():
 # Initialization
 # ============================================================================
 
+# ЗНАЙТИ функцію initialize() в main.py та ЗАМІНИТИ на:
+
 def initialize():
     """Ініціалізація бота"""
     global menu_data
@@ -640,19 +642,54 @@ def initialize():
     logger.info("🚀 Initializing Ferrik Bot")
     logger.info("=" * 60)
     
-    # Виконати міграцію 002 (menu_items)
+    # ДОДАТИ: Виконати міграцію 002 (menu_items)
     if NEW_SYSTEM_ENABLED and sync_service:
         try:
             import sqlite3
             conn = sqlite3.connect('bot.db')
             
+            # Спробувати завантажити з файлу
             migration_file = 'migrations/002_add_menu_items.sql'
             if os.path.exists(migration_file):
+                logger.info("📄 Loading migration from file...")
                 with open(migration_file, 'r', encoding='utf-8') as f:
                     conn.executescript(f.read())
-                conn.commit()
-                logger.info("✅ Menu migration 002 executed")
+                logger.info("✅ Migration 002 executed from file")
+            else:
+                # Якщо файлу немає - створити таблиці вручну
+                logger.warning("⚠️ Migration file not found, creating tables manually")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS menu_items (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        price REAL NOT NULL CHECK(price >= 0),
+                        category TEXT,
+                        description TEXT,
+                        image_url TEXT,
+                        available BOOLEAN DEFAULT 1,
+                        sort_order INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_menu_category ON menu_items(category)
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sync_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        sync_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        items_count INTEGER,
+                        error_message TEXT,
+                        synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                logger.info("✅ Tables created manually")
+            
+            conn.commit()
             conn.close()
+            
         except Exception as e:
             logger.error(f"❌ Migration error: {e}")
     
@@ -669,15 +706,23 @@ def initialize():
                 )
                 # Завантажити з БД
                 menu_data = sync_service.get_menu_from_db()
+                logger.info(f"📋 Menu loaded from DB: {len(menu_data)} items")
             else:
                 logger.error(f"❌ Menu sync failed: {result['errors']}")
                 # Fallback: завантажити прямо з Sheets
+                logger.info("🔄 Fallback: loading menu directly from Sheets")
                 menu_data = sheets.get_menu_from_sheet()
+                logger.info(f"✅ Menu loaded from Sheets: {len(menu_data)} items")
         
         except Exception as e:
             logger.error(f"❌ Sync error: {e}")
             # Fallback
-            menu_data = sheets.get_menu_from_sheet()
+            try:
+                menu_data = sheets.get_menu_from_sheet()
+                logger.info(f"✅ Menu loaded from Sheets (fallback): {len(menu_data)} items")
+            except Exception as e2:
+                logger.error(f"❌ Sheets load error: {e2}")
+                menu_data = []
     else:
         # Старий метод: завантажити з Sheets
         try:
@@ -687,12 +732,17 @@ def initialize():
             logger.error(f"❌ Menu load error: {e}")
             menu_data = []
     
+    # ВАЖЛИВО: Перевірити що меню не порожнє
+    if not menu_data:
+        logger.error("❌ WARNING: Menu is empty! Bot will not work properly!")
+    else:
+        logger.info(f"✅ Menu ready: {len(menu_data)} items available")
+    
     # Налаштувати webhook
     try:
         webhook_url = os.getenv('WEBHOOK_URL')
         
         if not webhook_url:
-            # Render встановлює RENDER_EXTERNAL_URL автоматично
             render_url = os.getenv('RENDER_EXTERNAL_URL')
             if render_url:
                 webhook_url = f"{render_url}/webhook"

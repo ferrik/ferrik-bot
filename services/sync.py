@@ -1,5 +1,6 @@
 """
 🔄 Сервіс синхронізації даних з Google Sheets в БД
+ВИПРАВЛЕНО: Маппінг для твоїх колонок
 """
 import logging
 import sqlite3
@@ -48,11 +49,18 @@ class SyncService:
                 result['errors'].append("No items in source")
                 return result
             
+            logger.info(f"📊 Found {len(sheets_data)} items in Sheets")
+            
             # Отримати існуючі ID з БД
             existing_ids = set()
-            rows = self.db.execute("SELECT id FROM menu_items").fetchall()
-            for row in rows:
-                existing_ids.add(row[0])
+            try:
+                rows = self.db.execute("SELECT id FROM menu_items").fetchall()
+                for row in rows:
+                    existing_ids.add(row[0])
+            except Exception as e:
+                logger.warning(f"⚠️ Table menu_items doesn't exist yet: {e}")
+                # Створити таблицю
+                self._create_menu_table()
             
             # ID з Sheets
             sheets_ids = set()
@@ -60,24 +68,31 @@ class SyncService:
             # Синхронізувати кожен товар
             for item in sheets_data:
                 try:
-                    item_id = str(item.get('id', ''))
+                    # ВИПРАВЛЕНО: Маппінг для твоїх колонок
+                    item_id = str(item.get('ID', ''))
                     if not item_id:
-                        result['errors'].append(f"Item without ID: {item.get('Назва', 'Unknown')}")
+                        result['errors'].append(f"Item without ID: {item.get('Страви', 'Unknown')}")
                         continue
                     
                     sheets_ids.add(item_id)
                     
-                    # Парсити дані
-                    name = item.get('Назва', 'Без назви')
+                    # Парсити дані з ТВОЇМИ назвами колонок
+                    name = item.get('Страви', 'Без назви')  # ← ВИПРАВЛЕНО: 'Страви' замість 'Назва'
                     price = self._parse_price(item.get('Ціна', 0))
                     category = item.get('Категорія', 'Інше')
                     description = item.get('Опис', '')
-                    image_url = item.get('Фото', '')
-                    available = item.get('Доступно', True)
+                    image_url = item.get('Фото URL', '')
+                    restaurant = item.get('Ресторан', '')
+                    delivery_time = item.get('Час Доставки (хв)', '')
                     
-                    # Конвертувати available в boolean
+                    # Активний (так/ні)
+                    available = item.get('Активний', 'так')
                     if isinstance(available, str):
-                        available = available.lower() not in ['ні', 'no', 'false', '0', 'немає']
+                        available = available.lower() in ['так', 'yes', 'true', '1']
+                    else:
+                        available = bool(available)
+                    
+                    logger.debug(f"Processing: {item_id} - {name} - {price} грн")
                     
                     # Перевірити чи існує
                     if item_id in existing_ids:
@@ -89,6 +104,7 @@ class SyncService:
                             WHERE id = ?
                         """, (name, price, category, description, image_url, available, datetime.now(), item_id))
                         result['updated'] += 1
+                        logger.debug(f"✅ Updated: {name}")
                     else:
                         # Додати новий
                         self.db.execute("""
@@ -96,9 +112,10 @@ class SyncService:
                             VALUES (?, ?, ?, ?, ?, ?, ?)
                         """, (item_id, name, price, category, description, image_url, available))
                         result['added'] += 1
+                        logger.debug(f"✅ Added: {name}")
                 
                 except Exception as e:
-                    error_msg = f"Error syncing item {item.get('id', 'unknown')}: {e}"
+                    error_msg = f"Error syncing item {item.get('ID', 'unknown')}: {e}"
                     logger.error(f"❌ {error_msg}")
                     result['errors'].append(error_msg)
             
@@ -126,7 +143,7 @@ class SyncService:
             
         except Exception as e:
             error_msg = f"Sync failed: {e}"
-            logger.error(f"❌ {error_msg}")
+            logger.error(f"❌ {error_msg}", exc_info=True)
             result['errors'].append(error_msg)
             self._log_sync('menu', 'error', 0, error_msg)
         
@@ -137,7 +154,7 @@ class SyncService:
         Завантажити меню з БД
         
         Returns:
-            List[Dict] - список товарів
+            List[Dict] - список товарів у форматі, який очікує бот
         """
         try:
             rows = self.db.execute("""
@@ -149,9 +166,10 @@ class SyncService:
             
             menu_items = []
             for row in rows:
+                # Повертаємо у форматі, який очікує main.py
                 menu_items.append({
                     'id': row[0],
-                    'Назва': row[1],
+                    'Назва': row[1],  # Для сумісності зі старим кодом
                     'Ціна': row[2],
                     'Категорія': row[3],
                     'Опис': row[4],
@@ -160,12 +178,46 @@ class SyncService:
                     'sort_order': row[7]
                 })
             
-            logger.debug(f"📋 Loaded {len(menu_items)} items from DB")
+            logger.info(f"📋 Loaded {len(menu_items)} items from DB")
             return menu_items
             
         except Exception as e:
             logger.error(f"❌ Error loading menu from DB: {e}")
             return []
+    
+    def _create_menu_table(self):
+        """Створити таблицю menu_items якщо не існує"""
+        try:
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS menu_items (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    price REAL NOT NULL CHECK(price >= 0),
+                    category TEXT,
+                    description TEXT,
+                    image_url TEXT,
+                    available BOOLEAN DEFAULT 1,
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS sync_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sync_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    items_count INTEGER,
+                    error_message TEXT,
+                    synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            self.db.commit()
+            logger.info("✅ Tables created successfully")
+        except Exception as e:
+            logger.error(f"❌ Error creating tables: {e}")
     
     def get_last_sync_info(self) -> Optional[Dict]:
         """Отримати інформацію про останню синхронізацію"""
@@ -194,14 +246,19 @@ class SyncService:
     
     def _parse_price(self, value) -> float:
         """Безпечний парсинг ціни"""
-        if value is None:
+        if value is None or value == '':
             return 0.0
         
         try:
+            # Якщо вже float
+            if isinstance(value, (int, float)):
+                return float(value)
+            
             # Видалити текст і конвертувати
             clean = str(value).replace('грн', '').replace(' ', '').replace(',', '.').strip()
             return float(clean) if clean else 0.0
         except:
+            logger.warning(f"⚠️ Could not parse price: {value}")
             return 0.0
     
     def _log_sync(self, sync_type: str, status: str, items_count: int, error_message: str = None):
@@ -238,7 +295,7 @@ class MenuSyncScheduler:
         if not self.last_sync:
             return True
         
-        from datetime import datetime, timedelta
+        from datetime import timedelta
         now = datetime.now()
         return (now - self.last_sync) > timedelta(minutes=self.interval_minutes)
     

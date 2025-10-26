@@ -116,6 +116,14 @@ import services.telegram as telegram
 import services.sheets as sheets
 import services.database as database
 
+# Імпорт sync сервісу (після створення БД)
+try:
+    from app.services.sync import SyncService, MenuSyncScheduler
+    SYNC_ENABLED = True
+except ImportError:
+    SYNC_ENABLED = False
+    logger.warning("⚠️ Sync service not available")
+
 # ============================================================================
 # Flask App
 # ============================================================================
@@ -125,11 +133,20 @@ app = Flask(__name__)
 # Global Variables
 # ============================================================================
 menu_data = []
+sync_service = None
+sync_scheduler = None
 
 # SessionManager або fallback словники
 if NEW_SYSTEM_ENABLED:
     # Ініціалізувати SessionManager (він сам створить підключення)
     session_manager = SessionManager(db_path='bot.db')
+    
+    # Ініціалізувати SyncService
+    if SYNC_ENABLED:
+        db_conn = session_manager.db  # Використати те саме підключення
+        sync_service = SyncService(db_conn, sheets)
+        sync_scheduler = MenuSyncScheduler(sync_service, interval_minutes=30)
+        logger.info("✅ Sync service initialized (auto-sync every 30 min)")
     
     from app.services.session import LegacyDictWrapper
     user_states = LegacyDictWrapper(session_manager, 'states')
@@ -248,11 +265,26 @@ def get_cart_count(chat_id):
 
 def show_menu_with_buttons(chat_id, category=None):
     """Показати меню"""
-    if not menu_data:
+    # Автоматична синхронізація якщо потрібно
+    if sync_scheduler:
+        sync_result = sync_scheduler.sync_if_needed()
+        if sync_result:
+            logger.info(f"🔄 Auto-sync completed: +{sync_result['added']}, ~{sync_result['updated']}")
+    
+    # Завантажити з БД якщо можливо, інакше з пам'яті
+    if sync_service:
+        items = sync_service.get_menu_from_db()
+    else:
+        items = menu_data
+    
+    if not items:
         telegram.tg_send_message(chat_id, "❌ Меню не завантажене")
         return
     
-    items = [i for i in menu_data if not category or i.get('category') == category]
+    # Фільтр по категорії
+    if category:
+        items = [i for i in items if i.get('Категорія') == category]
+    
     if not items:
         telegram.tg_send_message(chat_id, "❌ Товари не знайдені")
         return
@@ -506,7 +538,6 @@ def webhook():
                     "🔄 /start - Почати спочатку\n\n" +
                     "💡 Використовуйте кнопки знизу для швидкого доступу!"
                 )
-            
             # Обробка станів (введення телефону/адреси)
             elif current_state == STATE_AWAITING_PHONE:
                 handle_phone_input(chat_id, text)
@@ -535,7 +566,7 @@ def webhook():
 # Health Check
 # ============================================================================
 
-app.route('/')
+@app.route('/')
 def index():
     """Health check endpoint"""
     return jsonify({
@@ -549,13 +580,53 @@ def index():
 @app.route('/health')
 def health():
     """Detailed health check"""
+    sync_info = None
+    if sync_service:
+        sync_info = sync_service.get_last_sync_info()
+    
     return jsonify({
         'status': 'healthy',
         'database': os.path.exists('bot.db'),
         'menu_loaded': len(menu_data) > 0,
         'new_system': NEW_SYSTEM_ENABLED,
+        'sync_enabled': SYNC_ENABLED,
+        'last_sync': sync_info,
         'environment': os.getenv('ENVIRONMENT', 'unknown')
     })
+
+@app.route('/admin/sync_menu', methods=['POST'])
+def admin_sync_menu():
+    """Примусова синхронізація меню (для адміністратора)"""
+    # Перевірка токену
+    token = request.headers.get('X-Admin-Token') or request.args.get('token')
+    admin_token = os.getenv('ADMIN_TOKEN', 'secret')
+    
+    if token != admin_token:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    if not sync_service:
+        return jsonify({'error': 'Sync service not available'}), 503
+    
+    try:
+        logger.info("🔄 Manual sync triggered by admin")
+        result = sync_service.sync_menu_from_sheets()
+        
+        # Оновити sync_scheduler
+        if sync_scheduler:
+            sync_scheduler.last_sync = datetime.now()
+        
+        return jsonify({
+            'success': result['success'],
+            'added': result['added'],
+            'updated': result['updated'],
+            'deleted': result['deleted'],
+            'total': result['total_items'],
+            'errors': result['errors']
+        })
+    
+    except Exception as e:
+        logger.error(f"❌ Admin sync error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # ============================================================================
 # Initialization
@@ -569,13 +640,52 @@ def initialize():
     logger.info("🚀 Initializing Ferrik Bot")
     logger.info("=" * 60)
     
-    # Завантажити меню
-    try:
-        menu_data = sheets.get_menu_from_sheet()
-        logger.info(f"✅ Menu loaded: {len(menu_data)} items")
-    except Exception as e:
-        logger.error(f"❌ Menu load error: {e}")
-        menu_data = []
+    # Виконати міграцію 002 (menu_items)
+    if NEW_SYSTEM_ENABLED and sync_service:
+        try:
+            import sqlite3
+            conn = sqlite3.connect('bot.db')
+            
+            migration_file = 'migrations/002_add_menu_items.sql'
+            if os.path.exists(migration_file):
+                with open(migration_file, 'r', encoding='utf-8') as f:
+                    conn.executescript(f.read())
+                conn.commit()
+                logger.info("✅ Menu migration 002 executed")
+            conn.close()
+        except Exception as e:
+            logger.error(f"❌ Migration error: {e}")
+    
+    # Синхронізувати меню з Sheets → БД
+    if sync_service:
+        try:
+            logger.info("🔄 Initial menu sync...")
+            result = sync_service.sync_menu_from_sheets()
+            
+            if result['success']:
+                logger.info(
+                    f"✅ Menu synced: {result['total_items']} items " +
+                    f"(+{result['added']} new, ~{result['updated']} updated)"
+                )
+                # Завантажити з БД
+                menu_data = sync_service.get_menu_from_db()
+            else:
+                logger.error(f"❌ Menu sync failed: {result['errors']}")
+                # Fallback: завантажити прямо з Sheets
+                menu_data = sheets.get_menu_from_sheet()
+        
+        except Exception as e:
+            logger.error(f"❌ Sync error: {e}")
+            # Fallback
+            menu_data = sheets.get_menu_from_sheet()
+    else:
+        # Старий метод: завантажити з Sheets
+        try:
+            menu_data = sheets.get_menu_from_sheet()
+            logger.info(f"✅ Menu loaded from Sheets: {len(menu_data)} items")
+        except Exception as e:
+            logger.error(f"❌ Menu load error: {e}")
+            menu_data = []
     
     # Налаштувати webhook
     try:
@@ -603,6 +713,7 @@ def initialize():
 # ============================================================================
 # Main Entry Point
 # ============================================================================
+
 if __name__ == "__main__":
     # Отримати порт (Render встановлює PORT автоматично)
     port = int(os.getenv('PORT', 10000))
@@ -625,4 +736,3 @@ if __name__ == "__main__":
     # Запуск Flask
     logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=debug)
-    

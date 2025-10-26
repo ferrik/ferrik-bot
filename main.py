@@ -6,6 +6,7 @@
 """
 import os
 import sys
+import re
 import logging
 from flask import Flask, request, jsonify
 
@@ -138,7 +139,7 @@ else:
     user_states = {}
     user_carts = {}
     logger.info("📦 Using in-memory storage (legacy)")
-    
+
 # Константи станів
 STATE_IDLE = 'STATE_IDLE'
 STATE_AWAITING_PHONE = 'STATE_AWAITING_PHONE'
@@ -277,7 +278,7 @@ def show_cart_preview(chat_id):
     cart = get_cart(chat_id)
     
     if not cart or (isinstance(cart, dict) and len(cart) == 0):
-        telegram.tg_send_message(chat_id, "🛒 Ваш кошик порожній")
+        telegram.tg_send_message(chat_id, "🛒 Ваш кошик порожній\n\nВикористовуйте /menu щоб додати товари")
         return
     
     cart_text = "🛒 *Ваш кошик:*\n\n"
@@ -312,30 +313,42 @@ def show_cart_preview(chat_id):
 def start_checkout(chat_id):
     """Початок оформлення"""
     set_user_state(chat_id, STATE_AWAITING_PHONE)
-    telegram.tg_send_message(chat_id, "📞 Введіть номер телефону:")
+    telegram.tg_send_message(chat_id, "📞 *Крок 1/2: Контактні дані*\n\nВведіть номер телефону:\n_(Приклад: +380501234567)_")
 
 def handle_phone_input(chat_id, phone):
     """Обробка телефону"""
     if NEW_SYSTEM_ENABLED:
         phone = sanitize_input(phone, 20)
         if not validate_phone(phone):
-            telegram.tg_send_message(chat_id, "❌ Невірний формат\nПриклад: +380501234567")
+            telegram.tg_send_message(
+                chat_id, 
+                "❌ Невірний формат телефону\n\n" +
+                "Приклади правильного формату:\n" +
+                "• +380501234567\n" +
+                "• 0501234567\n\n" +
+                "Спробуйте ще раз:"
+            )
             return
         phone = normalize_phone(phone)
     else:
         if len(phone) < 10:
-            telegram.tg_send_message(chat_id, "❌ Занадто короткий номер")
+            telegram.tg_send_message(chat_id, "❌ Занадто короткий номер. Спробуйте ще раз:")
             return
     
     set_user_state(chat_id, STATE_AWAITING_ADDRESS, {'phone': phone})
-    telegram.tg_send_message(chat_id, "📍 Введіть адресу доставки:")
+    telegram.tg_send_message(chat_id, "📍 *Крок 2/2: Адреса доставки*\n\nВведіть вашу адресу:\n_(Вкажіть місто, вулицю, будинок, квартиру)_")
 
 def handle_address_input(chat_id, address):
     """Обробка адреси"""
     if NEW_SYSTEM_ENABLED:
         address = sanitize_input(address, 200)
         if not validate_address(address):
-            telegram.tg_send_message(chat_id, "❌ Занадто коротка адреса")
+            telegram.tg_send_message(
+                chat_id, 
+                "❌ Занадто коротка адреса або відсутній номер будинку\n\n" +
+                "Приклад: м. Київ, вул. Хрещатик, буд. 1, кв. 10\n\n" +
+                "Спробуйте ще раз:"
+            )
             return
         state_data = session_manager.get_state_data(chat_id)
         phone = state_data.get('phone', 'N/A')
@@ -345,10 +358,10 @@ def handle_address_input(chat_id, address):
     cart = get_cart(chat_id)
     total = get_cart_total(chat_id)
     
-    order_text = f"""✅ *Замовлення оформлене!*
+    order_text = f"""✅ *Замовлення успішно оформлене!*
 
-📞 {phone}
-📍 {address}
+📞 Телефон: {phone}
+📍 Адреса: {address}
 
 🛒 *Товари:*
 """
@@ -356,21 +369,21 @@ def handle_address_input(chat_id, address):
     if NEW_SYSTEM_ENABLED and isinstance(cart, list):
         items_list = []
         for item in cart:
-            order_text += f"• {item['name']} x{item['quantity']}\n"
+            order_text += f"• {item['name']} x{item['quantity']} — {item['price'] * item['quantity']:.0f} грн\n"
             items_list.append({'name': item['name'], 'quantity': item['quantity'], 'price': item['price']})
     else:
         items_list = []
         for item_data in cart.values():
-            order_text += f"• {item_data['name']} x{item_data['quantity']}\n"
+            order_text += f"• {item_data['name']} x{item_data['quantity']} — {item_data['price'] * item_data['quantity']:.0f} грн\n"
             items_list.append({'name': item_data['name'], 'quantity': item_data['quantity'], 'price': item_data['price']})
     
-    order_text += f"\n💰 Всього: {total:.0f} грн\n\n✨ Зв'яжемося найближчим часом!"
+    order_text += f"\n💰 *Загальна сума: {total:.0f} грн*\n\n✨ Дякуємо за замовлення! Ми зв'яжемося з вами найближчим часом."
     
     telegram.tg_send_message(chat_id, order_text)
     
     try:
         database.save_order(str(chat_id), phone, address, items_list, total)
-        logger.info(f"✅ Order saved for {chat_id}")
+        logger.info(f"✅ Order saved for {chat_id}: {total} грн")
     except Exception as e:
         logger.error(f"❌ Order save error: {e}")
     
@@ -383,16 +396,34 @@ def handle_address_input(chat_id, address):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Головний webhook handler"""
+    """Головний webhook handler з дедуплікацією"""
     try:
+        data = request.json
+        
+        # Дедуплікація update_id
+        update_id = data.get('update_id')
+        if not hasattr(webhook, 'processed_updates'):
+            webhook.processed_updates = set()
+        
+        if update_id and update_id in webhook.processed_updates:
+            logger.debug(f"⏭️ Skipping duplicate update {update_id}")
+            return jsonify({'ok': True}), 200
+        
+        if update_id:
+            webhook.processed_updates.add(update_id)
+            # Очищення старих (зберігати останні 100)
+            if len(webhook.processed_updates) > 100:
+                webhook.processed_updates = set(list(webhook.processed_updates)[-100:])
+        
+        # Перевірка секрету
         secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
         expected = os.getenv('WEBHOOK_SECRET', 'default_secret')
         
         if secret != expected:
-            logger.warning("⚠️ Invalid secret")
+            logger.warning("⚠️ Invalid webhook secret")
             return jsonify({'ok': False}), 403
         
-        data = request.json
+        logger.debug(f"📨 Processing update {update_id}")
         
         # Callback query
         if 'callback_query' in data:
@@ -401,6 +432,8 @@ def webhook():
             chat_id = callback['message']['chat']['id']
             callback_data = callback['data']
             
+            logger.info(f"🖱️ Callback from {chat_id}: {callback_data}")
+            
             telegram.tg_answer_callback(callback_id)
             
             if callback_data.startswith('add_'):
@@ -408,7 +441,7 @@ def webhook():
                 item = next((i for i in menu_data if str(i['id']) == item_id), None)
                 if item:
                     add_to_cart(chat_id, item)
-                    telegram.tg_send_message(chat_id, f"✅ Додано: {item.get('Назва')}")
+                    telegram.tg_send_message(chat_id, f"✅ Додано в кошик: {item.get('Назва')}")
             
             elif callback_data == 'view_cart':
                 show_cart_preview(chat_id)
@@ -428,7 +461,7 @@ def webhook():
                 item = next((i for i in menu_data if str(i['id']) == item_id), None)
                 if item:
                     price = parse_price(item.get('Ціна', 0))
-                    info_text = f"📦 *{item.get('Назва')}*\n\n💰 {price:.0f} грн\n📝 {item.get('Опис', 'Опис відсутній')}"
+                    info_text = f"📦 *{item.get('Назва')}*\n\n💰 Ціна: {price:.0f} грн\n\n📝 {item.get('Опис', 'Опис відсутній')}"
                     telegram.tg_send_message(chat_id, info_text)
         
         # Message
@@ -437,47 +470,60 @@ def webhook():
             chat_id = msg['chat']['id']
             text = msg.get('text', '').strip()
             
-            # Логування
-            logger.info(f"📥 Message from {chat_id}: {text}")
+            # Видалити ВСІ emoji для порівняння (залишити тільки букви і цифри)
+            text_clean = ''.join(c for c in text if c.isalnum() or c.isspace()).strip().lower()
+            
+            logger.info(f"📥 Message from {chat_id}: '{text}' -> '{text_clean}'")
             
             current_state = get_user_state(chat_id)
             
-            # Команди (з підтримкою текстових варіантів)
-            if text.startswith('/start') or text.lower() == 'start':
+            # Команди (з підтримкою текстових варіантів та emoji)
+            if text.startswith('/start') or 'start' in text_clean:
                 clear_user_state(chat_id)
                 telegram.tg_send_message(
                     chat_id,
-                    "👋 Вітаємо в Ferrik Bot!\n\n" +
-                    "Використовуйте команди:\n" +
-                    "/menu - Каталог товарів\n" +
-                    "/cart - Кошик"
+                    "👋 *Вітаємо в Ferrik Bot!*\n\n" +
+                    "Використовуйте кнопки знизу або команди:\n" +
+                    "📋 /menu - Каталог товарів\n" +
+                    "🛒 /cart - Кошик\n" +
+                    "❓ /help - Допомога"
                 )
             
-            elif text.startswith('/menu') or text.lower() in ['меню', 'menu', '📋 меню']:
+            elif text.startswith('/menu') or 'menu' in text_clean or 'меню' in text_clean:
                 show_menu_with_buttons(chat_id)
             
-            elif text.startswith('/cart') or text.lower() in ['кошик', 'cart', '🛒 кошик']:
+            elif text.startswith('/cart') or 'cart' in text_clean or 'кошик' in text_clean:
                 show_cart_preview(chat_id)
             
-            elif text.startswith('/help') or text.lower() == 'help':
+            elif text.startswith('/help') or 'help' in text_clean or 'допомога' in text_clean:
                 telegram.tg_send_message(
                     chat_id,
                     "📖 *Допомога*\n\n" +
                     "Доступні команди:\n" +
-                    "/start - Почати роботу\n" +
-                    "/menu - Переглянути каталог\n" +
-                    "/cart - Відкрити кошик\n" +
-                    "/help - Ця довідка"
+                    "📋 Меню - Каталог товарів\n" +
+                    "🛒 Кошик - Ваш кошик\n" +
+                    "❓ Допомога - Ця довідка\n" +
+                    "🔄 /start - Почати спочатку\n\n" +
+                    "💡 Використовуйте кнопки знизу для швидкого доступу!"
                 )
             
+            # Обробка станів (введення телефону/адреси)
             elif current_state == STATE_AWAITING_PHONE:
                 handle_phone_input(chat_id, text)
             
             elif current_state == STATE_AWAITING_ADDRESS:
                 handle_address_input(chat_id, text)
             
+            # Невідома команда
             else:
-                telegram.tg_send_message(chat_id, "❓ Невідома команда. Спробуйте /menu")
+                telegram.tg_send_message(
+                    chat_id,
+                    "❓ *Невідома команда*\n\n" +
+                    "Спробуйте:\n" +
+                    "📋 Меню - Переглянути товари\n" +
+                    "🛒 Кошик - Відкрити кошик\n" +
+                    "❓ Допомога - Список команд"
+                )
         
         return jsonify({'ok': True}), 200
         
@@ -489,7 +535,7 @@ def webhook():
 # Health Check
 # ============================================================================
 
-@app.route('/')
+app.route('/')
 def index():
     """Health check endpoint"""
     return jsonify({
@@ -503,8 +549,6 @@ def index():
 @app.route('/health')
 def health():
     """Detailed health check"""
-    import os
-    
     return jsonify({
         'status': 'healthy',
         'database': os.path.exists('bot.db'),
@@ -559,7 +603,6 @@ def initialize():
 # ============================================================================
 # Main Entry Point
 # ============================================================================
-
 if __name__ == "__main__":
     # Отримати порт (Render встановлює PORT автоматично)
     port = int(os.getenv('PORT', 10000))
@@ -582,3 +625,4 @@ if __name__ == "__main__":
     # Запуск Flask
     logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=debug)
+    

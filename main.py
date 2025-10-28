@@ -15,20 +15,26 @@ from telegram.ext import (
 )
 
 from app.config import load_config
-from app.handlers import (
+from app.services.sheets_service import SheetsService
+from app.services.gemini_service import GeminiService
+
+# Імпортуємо handlers
+from app.handlers.commands import (
     start_handler,
     menu_handler,
     cart_handler,
     order_handler,
     help_handler,
-    message_handler,
-    callback_query_handler,
     cancel_handler
 )
-from app.services.sheets_service import SheetsService
-from app.services.gemini_service import GeminiService
+from app.handlers.messages import message_handler
+from app.handlers.callbacks import callback_query_handler
 
 # Ініціалізація логування
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Завантаження конфігурації

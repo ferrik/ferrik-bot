@@ -14,7 +14,7 @@ from telegram.ext import (
     filters
 )
 
-from app.config import init_config, get_config
+from app.config import load_config
 from app.handlers import (
     start_handler,
     menu_handler,
@@ -31,9 +31,8 @@ from app.services.gemini_service import GeminiService
 # Ініціалізація логування
 logger = logging.getLogger(__name__)
 
-# Ініціалізація конфігурації
-init_config()
-telegram_config, gemini_config, sheets_config, app_config = get_config()
+# Завантаження конфігурації
+telegram_config, gemini_config, sheets_config, app_config = load_config()
 
 # Flask app
 app = Flask(__name__)

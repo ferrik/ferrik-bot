@@ -1,817 +1,249 @@
 """
-🤖 Ferrik Bot - RENDER READY VERSION
-
-Готовий до deploy на Render без локального тестування
-Автоматично створює БД при першому запуску
+🤖 FerrikFoot Bot - головний файл
+Telegram бот для замовлення їжі з AI та Google Sheets
 """
 import os
-import sys
-import re
 import logging
 from flask import Flask, request, jsonify
-
-# ============================================================================
-# Logging Setup
-# ============================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters
 )
+
+from app.config import init_config, get_config
+from app.handlers import (
+    start_handler,
+    menu_handler,
+    cart_handler,
+    order_handler,
+    help_handler,
+    message_handler,
+    callback_query_handler,
+    cancel_handler
+)
+from app.services.sheets_service import SheetsService
+from app.services.gemini_service import GeminiService
+
+# Ініціалізація логування
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# Auto-initialize Database (ПЕРЕД імпортами!)
-# ============================================================================
-def ensure_database():
-    """Автоматично створює БД якщо її немає"""
-    import sqlite3
-    
-    db_path = 'bot.db'
-    
-    if not os.path.exists(db_path):
-        logger.info("🔧 Database not found, initializing...")
-        
-        conn = sqlite3.connect(db_path)
-        
-        # Спроба завантажити з файлу міграції
-        sql_file = 'migrations/001_create_tables.sql'
-        if os.path.exists(sql_file):
-            try:
-                with open(sql_file, 'r', encoding='utf-8') as f:
-                    conn.executescript(f.read())
-                logger.info("✅ Database initialized from migration file")
-            except Exception as e:
-                logger.error(f"❌ Error loading migration: {e}")
-                # Fallback до базових таблиць
-                create_basic_tables(conn)
-        else:
-            logger.warning("⚠️ Migration file not found, creating basic tables")
-            create_basic_tables(conn)
-        
-        conn.commit()
-        conn.close()
-        logger.info("✅ Database ready!")
-    else:
-        logger.info("✅ Database already exists")
+# Ініціалізація конфігурації
+init_config()
+telegram_config, gemini_config, sheets_config, app_config = get_config()
 
-def create_basic_tables(conn):
-    """Створити мінімальні таблиці якщо міграція не знайдена"""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_states (
-            user_id INTEGER PRIMARY KEY,
-            state TEXT DEFAULT 'STATE_IDLE',
-            state_data TEXT DEFAULT '{}',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_carts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            item_id TEXT NOT NULL,
-            quantity INTEGER DEFAULT 1 CHECK(quantity > 0),
-            price REAL DEFAULT 0 CHECK(price >= 0),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(user_id, item_id)
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_carts_user ON user_carts(user_id)")
-    logger.info("✅ Basic tables created")
-
-# Запустити ініціалізацію БД
-ensure_database()
-
-# ============================================================================
-# Import New Modules (з fallback на старий код)
-# ============================================================================
-NEW_SYSTEM_ENABLED = False
-
-try:
-    from app.config.settings import (
-        config, 
-        UserState, 
-        MIN_ORDER_AMOUNT
-    )
-    from app.services.session import SessionManager
-    from app.utils.validators import (
-        safe_parse_price,
-        validate_phone,
-        normalize_phone,
-        validate_address,
-        sanitize_input
-    )
-    NEW_SYSTEM_ENABLED = True
-    logger.info("✅ New system modules loaded")
-except ImportError as e:
-    logger.warning(f"⚠️ New modules not available, using legacy mode: {e}")
-    # Встановити fallback значення
-    MIN_ORDER_AMOUNT = 100
-
-# ============================================================================
-# Import Services
-# ============================================================================
-import services.telegram as telegram
-import services.sheets as sheets
-import services.database as database
-
-# Імпорт sync сервісу (після створення БД)
-try:
-    from app.services.sync import SyncService, MenuSyncScheduler
-    SYNC_ENABLED = True
-except ImportError:
-    SYNC_ENABLED = False
-    logger.warning("⚠️ Sync service not available")
-
-# ============================================================================
-# Flask App
-# ============================================================================
+# Flask app
 app = Flask(__name__)
 
-# ============================================================================
-# Global Variables
-# ============================================================================
-menu_data = []
-sync_service = None
-sync_scheduler = None
+# Telegram bot application
+bot_application = None
 
-# SessionManager або fallback словники
-if NEW_SYSTEM_ENABLED:
-    # Ініціалізувати SessionManager (він сам створить підключення)
-    session_manager = SessionManager(db_path='bot.db')
+# Сервіси
+sheets_service = None
+gemini_service = None
+
+
+def init_services():
+    """Ініціалізація сервісів"""
+    global sheets_service, gemini_service
     
-    # Ініціалізувати SyncService
-    if SYNC_ENABLED:
-        db_conn = session_manager.db  # Використати те саме підключення
-        sync_service = SyncService(db_conn, sheets)
-        sync_scheduler = MenuSyncScheduler(sync_service, interval_minutes=30)
-        logger.info("✅ Sync service initialized (auto-sync every 30 min)")
-    
-    from app.services.session import LegacyDictWrapper
-    user_states = LegacyDictWrapper(session_manager, 'states')
-    user_carts = LegacyDictWrapper(session_manager, 'carts')
-    logger.info("✅ Using SessionManager with auto-created SQLite connection")
-else:
-    user_states = {}
-    user_carts = {}
-    logger.info("📦 Using in-memory storage (legacy)")
-
-# Константи станів
-STATE_IDLE = 'STATE_IDLE'
-STATE_AWAITING_PHONE = 'STATE_AWAITING_PHONE'
-STATE_AWAITING_ADDRESS = 'STATE_AWAITING_ADDRESS'
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def get_user_state(chat_id):
-    """Отримати стан користувача"""
-    if NEW_SYSTEM_ENABLED:
-        return session_manager.get_state(chat_id)
-    return user_states.get(chat_id, STATE_IDLE)
-
-def set_user_state(chat_id, state, data=None):
-    """Встановити стан"""
-    if NEW_SYSTEM_ENABLED:
-        session_manager.set_state(chat_id, state, data or {})
-    else:
-        user_states[chat_id] = {'state': state, 'data': data or {}}
-
-def clear_user_state(chat_id):
-    """Очистити стан"""
-    if NEW_SYSTEM_ENABLED:
-        session_manager.clear_state(chat_id)
-    else:
-        user_states.pop(chat_id, None)
-
-def parse_price(value):
-    """Безпечний парсинг ціни"""
-    if NEW_SYSTEM_ENABLED:
-        return safe_parse_price(value)
     try:
-        return float(str(value).replace('грн', '').replace(' ', '').replace(',', '.').strip())
-    except:
-        return 0.0
-
-def add_to_cart(chat_id, item):
-    """Додати товар в кошик"""
-    item_id = str(item['id'])
-    price = parse_price(item.get('Ціна', 0))
-    
-    if NEW_SYSTEM_ENABLED:
-        return session_manager.add_to_cart(chat_id, item_id, 1, price)
-    else:
-        if chat_id not in user_carts:
-            user_carts[chat_id] = {}
-        if item_id in user_carts[chat_id]:
-            user_carts[chat_id][item_id]['quantity'] += 1
-        else:
-            user_carts[chat_id][item_id] = {
-                'name': item.get('Назва', 'Unknown'),
-                'price': price,
-                'quantity': 1
-            }
+        # Google Sheets
+        sheets_service = SheetsService(sheets_config)
+        logger.info("✅ Google Sheets service initialized")
+        
+        # Gemini AI
+        gemini_service = GeminiService(gemini_config)
+        logger.info("✅ Gemini AI service initialized")
+        
         return True
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize services: {e}")
+        return False
 
-def get_cart(chat_id):
-    """Отримати кошик"""
-    if NEW_SYSTEM_ENABLED:
-        cart_items = session_manager.get_cart(chat_id)
-        enriched = []
-        for cart_item in cart_items:
-            menu_item = next((m for m in menu_data if str(m['id']) == cart_item['id']), None)
-            if menu_item:
-                enriched.append({
-                    'id': cart_item['id'],
-                    'name': menu_item.get('Назва', 'Unknown'),
-                    'price': cart_item['price'],
-                    'quantity': cart_item['quantity']
-                })
-        return enriched
-    return user_carts.get(chat_id, {})
 
-def get_cart_total(chat_id):
-    """Сума кошика"""
-    if NEW_SYSTEM_ENABLED:
-        return session_manager.get_cart_total(chat_id)
+def setup_handlers(application: Application):
+    """Налаштування обробників команд"""
     
-    cart = user_carts.get(chat_id, {})
-    total = 0
-    for item in cart.values():
-        try:
-            total += float(item.get('price', 0)) * int(item.get('quantity', 1))
-        except:
-            pass
-    return total
-
-def clear_cart(chat_id):
-    """Очистити кошик"""
-    if NEW_SYSTEM_ENABLED:
-        session_manager.clear_cart(chat_id)
-    else:
-        user_carts[chat_id] = {}
-
-def get_cart_count(chat_id):
-    """Кількість товарів"""
-    if NEW_SYSTEM_ENABLED:
-        return session_manager.get_cart_count(chat_id)
-    return len(user_carts.get(chat_id, {}))
-
-# ============================================================================
-# Menu Display
-# ============================================================================
-
-def show_menu_with_buttons(chat_id, category=None):
-    """Показати меню"""
-    # Автоматична синхронізація якщо потрібно
-    if sync_scheduler:
-        sync_result = sync_scheduler.sync_if_needed()
-        if sync_result:
-            logger.info(f"🔄 Auto-sync completed: +{sync_result['added']}, ~{sync_result['updated']}")
+    # Команди
+    application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("menu", menu_handler))
+    application.add_handler(CommandHandler("cart", cart_handler))
+    application.add_handler(CommandHandler("order", order_handler))
+    application.add_handler(CommandHandler("help", help_handler))
+    application.add_handler(CommandHandler("cancel", cancel_handler))
     
-    # Завантажити з БД якщо можливо, інакше з пам'яті
-    if sync_service:
-        items = sync_service.get_menu_from_db()
-    else:
-        items = menu_data
+    # Callback queries (inline кнопки)
+    application.add_handler(CallbackQueryHandler(callback_query_handler))
     
-    if not items:
-        telegram.tg_send_message(chat_id, "❌ Меню не завантажене")
+    # Текстові повідомлення (AI обробка)
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        message_handler
+    ))
+    
+    logger.info("✅ Handlers registered")
+
+
+async def setup_webhook(application: Application):
+    """Налаштування webhook для Render"""
+    if not telegram_config.webhook_url:
+        logger.warning("⚠️ WEBHOOK_URL not set, skipping webhook setup")
         return
-    
-    # Фільтр по категорії
-    if category:
-        items = [i for i in items if i.get('Категорія') == category]
-    
-    if not items:
-        telegram.tg_send_message(chat_id, "❌ Товари не знайдені")
-        return
-    
-    buttons = []
-    for item in items[:10]:  # Перші 10
-        item_id = str(item.get('id', ''))
-        name = item.get('Назва', 'Без назви')
-        price = parse_price(item.get('Ціна', 0))
-        
-        buttons.append([
-            {'text': f"ℹ️ {name} — {price:.0f}грн", 'callback_data': f"info_{item_id}"},
-            {'text': "➕", 'callback_data': f"add_{item_id}"}
-        ])
-    
-    cart_count = get_cart_count(chat_id)
-    buttons.append([{'text': f"🛒 Кошик ({cart_count})", 'callback_data': "view_cart"}])
-    
-    telegram.tg_send_message(chat_id, "📋 *Меню*\nОберіть товар:", buttons)
-
-def show_cart_preview(chat_id):
-    """Показати кошик"""
-    cart = get_cart(chat_id)
-    
-    if not cart or (isinstance(cart, dict) and len(cart) == 0):
-        telegram.tg_send_message(chat_id, "🛒 Ваш кошик порожній\n\nВикористовуйте /menu щоб додати товари")
-        return
-    
-    cart_text = "🛒 *Ваш кошик:*\n\n"
-    
-    if NEW_SYSTEM_ENABLED and isinstance(cart, list):
-        for item in cart:
-            cart_text += f"• {item['name']} x{item['quantity']} = {item['price'] * item['quantity']:.0f} грн\n"
-    else:
-        for item_data in cart.values():
-            cart_text += f"• {item_data['name']} x{item_data['quantity']} = {item_data['price'] * item_data['quantity']:.0f} грн\n"
-    
-    total = get_cart_total(chat_id)
-    cart_text += f"\n💰 *Всього: {total:.0f} грн*"
-    
-    buttons = []
-    if total >= MIN_ORDER_AMOUNT:
-        buttons.append([{'text': '✅ Оформити', 'callback_data': 'checkout'}])
-    else:
-        cart_text += f"\n\n⚠️ Мін. сума: {MIN_ORDER_AMOUNT} грн"
-    
-    buttons.append([
-        {'text': '🔙 Меню', 'callback_data': 'back_to_menu'},
-        {'text': '🗑️ Очистити', 'callback_data': 'clear_cart'}
-    ])
-    
-    telegram.tg_send_message(chat_id, cart_text, buttons)
-
-# ============================================================================
-# Checkout
-# ============================================================================
-
-def start_checkout(chat_id):
-    """Початок оформлення"""
-    set_user_state(chat_id, STATE_AWAITING_PHONE)
-    telegram.tg_send_message(chat_id, "📞 *Крок 1/2: Контактні дані*\n\nВведіть номер телефону:\n_(Приклад: +380501234567)_")
-
-def handle_phone_input(chat_id, phone):
-    """Обробка телефону"""
-    if NEW_SYSTEM_ENABLED:
-        phone = sanitize_input(phone, 20)
-        if not validate_phone(phone):
-            telegram.tg_send_message(
-                chat_id, 
-                "❌ Невірний формат телефону\n\n" +
-                "Приклади правильного формату:\n" +
-                "• +380501234567\n" +
-                "• 0501234567\n\n" +
-                "Спробуйте ще раз:"
-            )
-            return
-        phone = normalize_phone(phone)
-    else:
-        if len(phone) < 10:
-            telegram.tg_send_message(chat_id, "❌ Занадто короткий номер. Спробуйте ще раз:")
-            return
-    
-    set_user_state(chat_id, STATE_AWAITING_ADDRESS, {'phone': phone})
-    telegram.tg_send_message(chat_id, "📍 *Крок 2/2: Адреса доставки*\n\nВведіть вашу адресу:\n_(Вкажіть місто, вулицю, будинок, квартиру)_")
-
-def handle_address_input(chat_id, address):
-    """Обробка адреси"""
-    if NEW_SYSTEM_ENABLED:
-        address = sanitize_input(address, 200)
-        if not validate_address(address):
-            telegram.tg_send_message(
-                chat_id, 
-                "❌ Занадто коротка адреса або відсутній номер будинку\n\n" +
-                "Приклад: м. Київ, вул. Хрещатик, буд. 1, кв. 10\n\n" +
-                "Спробуйте ще раз:"
-            )
-            return
-        state_data = session_manager.get_state_data(chat_id)
-        phone = state_data.get('phone', 'N/A')
-    else:
-        phone = user_states.get(chat_id, {}).get('data', {}).get('phone', 'N/A')
-    
-    cart = get_cart(chat_id)
-    total = get_cart_total(chat_id)
-    
-    order_text = f"""✅ *Замовлення успішно оформлене!*
-
-📞 Телефон: {phone}
-📍 Адреса: {address}
-
-🛒 *Товари:*
-"""
-    
-    if NEW_SYSTEM_ENABLED and isinstance(cart, list):
-        items_list = []
-        for item in cart:
-            order_text += f"• {item['name']} x{item['quantity']} — {item['price'] * item['quantity']:.0f} грн\n"
-            items_list.append({'name': item['name'], 'quantity': item['quantity'], 'price': item['price']})
-    else:
-        items_list = []
-        for item_data in cart.values():
-            order_text += f"• {item_data['name']} x{item_data['quantity']} — {item_data['price'] * item_data['quantity']:.0f} грн\n"
-            items_list.append({'name': item_data['name'], 'quantity': item_data['quantity'], 'price': item_data['price']})
-    
-    order_text += f"\n💰 *Загальна сума: {total:.0f} грн*\n\n✨ Дякуємо за замовлення! Ми зв'яжемося з вами найближчим часом."
-    
-    telegram.tg_send_message(chat_id, order_text)
     
     try:
-        database.save_order(str(chat_id), phone, address, items_list, total)
-        logger.info(f"✅ Order saved for {chat_id}: {total} грн")
+        await application.bot.set_webhook(
+            url=f"{telegram_config.webhook_url}/webhook",
+            allowed_updates=["message", "callback_query"]
+        )
+        logger.info(f"✅ Webhook set: {telegram_config.webhook_url}/webhook")
     except Exception as e:
-        logger.error(f"❌ Order save error: {e}")
+        logger.error(f"❌ Failed to set webhook: {e}")
+
+
+def create_bot_application():
+    """Створення Telegram bot application"""
+    global bot_application
     
-    clear_cart(chat_id)
-    clear_user_state(chat_id)
+    # Створюємо application
+    bot_application = (
+        Application.builder()
+        .token(telegram_config.bot_token)
+        .build()
+    )
+    
+    # Налаштовуємо обробники
+    setup_handlers(bot_application)
+    
+    # Зберігаємо сервіси в bot_data для доступу з handlers
+    bot_application.bot_data['sheets_service'] = sheets_service
+    bot_application.bot_data['gemini_service'] = gemini_service
+    bot_application.bot_data['app_config'] = app_config
+    
+    logger.info("✅ Bot application created")
+    
+    return bot_application
+
 
 # ============================================================================
-# Webhook
-# ============================================================================
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Головний webhook handler з дедуплікацією"""
-    try:
-        data = request.json
-        
-        # Дедуплікація update_id
-        update_id = data.get('update_id')
-        if not hasattr(webhook, 'processed_updates'):
-            webhook.processed_updates = set()
-        
-        if update_id and update_id in webhook.processed_updates:
-            logger.debug(f"⏭️ Skipping duplicate update {update_id}")
-            return jsonify({'ok': True}), 200
-        
-        if update_id:
-            webhook.processed_updates.add(update_id)
-            # Очищення старих (зберігати останні 100)
-            if len(webhook.processed_updates) > 100:
-                webhook.processed_updates = set(list(webhook.processed_updates)[-100:])
-        
-        # Перевірка секрету
-        secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
-        expected = os.getenv('WEBHOOK_SECRET', 'default_secret')
-        
-        if secret != expected:
-            logger.warning("⚠️ Invalid webhook secret")
-            return jsonify({'ok': False}), 403
-        
-        logger.debug(f"📨 Processing update {update_id}")
-        
-        # Callback query
-        if 'callback_query' in data:
-            callback = data['callback_query']
-            callback_id = callback['id']
-            chat_id = callback['message']['chat']['id']
-            callback_data = callback['data']
-            
-            logger.info(f"🖱️ Callback from {chat_id}: {callback_data}")
-            
-            telegram.tg_answer_callback(callback_id)
-            
-            if callback_data.startswith('add_'):
-                item_id = callback_data.split('_')[1]
-                item = next((i for i in menu_data if str(i['id']) == item_id), None)
-                if item:
-                    add_to_cart(chat_id, item)
-                    telegram.tg_send_message(chat_id, f"✅ Додано в кошик: {item.get('Назва')}")
-            
-            elif callback_data == 'view_cart':
-                show_cart_preview(chat_id)
-            
-            elif callback_data == 'back_to_menu':
-                show_menu_with_buttons(chat_id)
-            
-            elif callback_data == 'clear_cart':
-                clear_cart(chat_id)
-                telegram.tg_send_message(chat_id, "🗑️ Кошик очищено")
-            
-            elif callback_data == 'checkout':
-                start_checkout(chat_id)
-            
-            elif callback_data.startswith('info_'):
-                item_id = callback_data.split('_')[1]
-                item = next((i for i in menu_data if str(i['id']) == item_id), None)
-                if item:
-                    price = parse_price(item.get('Ціна', 0))
-                    info_text = f"📦 *{item.get('Назва')}*\n\n💰 Ціна: {price:.0f} грн\n\n📝 {item.get('Опис', 'Опис відсутній')}"
-                    telegram.tg_send_message(chat_id, info_text)
-        
-        # Message
-        elif 'message' in data:
-            msg = data['message']
-            chat_id = msg['chat']['id']
-            text = msg.get('text', '').strip()
-            
-            # Видалити ВСІ emoji для порівняння (залишити тільки букви і цифри)
-            text_clean = ''.join(c for c in text if c.isalnum() or c.isspace()).strip().lower()
-            
-            logger.info(f"📥 Message from {chat_id}: '{text}' -> '{text_clean}'")
-            
-            current_state = get_user_state(chat_id)
-            
-            # Команди (з підтримкою текстових варіантів та emoji)
-            if text.startswith('/start') or 'start' in text_clean:
-                clear_user_state(chat_id)
-                telegram.tg_send_message(
-                    chat_id,
-                    "👋 *Вітаємо в Ferrik Bot!*\n\n" +
-                    "Використовуйте кнопки знизу або команди:\n" +
-                    "📋 /menu - Каталог товарів\n" +
-                    "🛒 /cart - Кошик\n" +
-                    "❓ /help - Допомога"
-                )
-            
-            elif text.startswith('/menu') or 'menu' in text_clean or 'меню' in text_clean:
-                show_menu_with_buttons(chat_id)
-            
-            elif text.startswith('/cart') or 'cart' in text_clean or 'кошик' in text_clean:
-                show_cart_preview(chat_id)
-            
-            elif text.startswith('/help') or 'help' in text_clean or 'допомога' in text_clean:
-                telegram.tg_send_message(
-                    chat_id,
-                    "📖 *Допомога*\n\n" +
-                    "Доступні команди:\n" +
-                    "📋 Меню - Каталог товарів\n" +
-                    "🛒 Кошик - Ваш кошик\n" +
-                    "❓ Допомога - Ця довідка\n" +
-                    "🔄 /start - Почати спочатку\n\n" +
-                    "💡 Використовуйте кнопки знизу для швидкого доступу!"
-                )
-            # Обробка станів (введення телефону/адреси)
-            elif current_state == STATE_AWAITING_PHONE:
-                handle_phone_input(chat_id, text)
-            
-            elif current_state == STATE_AWAITING_ADDRESS:
-                handle_address_input(chat_id, text)
-            
-            # Невідома команда
-            else:
-                telegram.tg_send_message(
-                    chat_id,
-                    "❓ *Невідома команда*\n\n" +
-                    "Спробуйте:\n" +
-                    "📋 Меню - Переглянути товари\n" +
-                    "🛒 Кошик - Відкрити кошик\n" +
-                    "❓ Допомога - Список команд"
-                )
-        
-        return jsonify({'ok': True}), 200
-        
-    except Exception as e:
-        logger.error(f"❌ Webhook error: {e}", exc_info=True)
-        return jsonify({'ok': False, 'error': str(e)}), 500
-
-# ============================================================================
-# Health Check
+# Flask routes
 # ============================================================================
 
 @app.route('/')
 def index():
-    """Health check endpoint"""
+    """Головна сторінка"""
     return jsonify({
-        'status': 'ok',
-        'bot': 'Ferrik Bot',
-        'version': '2.0',
-        'new_system': NEW_SYSTEM_ENABLED,
-        'menu_items': len(menu_data)
+        "status": "online",
+        "service": "FerrikFoot Bot",
+        "version": "2.0",
+        "environment": app_config.environment
     })
+
 
 @app.route('/health')
 def health():
-    """Detailed health check"""
-    sync_info = None
-    if sync_service:
-        sync_info = sync_service.get_last_sync_info()
-    
+    """Health check для Render"""
     return jsonify({
-        'status': 'healthy',
-        'database': os.path.exists('bot.db'),
-        'menu_loaded': len(menu_data) > 0,
-        'new_system': NEW_SYSTEM_ENABLED,
-        'sync_enabled': SYNC_ENABLED,
-        'last_sync': sync_info,
-        'environment': os.getenv('ENVIRONMENT', 'unknown')
+        "status": "healthy",
+        "services": {
+            "telegram": bot_application is not None,
+            "sheets": sheets_service is not None,
+            "gemini": gemini_service is not None
+        }
     })
 
-@app.route('/admin/sync_menu', methods=['POST'])
-def admin_sync_menu():
-    """Примусова синхронізація меню (для адміністратора)"""
-    # Перевірка токену
-    token = request.headers.get('X-Admin-Token') or request.args.get('token')
-    admin_token = os.getenv('ADMIN_TOKEN', 'secret')
-    
-    if token != admin_token:
-        return jsonify({'error': 'Unauthorized'}), 403
-    
-    if not sync_service:
-        return jsonify({'error': 'Sync service not available'}), 503
-    
+
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Webhook endpoint для Telegram"""
     try:
-        logger.info("🔄 Manual sync triggered by admin")
-        result = sync_service.sync_menu_from_sheets()
+        # Отримуємо update від Telegram
+        update = Update.de_json(request.get_json(), bot_application.bot)
         
-        # Оновити sync_scheduler
-        if sync_scheduler:
-            sync_scheduler.last_sync = datetime.now()
+        # Обробляємо update
+        await bot_application.process_update(update)
         
+        return jsonify({"ok": True})
+    
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route('/set_webhook', methods=['GET', 'POST'])
+async def set_webhook_route():
+    """Ручне встановлення webhook"""
+    if not telegram_config.webhook_url:
         return jsonify({
-            'success': result['success'],
-            'added': result['added'],
-            'updated': result['updated'],
-            'deleted': result['deleted'],
-            'total': result['total_items'],
-            'errors': result['errors']
-        })
+            "ok": False,
+            "error": "WEBHOOK_URL not configured"
+        }), 400
     
-    except Exception as e:
-        logger.error(f"❌ Admin sync error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ============================================================================
-# Initialization
-# ============================================================================
-
-# ЗНАЙТИ функцію initialize() в main.py та ЗАМІНИТИ на:
-
-def initialize():
-    """Ініціалізація бота"""
-    global menu_data
-    
-    logger.info("=" * 60)
-    logger.info("🚀 Initializing Ferrik Bot")
-    logger.info("=" * 60)
-    
-    # ДОДАТИ: Виконати міграцію 002 (menu_items)
-    if NEW_SYSTEM_ENABLED and sync_service:
-        try:
-            import sqlite3
-            conn = sqlite3.connect('bot.db')
-            
-            # Спробувати завантажити з файлу
-            migration_file = 'migrations/002_add_menu_items.sql'
-            if os.path.exists(migration_file):
-                logger.info("📄 Loading migration from file...")
-                with open(migration_file, 'r', encoding='utf-8') as f:
-                    conn.executescript(f.read())
-                logger.info("✅ Migration 002 executed from file")
-            else:
-                # Якщо файлу немає - створити таблиці вручну
-                logger.warning("⚠️ Migration file not found, creating tables manually")
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS menu_items (
-                        id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        price REAL NOT NULL CHECK(price >= 0),
-                        category TEXT,
-                        description TEXT,
-                        image_url TEXT,
-                        available BOOLEAN DEFAULT 1,
-                        sort_order INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_menu_category ON menu_items(category)
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS sync_log (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        sync_type TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        items_count INTEGER,
-                        error_message TEXT,
-                        synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                logger.info("✅ Tables created manually")
-            
-            conn.commit()
-            conn.close()
-            
-        except Exception as e:
-            logger.error(f"❌ Migration error: {e}")
-    
-    # Синхронізувати меню з Sheets → БД
-    if sync_service:
-        try:
-            logger.info("🔄 Initial menu sync...")
-            result = sync_service.sync_menu_from_sheets()
-            
-            if result['success']:
-                logger.info(
-                    f"✅ Menu synced: {result['total_items']} items " +
-                    f"(+{result['added']} new, ~{result['updated']} updated)"
-                )
-                # Завантажити з БД
-                menu_data = sync_service.get_menu_from_db()
-                logger.info(f"📋 Menu loaded from DB: {len(menu_data)} items")
-            else:
-                logger.error(f"❌ Menu sync failed: {result['errors']}")
-                # Fallback: завантажити прямо з Sheets
-                logger.info("🔄 Fallback: loading menu directly from Sheets")
-                menu_data = sheets.get_menu_from_sheet()
-                logger.info(f"✅ Menu loaded from Sheets: {len(menu_data)} items")
-        
-        except Exception as e:
-            logger.error(f"❌ Sync error: {e}")
-            # Fallback
-            try:
-                menu_data = sheets.get_menu_from_sheet()
-                logger.info(f"✅ Menu loaded from Sheets (fallback): {len(menu_data)} items")
-            except Exception as e2:
-                logger.error(f"❌ Sheets load error: {e2}")
-                menu_data = []
-    else:
-        # Старий метод: завантажити з Sheets
-        try:
-            menu_data = sheets.get_menu_from_sheet()
-            logger.info(f"✅ Menu loaded from Sheets: {len(menu_data)} items")
-        except Exception as e:
-            logger.error(f"❌ Menu load error: {e}")
-            menu_data = []
-    
-    # ВАЖЛИВО: Перевірити що меню не порожнє
-    if not menu_data:
-        logger.error("❌ WARNING: Menu is empty! Bot will not work properly!")
-    else:
-        logger.info(f"✅ Menu ready: {len(menu_data)} items available")
-    
-    # Налаштувати webhook
     try:
-        webhook_url = os.getenv('WEBHOOK_URL')
-        
-        if not webhook_url:
-            render_url = os.getenv('RENDER_EXTERNAL_URL')
-            if render_url:
-                webhook_url = f"{render_url}/webhook"
-        
-        if webhook_url:
-            telegram.tg_set_webhook(webhook_url)
-            logger.info(f"✅ Webhook set: {webhook_url}")
-        else:
-            logger.warning("⚠️ No webhook URL configured")
-    
+        await setup_webhook(bot_application)
+        return jsonify({
+            "ok": True,
+            "webhook_url": f"{telegram_config.webhook_url}/webhook"
+        })
     except Exception as e:
-        logger.error(f"❌ Webhook setup error: {e}")
-    
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/delete_webhook', methods=['GET', 'POST'])
+async def delete_webhook_route():
+    """Видалення webhook"""
+    try:
+        await bot_application.bot.delete_webhook()
+        return jsonify({"ok": True, "message": "Webhook deleted"})
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
+# ============================================================================
+# Startup
+# ============================================================================
+
+def startup():
+    """Ініціалізація при запуску"""
     logger.info("=" * 60)
-    logger.info("✅ Bot initialization complete!")
-    logger.info("=" * 60)
-
-# ============================================================================
-# Main Entry Point
-# ============================================================================
-
-# ============================================================================
-# ЗНАЙТИ в main.py секцію "Main Entry Point" (в кінці файлу)
-# ============================================================================
-
-# СТАРИЙ КОД (близько рядка 600):
-# if __name__ == "__main__":
-#     port = int(os.getenv('PORT', 10000))
-#     debug = os.getenv('DEBUG', 'false').lower() == 'true'
-#     
-#     logger.info("=" * 60)
-#     logger.info("🤖 CONFIGURATION")
-#     ...
-#     initialize()  ← Викликається ТІЛЬКИ при прямому запуску!
-#     app.run(...)
-
-# ============================================================================
-# ЗАМІНИТИ НА:
-# ============================================================================
-
-# Ініціалізація (ВИКЛИКАЄТЬСЯ ЗАВЖДИ, навіть через Gunicorn)
-def init_app():
-    """Ініціалізація додатку (викликається при імпорті)"""
-    logger.info("🔧 Initializing app for Gunicorn...")
-    initialize()
-
-# Викликати ініціалізацію при імпорті
-# Перевірка щоб не викликати двічі
-if not hasattr(app, '_initialized'):
-    init_app()
-    app._initialized = True
-
-# Main Entry Point (для локального запуску)
-if __name__ == "__main__":
-    # Отримати порт (Render встановлює PORT автоматично)
-    port = int(os.getenv('PORT', 10000))
-    debug = os.getenv('DEBUG', 'false').lower() == 'true'
-    
-    # Показати конфігурацію
-    logger.info("=" * 60)
-    logger.info("🤖 CONFIGURATION")
-    logger.info("=" * 60)
-    logger.info(f"Port: {port}")
-    logger.info(f"Debug: {debug}")
-    logger.info(f"New System: {NEW_SYSTEM_ENABLED}")
-    logger.info(f"Environment: {os.getenv('ENVIRONMENT', 'unknown')}")
-    logger.info(f"Database: {'bot.db'}")
+    logger.info("🚀 Starting FerrikFoot Bot")
     logger.info("=" * 60)
     
-    # Запуск Flask (для локального тестування)
-    logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    # Ініціалізація сервісів
+    if not init_services():
+        logger.error("❌ Failed to start: services initialization failed")
+        return False
+    
+    # Створення bot application
+    create_bot_application()
+    
+    # Встановлення webhook (асинхронно при першому запиті)
+    logger.info("✅ Bot started successfully")
+    logger.info(f"🌐 Running on {app_config.host}:{app_config.port}")
+    logger.info("=" * 60)
+    
+    return True
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+if __name__ == '__main__':
+    # Запуск
+    if startup():
+        # Flask server
+        app.run(
+            host=app_config.host,
+            port=app_config.port,
+            debug=app_config.debug
+        )

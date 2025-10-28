@@ -1,109 +1,5 @@
+
 """
-🤖 Сервіс для роботи з Gemini AI
-"""
-import json
-import logging
-from typing import List, Dict, Any, Optional
-import google.generativeai as genai
-
-from app.utils.validators import safe_parse_price, safe_parse_quantity
-
-logger = logging.getLogger(__name__)
-
-
-class GeminiService:
-    """Сервіс для роботи з Gemini AI"""
-    
-    def __init__(self, config):
-        """
-        Ініціалізація сервісу
-        
-        Args:
-            config: GeminiConfig з API key та налаштуваннями
-        """
-        self.config = config
-        self.model = None
-        
-        self._initialize()
-    
-    def _initialize(self):
-        """Ініціалізація Gemini API"""
-        try:
-            # Налаштування API
-            genai.configure(api_key=self.config.api_key)
-            
-            # Створюємо модель
-            self.model = genai.GenerativeModel(
-                model_name=self.config.model_name,
-                generation_config={
-                    'temperature': self.config.temperature,
-                    'max_output_tokens': self.config.max_tokens,
-                }
-            )
-            
-            logger.info(f"✅ Gemini AI initialized: {self.config.model_name}")
-        
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Gemini AI: {e}")
-            raise
-    
-    # ========================================================================
-    # Обробка замовлень (СИНХРОННО)
-    # ========================================================================
-    
-    def process_order_request(
-        self,
-        user_message: str,
-        menu_items: List[Dict[str, Any]],
-        user_cart: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Обробити запит користувача через AI (СИНХРОННО)
-        
-        Args:
-            user_message: Повідомлення користувача
-            menu_items: Доступні товари з меню
-            user_cart: Поточний кошик користувача
-        
-        Returns:
-            dict: {
-                'action': 'add_to_cart' | 'show_menu' | 'checkout' | 'info',
-                'items': [...],
-                'message': 'Відповідь для користувача'
-            }
-        """
-        try:
-            # Формуємо промпт
-            prompt = self._build_order_prompt(user_message, menu_items, user_cart)
-            
-            # Відправляємо запит до AI (СИНХРОННО)
-            response = self.model.generate_content(prompt)
-            
-            # Парсимо відповідь
-            result = self._parse_ai_response(response.text, menu_items)
-            
-            logger.info(f"🤖 AI processed request: action={result.get('action')}")
-            return result
-        
-        except Exception as e:
-            logger.error(f"❌ Error processing AI request: {e}")
-            return {
-                'action': 'info',
-                'message': 'Вибачте, виникла помилка. Спробуйте використати команди /menu або /help'
-            }
-    
-    def _build_order_prompt(
-        self,
-        user_message: str,
-        menu_items: List[Dict[str, Any]],
-        user_cart: List[Dict[str, Any]]
-    ) -> str:
-        """Побудова промпту для AI"""
-        
-        # Форматуємо меню
-        menu_text = "ДОСТУПНЕ МЕНЮ:\n"
-        for item in menu_items[:20]:  # Обмежуємо 20 товарів
-       """
 🤖 Сервіс для роботи з Gemini AI
 """
 import json
@@ -156,7 +52,7 @@ class GeminiService:
     # Обробка замовлень
     # ========================================================================
     
-    async def process_order_request(
+    def process_order_request(
         self,
         user_message: str,
         menu_items: List[Dict[str, Any]],
@@ -173,7 +69,7 @@ class GeminiService:
         Returns:
             dict: {
                 'action': 'add_to_cart' | 'show_menu' | 'checkout' | 'info',
-                'items': [...],  # Якщо action == 'add_to_cart'
+                'items': [...],
                 'message': 'Відповідь для користувача'
             }
         """
@@ -319,7 +215,7 @@ class GeminiService:
     # Допоміжні методи
     # ========================================================================
     
-    async def generate_response(self, prompt: str) -> str:
+    def generate_response(self, prompt: str) -> str:
         """
         Генерація загальної відповіді
         
@@ -336,7 +232,7 @@ class GeminiService:
             logger.error(f"❌ Error generating response: {e}")
             return "Вибачте, виникла помилка при генерації відповіді."
     
-    async def suggest_items(
+    def suggest_items(
         self,
         query: str,
         menu_items: List[Dict[str, Any]],
@@ -409,11 +305,6 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🧪 TESTING GEMINI SERVICE")
     print("=" * 60)
-    
-    # Для тестування потрібно створити config
-    # from app.config import load_config
-    # _, gemini_config, _, _ = load_config()
-    # service = GeminiService(gemini_config)
     
     print("\nThis module requires proper configuration to test.")
     print("Use it within the application context.")

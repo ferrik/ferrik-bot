@@ -1,154 +1,240 @@
 """
-🤖 Сервіс для роботи з Gemini AI
+🤖 GEMINI SERVICE - Google AI Integration
+Повний файл, готовий до використання на GitHub
 """
 import json
 import logging
+import time
 from typing import List, Dict, Any, Optional
-import google.generativeai as genai
 
-from app.utils.validators import safe_parse_price, safe_parse_quantity
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
 
 logger = logging.getLogger(__name__)
 
 
 class GeminiService:
-    """Сервіс для роботи з Gemini AI"""
+    """
+    Сервіс для роботи з Google Gemini AI
     
-    def __init__(self, config):
+    Функціонал:
+    - Обробка природних запитів користувачів
+    - Розпізнавання наміру (замовлення/меню/інше)
+    - Рекомендації товарів
+    - Пошук по меню
+    """
+    
+    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash"):
         """
-        Ініціалізація сервісу
+        Ініціалізація Gemini сервісу
         
         Args:
-            config: GeminiConfig з API key та налаштуваннями
+            api_key: API ключ від Google AI Studio
+            model_name: Назва моделі (gemini-1.5-flash рекомендована)
         """
-        self.config = config
+        self.api_key = api_key
+        self.model_name = model_name
         self.model = None
+        self.last_request_time = {}  # Для rate limiting
+        
+        logger.info(f"🤖 Initializing Gemini Service: {model_name}")
+        
+        if not api_key:
+            logger.error("❌ GEMINI_API_KEY not provided!")
+            raise ValueError("GEMINI_API_KEY is required")
         
         self._initialize()
     
     def _initialize(self):
-        """Ініціалізація Gemini API"""
+        """Ініціалізація API"""
         try:
-            # Налаштування API
-            genai.configure(api_key=self.config.api_key)
+            if not genai:
+                logger.error("❌ google-generativeai not installed!")
+                raise ImportError("google-generativeai is required")
             
-            # Створюємо модель
+            # Налаштування API
+            genai.configure(api_key=self.api_key)
+            
+            # Створення моделі
             self.model = genai.GenerativeModel(
-                model_name=self.config.model_name,
+                model_name=self.model_name,
                 generation_config={
-                    'temperature': self.config.temperature,
-                    'max_output_tokens': self.config.max_tokens,
+                    'temperature': 0.7,
+                    'max_output_tokens': 1000,
+                    'top_p': 0.95,
+                    'top_k': 40,
                 }
             )
             
-            logger.info(f"✅ Gemini AI initialized: {self.config.model_name}")
+            logger.info(f"✅ Gemini initialized: {self.model_name}")
         
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Gemini AI: {e}")
+            logger.error(f"❌ Failed to initialize Gemini: {e}")
             raise
     
     # ========================================================================
-    # Обробка замовлень
+    # RATE LIMITING
+    # ========================================================================
+    
+    def _check_rate_limit(self, user_id: int, max_requests: int = 5, 
+                         time_window: int = 60) -> tuple[bool, Optional[int]]:
+        """
+        Перевірка rate limiting
+        
+        Args:
+            user_id: ID користувача
+            max_requests: Максимум запитів
+            time_window: Часовий період (секунди)
+        
+        Returns:
+            (allowed: bool, wait_seconds: Optional[int])
+        """
+        now = time.time()
+        
+        if user_id not in self.last_request_time:
+            self.last_request_time[user_id] = []
+        
+        # Видалити старі запити за межами часового вікна
+        self.last_request_time[user_id] = [
+            req_time for req_time in self.last_request_time[user_id]
+            if now - req_time < time_window
+        ]
+        
+        # Перевірити ліміт
+        if len(self.last_request_time[user_id]) < max_requests:
+            self.last_request_time[user_id].append(now)
+            return True, None
+        
+        # Розрахувати час очікування
+        oldest = self.last_request_time[user_id][0]
+        wait_time = int(time_window - (now - oldest)) + 1
+        
+        return False, max(0, wait_time)
+    
+    # ========================================================================
+    # ОБРОБКА ЗАМОВЛЕНЬ
     # ========================================================================
     
     def process_order_request(
         self,
+        user_id: int,
         user_message: str,
         menu_items: List[Dict[str, Any]],
-        user_cart: List[Dict[str, Any]]
+        user_cart: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Обробити запит користувача через AI
         
         Args:
+            user_id: ID користувача
             user_message: Повідомлення користувача
-            menu_items: Доступні товари з меню
+            menu_items: Доступні товари
             user_cart: Поточний кошик користувача
         
         Returns:
-            dict: {
-                'action': 'add_to_cart' | 'show_menu' | 'checkout' | 'info',
-                'items': [...],
-                'message': 'Відповідь для користувача'
+            {
+                'action': 'add_to_cart' | 'show_menu' | 'recommend' | 'info',
+                'items': [...],  # Знайдені товари
+                'message': 'Відповідь користувачу',
+                'success': True/False
             }
         """
+        
+        # 1️⃣ ПЕРЕВІРКА RATE LIMITING
+        allowed, wait_time = self._check_rate_limit(user_id)
+        
+        if not allowed:
+            logger.warning(f"⏱️ Rate limit hit for user {user_id}, wait {wait_time}s")
+            return {
+                'action': 'error',
+                'message': f"⏱️ Задто багато запитів! Чекайте {wait_time} сек",
+                'success': False
+            }
+        
+        # 2️⃣ ПОБУДОВА ПРОМПТУ
+        prompt = self._build_order_prompt(user_message, menu_items, user_cart)
+        
         try:
-            # Формуємо промпт
-            prompt = self._build_order_prompt(user_message, menu_items, user_cart)
-            
-            # Відправляємо запит до AI
+            # 3️⃣ ЗАПИТ ДО GEMINI
+            logger.info(f"🤖 Sending AI request for user {user_id}")
             response = self.model.generate_content(prompt)
             
-            # Парсимо відповідь
+            # 4️⃣ ПАРСИНГ ВІДПОВІДІ
             result = self._parse_ai_response(response.text, menu_items)
             
-            logger.info(f"🤖 AI processed request: action={result.get('action')}")
+            logger.info(f"✅ AI response received: action={result.get('action')}")
             return result
         
         except Exception as e:
-            logger.error(f"❌ Error processing AI request: {e}")
+            logger.error(f"❌ Gemini API error: {e}")
             return {
-                'action': 'info',
-                'message': 'Вибачте, виникла помилка. Спробуйте використати команди /menu або /help'
+                'action': 'error',
+                'message': "❌ Помилка AI обробки. Спробуйте пізніше",
+                'success': False
             }
     
     def _build_order_prompt(
         self,
         user_message: str,
         menu_items: List[Dict[str, Any]],
-        user_cart: List[Dict[str, Any]]
+        user_cart: List[Dict[str, Any]] = None
     ) -> str:
         """Побудова промпту для AI"""
         
-        # Форматуємо меню
+        # Форматування меню
         menu_text = "ДОСТУПНЕ МЕНЮ:\n"
-        for item in menu_items:
-            menu_text += f"- {item['name']} ({item['category']}) - {item['price']} грн"
-            if item.get('description'):
-                menu_text += f" | {item['description']}"
-            menu_text += "\n"
+        for item in menu_items[:20]:  # Обмежуємо для краї токенів
+            name = item.get('name', 'Unknown')
+            category = item.get('category', 'Other')
+            price = item.get('price', 0)
+            menu_text += f"- {name} ({category}) - {price} грн\n"
         
-        # Форматуємо кошик
+        # Форматування кошика (якщо є)
         cart_text = "ПОТОЧНИЙ КОШИК:\n"
         if user_cart:
             for item in user_cart:
-                cart_text += f"- {item['name']} x{item.get('quantity', 1)}\n"
+                name = item.get('name', 'Unknown')
+                qty = item.get('quantity', 1)
+                cart_text += f"- {name} x{qty}\n"
         else:
             cart_text += "Порожній\n"
         
-        prompt = f"""Ти - асистент для замовлення їжі в ресторані FerrikFoot.
+        # ОСНОВНИЙ ПРОМПТ
+        prompt = f"""🤖 Ти - асистент замовлення їжі у ресторані FerrikFoot.
 
 {menu_text}
 
 {cart_text}
 
-ПОВІДОМЛЕННЯ КОРИСТУВАЧА: "{user_message}"
+ЗАПИТ КОРИСТУВАЧА: "{user_message}"
 
-ТВОЄ ЗАВДАННЯ:
-1. Проаналізувати запит користувача
-2. Визначити намір (додати товар, переглянути меню, оформити замовлення, тощо)
-3. Знайти відповідні товари з меню (якщо користувач хоче щось замовити)
-4. Відповісти у форматі JSON
+ТВОЇ ІНСТРУКЦІЇ:
+1. Проаналізуй запит
+2. Визнач намір:
+   - "add_to_cart" - якщо користувач хоче замовити
+   - "show_menu" - якщо хоче побачити меню
+   - "recommend" - якщо хоче рекомендацію
+   - "info" - для інших питань
+3. Знайди товари з меню (якщо необхідно)
+4. Відповідай дружелюбно та коротко українською
 
-ФОРМАТ ВІДПОВІДІ (ОБОВ'ЯЗКОВО JSON):
+⚠️ ОБОВ'ЯЗКОВО ВІДПОВІДАЙ У ФОРМАТІ JSON:
 {{
-    "action": "add_to_cart" або "show_menu" або "checkout" або "info",
+    "action": "add_to_cart" або "show_menu" або "recommend" або "info",
     "items": [
-        {{"id": "ID_товару", "name": "Назва", "price": ціна, "quantity": кількість}}
+        {{"id": "товару_айді", "name": "Назва", "price": 120, "quantity": 1}}
     ],
-    "message": "Дружня відповідь українською"
+    "message": "Твоя відповідь українською"
 }}
 
 ПРАВИЛА:
-- action="add_to_cart" - якщо користувач хоче замовити конкретні страви
-- action="show_menu" - якщо користувач хоче побачити меню
-- action="checkout" - якщо користувач хоче оформити замовлення
-- action="info" - для загальних питань
-- Шукай товари за частковими збігами назв
-- Якщо товар не знайдено, пропонуй схожі
-- Завжди будь ввічливим та допомагай
-
-ВІДПОВІДАЙ ТІЛЬКИ В ФОРМАТІ JSON, БЕЗ ДОДАТКОВОГО ТЕКСТУ!"""
+✓ Шукай товари за частковими назвами
+✓ Якщо не знайдеш - порекомендуй схожі
+✓ Завжди будь ввічливим
+✓ ВІДПОВІДАЙ ТІЛЬКИ JSON БЕЗ ДОДАТКОВОГО ТЕКСТУ!
+"""
         
         return prompt
     
@@ -157,10 +243,10 @@ class GeminiService:
         ai_text: str,
         menu_items: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Парсинг відповіді AI"""
+        """Парсинг JSON відповіді від AI"""
         
         try:
-            # Очищуємо відповідь від markdown
+            # Очищення від markdown
             clean_text = ai_text.strip()
             if clean_text.startswith('```json'):
                 clean_text = clean_text[7:]
@@ -168,51 +254,205 @@ class GeminiService:
                 clean_text = clean_text[3:]
             if clean_text.endswith('```'):
                 clean_text = clean_text[:-3]
+            
             clean_text = clean_text.strip()
             
-            # Парсимо JSON
+            # Парсинг JSON
             result = json.loads(clean_text)
             
-            # Валідація та доповнення даних товарів
+            # ВАЛІДАЦІЯ ТОВАРІВ
             if result.get('action') == 'add_to_cart' and result.get('items'):
                 validated_items = []
                 
                 for item in result['items']:
-                    # Шукаємо товар в меню
-                    menu_item = None
                     item_id = item.get('id')
                     item_name = item.get('name', '').lower()
                     
-                    for menu in menu_items:
-                        if (str(menu['id']) == str(item_id) or 
-                            menu['name'].lower() == item_name):
-                            menu_item = menu
+                    # Шукаємо товар в меню
+                    found_item = None
+                    for menu_item in menu_items:
+                        if (str(menu_item.get('id')) == str(item_id) or 
+                            menu_item.get('name', '').lower() == item_name or
+                            item_name in menu_item.get('name', '').lower()):
+                            found_item = menu_item
                             break
                     
-                    if menu_item:
+                    if found_item:
                         validated_items.append({
-                            'id': menu_item['id'],
-                            'name': menu_item['name'],
-                            'price': menu_item['price'],
-                            'quantity': safe_parse_quantity(item.get('quantity', 1))
+                            'id': found_item['id'],
+                            'name': found_item['name'],
+                            'price': found_item.get('price', 0),
+                            'quantity': int(item.get('quantity', 1))
                         })
                 
                 result['items'] = validated_items
             
+            # Перевірка обов'язкових полів
+            if 'action' not in result:
+                result['action'] = 'info'
+            if 'message' not in result:
+                result['message'] = 'Виконано'
+            if 'items' not in result:
+                result['items'] = []
+            
+            result['success'] = True
+            
             return result
         
         except json.JSONDecodeError as e:
-            logger.error(f"❌ Failed to parse AI JSON: {e}\nText: {ai_text}")
+            logger.error(f"❌ Failed to parse AI JSON: {e}\nText: {ai_text[:200]}")
             
-            # Fallback відповідь
             return {
                 'action': 'info',
-                'message': ai_text if len(ai_text) < 500 else 'Не зрозумів запит. Спробуйте /menu або /help'
+                'message': ai_text if len(ai_text) < 500 else 'Спробуйте /menu для перегляду меню',
+                'items': [],
+                'success': False
+            }
+        
+        except Exception as e:
+            logger.error(f"❌ Error parsing AI response: {e}")
+            return {
+                'action': 'error',
+                'message': '❌ Помилка обробки. Спробуйте пізніше',
+                'items': [],
+                'success': False
             }
     
     # ========================================================================
-    # Допоміжні методи
+    # ПОШУК ТА РЕКОМЕНДАЦІЇ
     # ========================================================================
+    
+    def search_items(
+        self,
+        query: str,
+        menu_items: List[Dict[str, Any]],
+        max_results: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Пошук товарів за запитом
+        
+        Args:
+            query: Пошуковий запит
+            menu_items: Меню для пошуку
+            max_results: Макс результатів
+        
+        Returns:
+            Список знайдених товарів
+        """
+        
+        query_lower = query.lower()
+        results = []
+        
+        for item in menu_items:
+            name = item.get('name', '').lower()
+            category = item.get('category', '').lower()
+            description = item.get('description', '').lower()
+            
+            # Просте збігання
+            if (query_lower in name or 
+                query_lower in category or 
+                query_lower in description):
+                results.append(item)
+        
+        return results[:max_results]
+    
+    def get_recommendations(
+        self,
+        user_mood: Optional[str] = None,
+        menu_items: List[Dict[str, Any]] = None,
+        max_recommendations: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Отримати рекомендації на основі настрою
+        
+        Args:
+            user_mood: Настрій користувача (happy, sad, busy, lazy)
+            menu_items: Меню для рекомендацій
+            max_recommendations: Кількість рекомендацій
+        
+        Returns:
+            Рекомендації з повідомленням
+        """
+        
+        mood_prompts = {
+            'happy': "рекомендуй яскраві, святкові страви",
+            'sad': "рекомендуй комфортну, теплу їжу",
+            'busy': "рекомендуй швидкі, легкі страви",
+            'lazy': "рекомендуй готові, легкі блюда",
+        }
+        
+        prompt_end = mood_prompts.get(user_mood, "рекомендуй популярні страви")
+        
+        if not menu_items:
+            return {
+                'success': False,
+                'message': 'Меню недоступне',
+                'items': []
+            }
+        
+        try:
+            prompt = f"""Ти асистент ресторану. {prompt_end}
+
+Меню:
+{self._format_menu_for_prompt(menu_items[:15])}
+
+Рекомендуй {max_recommendations} страви в форматі JSON:
+{{
+    "items": [
+        {{"id": "1", "name": "Назва", "reason": "Коротка причина"}}
+    ],
+    "message": "Привітання з рекомендаціями"
+}}
+"""
+            
+            response = self.model.generate_content(prompt)
+            result = json.loads(response.text.strip('```json\n').strip('```'))
+            
+            # Валідація
+            validated = []
+            for rec in result.get('items', []):
+                for item in menu_items:
+                    if str(item.get('id')) == str(rec.get('id')):
+                        validated.append(item)
+                        break
+            
+            return {
+                'success': True,
+                'message': result.get('message', 'Ось мої рекомендації'),
+                'items': validated[:max_recommendations]
+            }
+        
+        except Exception as e:
+            logger.error(f"❌ Recommendations error: {e}")
+            return {
+                'success': False,
+                'message': 'Помилка при отриманні рекомендацій',
+                'items': []
+            }
+    
+    def _format_menu_for_prompt(self, menu_items: List[Dict[str, Any]]) -> str:
+        """Форматування меню для промпту"""
+        text = ""
+        for item in menu_items:
+            name = item.get('name', '')
+            price = item.get('price', 0)
+            category = item.get('category', '')
+            text += f"- {name} ({category}) - {price} грн\n"
+        return text
+    
+    # ========================================================================
+    # УТИЛІТИ
+    # ========================================================================
+    
+    def test_connection(self) -> bool:
+        """Тест підключення до Gemini API"""
+        try:
+            response = self.model.generate_content("Скажи 'OK' якщо ти працюєш")
+            logger.info(f"✅ Gemini API test successful")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Gemini API test failed: {e}")
+            return False
     
     def generate_response(self, prompt: str) -> str:
         """
@@ -222,7 +462,7 @@ class GeminiService:
             prompt: Промпт для AI
         
         Returns:
-            str: Відповідь AI
+            Відповідь від AI
         """
         try:
             response = self.model.generate_content(prompt)
@@ -230,80 +470,62 @@ class GeminiService:
         except Exception as e:
             logger.error(f"❌ Error generating response: {e}")
             return "Вибачте, виникла помилка при генерації відповіді."
-    
-    def suggest_items(
-        self,
-        query: str,
-        menu_items: List[Dict[str, Any]],
-        max_suggestions: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Підказати товари на основі запиту
-        
-        Args:
-            query: Пошуковий запит
-            menu_items: Доступні товари
-            max_suggestions: Максимальна кількість підказок
-        
-        Returns:
-            list: Рекомендовані товари
-        """
-        try:
-            menu_text = "\n".join([
-                f"{item['name']} - {item['category']} - {item['price']} грн"
-                for item in menu_items
-            ])
-            
-            prompt = f"""З наступного меню:
-
-{menu_text}
-
-Запит користувача: "{query}"
-
-Порекомендуй {max_suggestions} найбільш підходящих товарів.
-Відповідай у форматі JSON:
-{{
-    "suggestions": [
-        {{"id": "...", "name": "...", "reason": "..."}}
-    ]
-}}"""
-            
-            response = self.model.generate_content(prompt)
-            result = json.loads(response.text.strip('```json\n').strip('```'))
-            
-            # Знаходимо повні дані товарів
-            suggestions = []
-            for sugg in result.get('suggestions', []):
-                for item in menu_items:
-                    if item['id'] == sugg['id'] or item['name'] == sugg['name']:
-                        suggestions.append(item)
-                        break
-            
-            return suggestions[:max_suggestions]
-        
-        except Exception as e:
-            logger.error(f"❌ Error suggesting items: {e}")
-            return []
-    
-    def test_connection(self) -> bool:
-        """Тест підключення до Gemini API"""
-        try:
-            response = self.model.generate_content("Привіт! Скажи 'OK' якщо ти працюєш.")
-            logger.info(f"✅ Gemini test successful: {response.text[:50]}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Gemini test failed: {e}")
-            return False
 
 
 # ============================================================================
-# Debugging
+# ТЕСТУВАННЯ (для розробки)
 # ============================================================================
 
 if __name__ == "__main__":
+    import os
+    from dotenv import load_dotenv
+    
+    load_dotenv()
+    
+    api_key = os.getenv("GEMINI_API_KEY")
+    
+    if not api_key:
+        print("❌ GEMINI_API_KEY not set in .env")
+        exit(1)
+    
     print("=" * 60)
     print("🧪 TESTING GEMINI SERVICE")
     print("=" * 60)
     
-    print("\nThis module requires proper configuration to test.")
-    print("Use it within the application context.")
+    # Ініціалізація
+    service = GeminiService(api_key)
+    
+    # Тестовий меню
+    menu = [
+        {'id': '1', 'name': 'Піца Маргарита', 'category': 'Pizza', 'price': 120},
+        {'id': '2', 'name': 'Піца Пепероні', 'category': 'Pizza', 'price': 150},
+        {'id': '3', 'name': 'Цезар', 'category': 'Salad', 'price': 80},
+        {'id': '4', 'name': 'Cola', 'category': 'Drink', 'price': 30},
+    ]
+    
+    # Тест 1: Connection
+    print("\n1️⃣ Testing connection...")
+    if service.test_connection():
+        print("✅ Connection OK")
+    else:
+        print("❌ Connection failed")
+    
+    # Тест 2: Order processing
+    print("\n2️⃣ Testing order processing...")
+    result = service.process_order_request(
+        user_id=123,
+        user_message="Хочу піцу Маргарита",
+        menu_items=menu
+    )
+    print(f"Action: {result.get('action')}")
+    print(f"Message: {result.get('message')}")
+    print(f"Items: {len(result.get('items', []))} found")
+    
+    # Тест 3: Search
+    print("\n3️⃣ Testing search...")
+    search_result = service.search_items("піца", menu)
+    print(f"Found {len(search_result)} items")
+    
+    print("\n" + "=" * 60)
+    print("✅ All tests completed!")
+    print("=" * 60)

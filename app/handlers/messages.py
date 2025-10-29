@@ -58,19 +58,29 @@ INTENT_KEYWORDS = {
 }
 
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробник текстових повідомлень"""
+async def handle_ai_order(update, context, text):
     user = update.effective_user
-    text = sanitize_input(update.message.text)
     
-    logger.info(f"📨 Message from {user.id}: {text[:50]}")
+    # ОТРИМУЄМО GEMINI SERVICE
+    gemini = context.bot_data.get('gemini_service')
     
-    # Отримуємо дані користувача
-    session = get_user_session(user.id)
-    stats = get_user_stats(user.id)
+    # ОБРОБЛЯЄМО З RATE LIMITING
+    result = gemini.process_order_request(
+        user_id=user.id,
+        text=text,
+        menu_items=[...]
+    )
     
-    # Показуємо "набирає текст..." індикатор
-    await update.message.chat.send_action("typing")
+    # ЯК ЩО РЕЙТ ЛІМІТ?
+    if result.get('action') == 'error':
+        await update.message.reply_text(
+            result['message'],
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Звичайна обробка
+    # ...
     
     # ========================================================================
     # ОБРОБКА РІЗНИХ СТАНІВ

@@ -1,5 +1,5 @@
 """
-🍕 FERRIKBOT v2.1 - MAIN APPLICATION
+🍕 FERRIKBOT v2.1 - MAIN APPLICATION (FIXED)
 Повний файл, готовий до використання на GitHub та Render
 """
 
@@ -136,6 +136,7 @@ def init_services():
     
     except Exception as e:
         logger.error(f"❌ Gemini service error: {e}")
+        gemini_service = None
     
     try:
         # 3️⃣ GOOGLE SHEETS
@@ -158,11 +159,11 @@ def init_services():
         
         if not test_connection():
             logger.error("❌ Database connection failed")
-            return services, None, None, None
+            return services, gemini_service, sheets_service, None
         
         if not init_db():
             logger.error("❌ Database initialization failed")
-            return services, None, None, None
+            return services, gemini_service, sheets_service, None
         
         services['database'] = True
         logger.info("✅ Database ready")
@@ -170,7 +171,7 @@ def init_services():
     except Exception as e:
         logger.error(f"❌ Database error: {e}")
     
-    return services, gemini_service if services['gemini'] else None, sheets_service if services['sheets'] else None, None
+    return services, gemini_service, sheets_service, None
 
 
 # ============================================================================
@@ -308,40 +309,92 @@ def stats():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================================
+# 🔥 WEBHOOK ROUTES (КРИТИЧНО ВАЖНО - ОБИДВА МАРШРУТИ!)
+# ============================================================================
+
 @app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Telegram webhook endpoint"""
+def webhook():
+    """
+    Основний webhook маршрут для Telegram
+    Telegram надсилає месіджи сюди: POST /webhook
+    """
+    logger.info("📨 Webhook /webhook отримав запит")
+    return process_webhook(request)
+
+
+@app.route('/webhook/webhook', methods=['POST'])
+def webhook_double():
+    """
+    Резервний webhook маршрут (для старого налаштування)
+    Якщо раніше webhook був встановлено як /webhook/webhook
+    """
+    logger.warning("⚠️ Webhook /webhook/webhook отримав запит (старий маршрут)")
+    return process_webhook(request)
+
+
+def process_webhook(req):
+    """
+    Спільна обробка всіх webhook запитів
+    Розпаршує Update від Telegram і обробляє його
+    """
     try:
+        # Отримай JSON від Telegram
+        data = req.get_json()
+        
+        if not data:
+            logger.error("❌ Webhook: порожні дані")
+            return jsonify({"ok": False, "error": "Empty data"}), 400
+        
+        logger.info(f"📨 Webhook data: {data}")
+        
         if not bot_application:
             logger.error("❌ Bot application not initialized")
             return jsonify({"ok": False}), 500
         
-        # Отримання update від Telegram
-        update = Update.de_json(request.get_json(), bot_application.bot)
+        # Розпарс Update від Telegram
+        update = Update.de_json(data, bot_application.bot)
         
-        # Обробка update
-        await bot_application.process_update(update)
+        if not update:
+            logger.error("❌ Failed to parse update")
+            return jsonify({"ok": False}), 400
         
+        # Обробити месідж через зареєстровані обробники
+        bot_application.process_update(update)
+        
+        logger.info("✅ Update processed successfully")
         return jsonify({"ok": True}), 200
     
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route('/set_webhook', methods=['GET', 'POST'])
-async def set_webhook_route():
-    """Встановлення webhook для Telegram"""
+def set_webhook_route():
+    """
+    Встановлення webhook для Telegram
+    Можна викликати: GET /set_webhook або POST /set_webhook
+    """
     if not bot_application:
         return jsonify({"ok": False, "error": "Bot not initialized"}), 500
     
     try:
         webhook_url = f"{config.WEBHOOK_URL}/webhook"
         
-        await bot_application.bot.set_webhook(
-            url=webhook_url,
-            allowed_updates=["message", "callback_query", "edited_message"]
-        )
+        # Синхронна функція для встановлення webhook
+        import asyncio
+        
+        async def set_it():
+            await bot_application.bot.set_webhook(
+                url=webhook_url,
+                allowed_updates=["message", "callback_query", "edited_message"]
+            )
+        
+        # Запусти асинхронну функцію
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(set_it())
         
         logger.info(f"✅ Webhook set: {webhook_url}")
         
@@ -352,22 +405,31 @@ async def set_webhook_route():
         }), 200
     
     except Exception as e:
-        logger.error(f"❌ Set webhook error: {e}")
+        logger.error(f"❌ Set webhook error: {e}", exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route('/delete_webhook', methods=['GET', 'POST'])
-async def delete_webhook_route():
+def delete_webhook_route():
     """Видалення webhook"""
     if not bot_application:
         return jsonify({"ok": False}), 500
     
     try:
-        await bot_application.bot.delete_webhook()
+        import asyncio
+        
+        async def delete_it():
+            await bot_application.bot.delete_webhook()
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(delete_it())
+        
         logger.info("✅ Webhook deleted")
         return jsonify({"ok": True, "message": "✅ Webhook видалено"}), 200
     
     except Exception as e:
+        logger.error(f"❌ Delete webhook error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -414,6 +476,7 @@ def not_found(error):
             "/stats",
             "/menu",
             "/webhook",
+            "/webhook/webhook",
             "/set_webhook",
             "/delete_webhook"
         ]
@@ -468,6 +531,7 @@ def startup():
     logger.info("")
     logger.info("🔗 Webhook setup...")
     logger.info(f"   URL: {config.WEBHOOK_URL}/webhook")
+    logger.info(f"   Резервний: {config.WEBHOOK_URL}/webhook/webhook")
     
     # 5️⃣ ІНФОРМАЦІЯ ПРО ЗАПУСК
     logger.info("")
@@ -505,7 +569,7 @@ if __name__ == '__main__':
         
         # Запуск Flask
         app.run(
-            host=config.HOST if hasattr(config, 'HOST') else "0.0.0.0",
+            host="0.0.0.0",
             port=config.PORT,
             debug=config.DEBUG,
             use_reloader=False  # Важливо для Telegram webhook

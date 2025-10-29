@@ -1,103 +1,42 @@
 """
-🎯 Обробники команд - ЛЮДЯНА ВЕРСІЯ
-Теплі привітання, персоналізація, бейджи та достижения
+🎯 ОБРОБНИКИ КОМАНД - З WARM GREETINGS
+Скопіюйте весь файл!
 """
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from datetime import datetime
-
-from app.utils.validators import format_order_summary, calculate_total_price
-from app.utils.session import (
-    get_user_cart,
-    clear_user_cart,
-    get_user_session,
-    update_user_session,
-    get_user_stats,
-    get_user_badge,
-    get_referral_link,
-    get_weekly_challenge,
-    get_user_challenge_progress,
-    ACHIEVEMENTS,
-)
+from app.utils.session import get_user_session, get_user_stats, update_user_session
+from app.utils.warm_greetings import WarmGreetings
 
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# ПРИВІТАННЯ - ТЕПЛІ ТА ПЕРСОНАЛЬНІ
+# /start - ТЕПЛИЙ ЗАПУСК!
 # ============================================================================
 
-WARM_GREETINGS = {
-    'first_time': """👋 **Вітаю у FerrikFoot!** 🍕
-
-Я **Ferrik** — твій супер-помічник зі смаку 😋
-
-Знаю, що ти голодний! Вибери, що бажаєш:
-
-✨ **Порадити страву** за твоїм настроєм
-🎁 **Подарую 50 бонусів** на перше замовлення
-📋 **Показати меню** з кращих ресторанів
-💬 **Розуміти** твої бажання як людина (не бот)
-
-Чого чекаємо? Зробимо тебе щасливим! 🚀""",
-
-    'returning_once': """Оу, ти повернувся! 👋
-
-Сподіваюсь, попереднє замовлення було смачним? 🍽️
-
-Що сьогодні заказуємо?""",
-
-    'regular': """Привіт, чемпіон! 👑
-
-Знову голодний? 😋
-Я вже знаю твої уподобання!
-
-Спробуємо щось нове чи замовимо улюблене? 🍕""",
-
-    'VIP': """Привіт, мегафан! 🌟
-
-Ти уже **{badge}** у FerrikFoot!
-Спасибі що залишаєшся з нами 🙌
-
-Для тебе спеціально: **{bonus} бонусів** за наступне замовлення!
-
-Що на меню? 👨‍🍳""",
-}
-
-
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробник команди /start - ПЕРСОНАЛІЗОВАНИЙ"""
+    """
+    Команда /start
+    Використовує WarmGreetings для персоналізованого привітання
+    """
     user = update.effective_user
     
     logger.info(f"👤 User {user.id} (@{user.username}) started bot")
     
-    # Отримуємо сесію
+    # 1️⃣ ОТРИМУЄМО ДАНІ КОРИСТУВАЧА
     session = get_user_session(user.id)
     stats = get_user_stats(user.id)
     
-    # Визначаємо тип привітання
-    if stats['order_count'] == 0:
-        # ПЕРШИЙ РАЗДЗВІД - МАКСИМАЛЬНО ТЕПЛИЙ
-        greeting = WARM_GREETINGS['first_time']
-        # Даємо бонус за реєстрацію
-        update_user_session(user.id, {'bonus_points': 50})
-        
-    elif stats['order_count'] == 1:
-        greeting = WARM_GREETINGS['returning_once']
+    # 2️⃣ ВИБИРАЄМО ПРИВІТАННЯ НА ОСНОВІ ІСТОРІЇ
+    greeting = WarmGreetings.get_greeting_by_order_count(
+        order_count=stats['order_count'],
+        badge=stats['badge']['name'],
+        bonus=stats['bonus_points']
+    )
     
-    elif stats['order_count'] < 10:
-        greeting = WARM_GREETINGS['regular']
+    logger.info(f"📨 Greeting type: order_count={stats['order_count']}")
     
-    else:
-        # VIP користувач
-        badge = stats['badge']
-        bonus = stats['bonus_points']
-        greeting = WARM_GREETINGS['VIP'].format(
-            badge=badge['name'],
-            bonus=bonus
-        )
-    
-    # Клавіатура
+    # 3️⃣ СТВОРЮЄМО КЛАВІАТУРУ З КНОПКАМИ
     keyboard = [
         [
             InlineKeyboardButton("🎁 Сюрприз!", callback_data="surprise_me"),
@@ -105,7 +44,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("🛒 Кошик", callback_data="show_cart"),
-            InlineKeyboardButton("⭐ Мій профіль", callback_data="show_profile"),
+            InlineKeyboardButton("⭐ Профіль", callback_data="show_profile"),
         ],
         [
             InlineKeyboardButton("🎯 Челлендж", callback_data="show_challenge"),
@@ -113,101 +52,217 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     
-    # Якщо новий користувач - показуємо реферальну систему
-    if stats['order_count'] == 0:
-        referral_link = get_referral_link(user.id)
-        greeting += f"\n\n**Поділись з друзями:**\n`{referral_link}`\n_(Обидва отримаєте по 100 бонусів!)_"
-        keyboard.append([
-            InlineKeyboardButton("📤 Поділитись ботом", callback_data="share_bot")
-        ])
-    
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # 4️⃣ ВІДПРАВЛЯЄМО ПРИВІТАННЯ
     await update.message.reply_text(
         greeting,
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
+    
+    logger.info(f"✅ Welcome message sent to {user.id}")
 
 
 # ============================================================================
-# ПРОФІЛЬ КОРИСТУВАЧА - ПОКАЗУВАТИ БЕЙДЖІ І СТАТИСТИКУ
+# /menu - ПОКАЗАТИ МЕНЮ
 # ============================================================================
 
-async def show_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати профіль користувача з статистикою"""
-    query = update.callback_query
-    user = query.from_user
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /menu - показує меню"""
+    user = update.effective_user
     
-    stats = get_user_stats(user.id)
-    badge = stats['badge']
+    logger.info(f"📋 User {user.id} requested menu")
     
-    profile_text = f"""**👤 ТЕ ПРОФІЛЬ**
+    # Заглушка (на практиці тут буде завантаження з Google Sheets)
+    menu_text = """📋 **МЕНЮ**
 
-**Статус:** {badge['emoji']} {badge['name']}
-_(Ще {stats['next_badge_in']} замовлень до наступного рівня!)_
+**Піці:**
+🔹 Маргарита — 120 грн ⭐⭐⭐⭐
+🔹 Пепероні — 150 грн ⭐⭐⭐⭐⭐
 
-📊 **СТАТИСТИКА:**
-• Замовлення: **{stats['order_count']}** 🍕
-• Загалом витрачено: **{stats['total_spent']} грн** 💰
-• Середня вартість: **{stats['avg_order_value']} грн**
-• Бонус-поінти: **{stats['bonus_points']}** ⭐
+**Напої:**
+🔹 Cola 0.5л — 30 грн
+🔹 Сік — 40 грн
 
-🏆 **ДОСЯГНЕННЯ:** {stats['achievements_count']} розблоковано
-
-❤️ **УЛЮБЛЕНА СТРАВА:** {stats['favorite_item'] or 'Ще не обрав'}
-
-📅 **З НАМИ З:** {stats['created_at'][:10]}
-"""
-
-    if stats['order_count'] > 0:
-        profile_text += f"\n📌 **ОСТАННЄ ЗАМОВЛЕННЯ:** {stats['last_order_date'][:10]}"
+💬 Напишіть назву щоб додати у кошик!"""
     
     keyboard = [
-        [InlineKeyboardButton("🎁 Мої досягнення", callback_data="show_achievements")],
-        [InlineKeyboardButton("👥 Мої рефералі", callback_data="show_referrals")],
+        [InlineKeyboardButton("🛒 Мій кошик", callback_data="show_cart")],
+        [InlineKeyboardButton("🎁 Сюрприз", callback_data="surprise_me")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
     ]
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        profile_text,
+    await update.message.reply_text(
+        menu_text,
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
 
 # ============================================================================
-# ЧЕЛЛЕНДЖІ - МОТИВАЦІЯ ЗАМОВЛЯТИ
+# /cart - ПОКАЗАТИ КОШИК
 # ============================================================================
 
-async def show_challenge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати щотижневий челлендж"""
-    query = update.callback_query
-    user = query.from_user
+async def cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /cart - показує кошик"""
+    user = update.effective_user
     
-    challenge_data = get_user_challenge_progress(user.id)
-    challenge = challenge_data['challenge']
+    logger.info(f"🛒 User {user.id} requested cart")
     
-    challenge_text = f"""**🎯 ЧЕЛЛЕНДЖ ТИЖНЯ**
+    from app.utils.session import get_user_cart
+    cart = get_user_cart(user.id)
+    
+    if not cart or len(cart) == 0:
+        await update.message.reply_text(
+            "🛒 **Ваш кошик порожній!** 😔\n\n"
+            "Додайте щось смачне з меню! 🍕",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Формуємо кошик
+    cart_text = "🛒 **Ваш кошик:**\n\n"
+    total = 0
+    
+    for idx, item in enumerate(cart, 1):
+        name = item.get('name', 'Unknown')
+        price = item.get('price', 0)
+        qty = item.get('quantity', 1)
+        subtotal = price * qty
+        total += subtotal
+        
+        cart_text += f"{idx}. {name}\n"
+        cart_text += f"   {qty} × {price} грн = **{subtotal} грн**\n\n"
+    
+    cart_text += f"\n💰 **Всього: {total} грн**"
+    
+    keyboard = [
+        [InlineKeyboardButton("🎁 Промокод", callback_data="enter_promocode")],
+        [InlineKeyboardButton("✅ Оформити", callback_data="checkout")],
+        [InlineKeyboardButton("🗑️ Очистити", callback_data="clear_cart")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        cart_text,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
 
-{challenge['title']}
 
-**Завдання:** {challenge['description']}
+# ============================================================================
+# /order - ОФОРМИТИ ЗАМОВЛЕННЯ
+# ============================================================================
 
-📊 **ПРОГРЕС:**
-{challenge_data['percentage']}% [{'█' * (challenge_data['percentage']//10)}{'░' * (10 - challenge_data['percentage']//10)}]
+async def order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /order - почати оформлення"""
+    user = update.effective_user
+    
+    logger.info(f"📦 User {user.id} started checkout")
+    
+    from app.utils.session import get_user_cart
+    cart = get_user_cart(user.id)
+    
+    if not cart or len(cart) == 0:
+        await update.message.reply_text(
+            "🛒 **Кошик порожній!** 😔\n\n"
+            "Нема чого замовляти!",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Встановлюємо стан "очікуємо телефон"
+    update_user_session(user.id, {'state': 'awaiting_phone'})
+    
+    await update.message.reply_text(
+        "📱 **Введіть ваш номер телефону:**\n\n"
+        "_(наприклад: +380501234567 або 0501234567)_",
+        parse_mode='Markdown'
+    )
 
-**Виконано:** {challenge_data['current_progress']}/{challenge['target']}
-**Залишилось:** {challenge_data['remaining']}
 
-🏆 **НАГРАДА:** {challenge['reward']} бонусів! ⭐
+# ============================================================================
+# /help - ДОПОМОГА
+# ============================================================================
 
-{'✅ ЧЕЛЛЕНДЖ ЗАВЕРШЕНО! 🎉' if challenge_data['completed'] else 'Ще трохи потрібно! 💪'}
-"""
+async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /help - допомога"""
+    help_text = """❓ **ДОПОМОГА**
 
+**Мої команди:**
+/start — Почати роботу
+/menu — Переглянути меню
+/cart — Мій кошик
+/order — Оформити замовлення
+/profile — Мій профіль
+/help — Ця допомога
+
+**Як замовити:**
+1️⃣ Напишіть назву страви або натисніть [📋 Меню]
+2️⃣ Виберіть що хочете
+3️⃣ Натисніть [✅ Оформити]
+4️⃣ Введіть телефон та адресу
+
+**Питання?**
+📞 Напишіть /support для зв'язку з нами"""
+    
+    await update.message.reply_text(
+        help_text,
+        parse_mode='Markdown'
+    )
+
+
+# ============================================================================
+# /cancel - СКАСУВАТИ
+# ============================================================================
+
+async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /cancel - скасувати операцію"""
+    user = update.effective_user
+    
+    logger.info(f"❌ User {user.id} cancelled operation")
+    
+    update_user_session(user.id, {'state': 'idle'})
+    
     keyboard = [
         [InlineKeyboardButton("📋 Меню", callback_data="show_menu")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
+        [InlineKeyboardButton("/start", callback_data="back_to_menu")]
     ]
-    reply_markup
+    
+    await update.message.reply_text(
+        "❌ **Операція скасована**\n\n"
+        "Почніть з нуля! 👋",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+# ============================================================================
+# ДОПОМІЖНА ФУНКЦІЯ - РЕЄСТРАЦІЯ HANDLERS
+# ============================================================================
+
+def register_command_handlers(application):
+    """
+    Реєстрація всіх command handlers
+    
+    Використовуйте в main.py:
+    ───────────────────────────
+    from app.handlers.commands import register_command_handlers
+    
+    # У функції setup_handlers():
+    register_command_handlers(app)
+    """
+    from telegram.ext import CommandHandler
+    
+    application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("menu", menu_handler))
+    application.add_handler(CommandHandler("cart", cart_handler))
+    application.add_handler(CommandHandler("order", order_handler))
+    application.add_handler(CommandHandler("help", help_handler))
+    application.add_handler(CommandHandler("cancel", cancel_handler))
+    
+    logger.info("✅ Command handlers registered")

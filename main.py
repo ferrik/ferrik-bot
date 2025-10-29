@@ -231,7 +231,7 @@ def webhook_double():
 def process_webhook(req):
     """
     Обробка webhook запитів від Telegram
-    ✅ ПРАВИЛЬНА ВЕРСІЯ З ASYNC
+    ✅ БЕЗ loop.close() - дозволяємо бібліотеці управляти
     """
     try:
         # Перевіри бот
@@ -251,7 +251,7 @@ def process_webhook(req):
         if not update:
             return jsonify({"ok": False}), 400
         
-        # ✅ ПРАВИЛЬНА ОБРОБКА: запусти async функцію в новому event loop
+        # ✅ ПРАВИЛЬНА ОБРОБКА: async без loop.close()
         import asyncio
         
         async def process():
@@ -262,13 +262,22 @@ def process_webhook(req):
             except Exception as e:
                 logger.error(f"❌ Error processing update: {e}", exc_info=True)
         
-        # Запусти в новому loop (це безпечно в Flask webhook)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # НЕ ЗАКРИВАЙ LOOP - дозволь asyncio управляти
         try:
-            loop.run_until_complete(process())
-        finally:
-            loop.close()
+            # Намагайся запустити в існуючому loop
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            # НЕ запускай як .run_until_complete() - це блокує
+            # Замість цього, просто вернемо 200 і дозволимо обробці відбуватися
+            import threading
+            threading.Thread(target=lambda: asyncio.run(process())).start()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            import threading
+            threading.Thread(target=lambda: asyncio.run(process())).start()
         
         return jsonify({"ok": True}), 200
     

@@ -1,265 +1,358 @@
 """
-🔘 Обробник callback queries - ОНОВЛЕНА ВЕРСІЯ
-Нові фічи: Surprise Me, Profile, Achievements, Challenges
+🔘 ОБРОБНИКИ CALLBACK QUERIES - З SURPRISE ME
+Скопіюйте весь файл!
 """
 import logging
-import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from datetime import datetime
-
-from app.utils.validators import format_order_summary, calculate_total_price
 from app.utils.session import (
-    get_user_cart,
-    clear_user_cart,
     get_user_session,
-    update_user_session,
     get_user_stats,
-    get_user_badge,
+    update_user_session,
+    get_user_cart,
     add_to_cart,
-    get_referral_link,
-    get_weekly_challenge,
-    get_user_challenge_progress,
-    register_order,
-    ACHIEVEMENTS,
+    clear_user_cart,
 )
+from app.utils.surprise_me import SurpriseMe
+from app.utils.warm_greetings import WarmGreetings
 
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# SURPRISE ME - ПОДАРОК ВІД ФЕРИКА
+# 🎁 SURPRISE ME - ГОЛОВНИЙ CALLBACK
 # ============================================================================
 
 async def surprise_me_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """AI генерує комбо з автоматичною знижкою"""
+    """
+    Callback: surprise_me
+    Генерує AI комбо зі знижкою та додає в кошик
+    """
     query = update.callback_query
     user = query.from_user
-    sheets_service = context.bot_data.get('sheets_service')
     
-    if not sheets_service:
-        await query.edit_message_text("❌ Сервіс недоступний")
-        return
+    logger.info(f"🎁 User {user.id} clicked Surprise Me")
     
     try:
-        # Отримуємо меню
-        menu = sheets_service.get_menu()
-        if not menu or len(menu) < 3:
-            await query.edit_message_text("😔 Меню занадто мале для сюрпризу!")
+        # 1️⃣ ОТРИМУЄМО МЕНЮ (заглушка - у реалю з Google Sheets)
+        menu_items = [
+            {'id': '1', 'name': 'Піца Маргарита', 'category': 'Pizza', 'price': 120},
+            {'id': '2', 'name': 'Піца Пепероні', 'category': 'Pizza', 'price': 150},
+            {'id': '3', 'name': 'Цезар салат', 'category': 'Salad', 'price': 80},
+            {'id': '4', 'name': 'Чорна Форест', 'category': 'Dessert', 'price': 90},
+            {'id': '5', 'name': 'Cola 0.5л', 'category': 'Drink', 'price': 30},
+            {'id': '6', 'name': 'Філадельфія рол', 'category': 'Sushi', 'price': 180},
+        ]
+        
+        if not menu_items or len(menu_items) < 2:
+            await query.answer("❌ Меню недоступне!", show_alert=True)
             return
         
-        # Селеціонуємо 2-3 товари випадково
-        surprise_items = random.sample(menu, min(3, len(menu)))
+        # 2️⃣ ГЕНЕРУЄМО СЮРПРИЗ
+        stats = get_user_stats(user.id)
+        surprise = SurpriseMe.generate_surprise(
+            menu_items,
+            user_order_count=stats['order_count'],
+            user_favorites=[]
+        )
         
-        # Даємо знижку 15-20%
-        discount = random.randint(15, 20)
+        if not surprise:
+            await query.answer("❌ Не можу генерувати сюрприз!", show_alert=True)
+            return
         
-        # Формуємо сюрприз
-        message = f"""🎁 **СЮРПРИЗ ВІД ФЕРИКА!** 🎁
-
-{random.choice([
-    "Я для тебе щось спеціальне вибрав! 😋",
-    "Вірю, тобі сподобається! 🔥",
-    "Це - мій особистий вибір! ⭐",
-    "Спеціально для тебе! 💝",
-])}
-
-**КОМБО СЮРПРИЗ:**"""
+        # 3️⃣ ФОРМАТУЄМО ПОВІДОМЛЕННЯ
+        message = SurpriseMe.format_surprise_message(surprise)
         
-        items_for_cart = []
-        for item in surprise_items:
-            message += f"\n🔹 {item['name']} — {item['price']} грн"
-            items_for_cart.append({
-                'id': item['id'],
-                'name': item['name'],
-                'price': item['price'],
-                'quantity': 1
-            })
+        # 4️⃣ ЗБЕРІГАЄМО В СЕСІЮ (на випадок прийняття)
+        surprise_items = SurpriseMe.apply_surprise_to_cart(surprise)
+        update_user_session(user.id, {
+            'current_surprise': surprise,
+            'surprise_items': surprise_items,
+        })
         
-        total = calculate_total_price(items_for_cart)
-        discounted = total * (1 - discount / 100)
-        saved = total - discounted
+        logger.info(f"✅ Surprise generated: {len(surprise['items'])} items, {surprise['discount']}% discount")
         
-        message += f"\n\n💰 **Звичайно:** {total} грн"
-        message += f"\n🎯 **Зі знижкою {discount}%:** {discounted:.0f} грн"
-        message += f"\n💚 **Ви заощадили:** {saved:.0f} грн"
-        message += f"\n\n✨ Це ж фана́стично! 🚀"
-        
+        # 5️⃣ КНОПКИ
         keyboard = [
             [InlineKeyboardButton("✅ Беру сюрприз!", callback_data="accept_surprise")],
-            [InlineKeyboardButton("❌ Не той сюрприз", callback_data="show_menu")],
+            [InlineKeyboardButton("❌ Генерувати ще", callback_data="surprise_me")],
+            [InlineKeyboardButton("📋 До меню", callback_data="show_menu")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Зберігаємо сюрприз в сесію
-        update_user_session(user.id, {
-            'surprise_items': items_for_cart,
-            'surprise_discount': discount
-        })
-        
+        # 6️⃣ РЕДАГУЄМО ПОВІДОМЛЕННЯ
         await query.edit_message_text(
             message,
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
-    
+        
+        await query.answer()  # Закрити loading
+        
     except Exception as e:
         logger.error(f"❌ Error in surprise_me: {e}")
-        await query.edit_message_text("❌ Помилка! Спробуйте пізніше")
+        await query.answer("❌ Помилка! Спробуйте пізніше", show_alert=True)
 
+
+# ============================================================================
+# ✅ ACCEPT SURPRISE - ДОДАТИ В КОШИК
+# ============================================================================
 
 async def accept_surprise_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Прийняти сюрприз і додати в кошик"""
+    """
+    Callback: accept_surprise
+    Додає сюрприз в кошик користувача
+    """
     query = update.callback_query
     user = query.from_user
     
-    session = get_user_session(user.id)
-    surprise_items = session.get('surprise_items', [])
-    surprise_discount = session.get('surprise_discount', 0)
+    logger.info(f"✅ User {user.id} accepted surprise")
     
-    # Додаємо в кошик
-    for item in surprise_items:
-        add_to_cart(user.id, item)
-    
-    # Застосовуємо знижку
-    cart = get_user_cart(user.id)
-    total = calculate_total_price(cart)
-    
-    message = f"""🎉 **СЮРПРИЗ АКТИВИРОВАН!** 🎉
+    try:
+        # 1️⃣ ОТРИМУЄМО СЮРПРИЗ З СЕСІЇ
+        session = get_user_session(user.id)
+        surprise_items = session.get('surprise_items', [])
+        current_surprise = session.get('current_surprise', {})
+        
+        if not surprise_items:
+            await query.answer("❌ Сюрприз не знайдено!", show_alert=True)
+            return
+        
+        # 2️⃣ ДОДАЄМО КОЖЕН ТОВАР У КОШИК
+        for item in surprise_items:
+            add_to_cart(user.id, item)
+        
+        logger.info(f"✅ Added {len(surprise_items)} items to cart")
+        
+        # 3️⃣ ФОРМУЄМО ПОВІДОМЛЕННЯ
+        discount = current_surprise.get('discount', 0)
+        total = current_surprise.get('total_discounted', 0)
+        
+        message = f"""🎉 **СЮРПРИЗ АКТИВІРОВАН!** 🎉
 
-✅ Всі {len(surprise_items)} товари додані до кошика!
-💚 Знижка {surprise_discount}% автоматично застосована!
+✅ Додано {len(surprise_items)} товари до кошика!
+💚 Знижка {discount}% автоматично застосована!
 
-💰 **Сума:** {total} грн
-🎯 **Зі знижкою:** {total * (1 - surprise_discount/100):.0f} грн
+💰 **Сума:** {current_surprise.get('total_original', 0)} грн
+🎯 **Зі знижкою:** {total:.0f} грн
 
 Готовий оформити замовлення? 🚀"""
+        
+        # 4️⃣ КНОПКИ
+        keyboard = [
+            [InlineKeyboardButton("✅ Оформити!", callback_data="checkout")],
+            [InlineKeyboardButton("📋 Ще щось додати", callback_data="show_menu")],
+            [InlineKeyboardButton("🛒 Перегляд кошика", callback_data="show_cart")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # 5️⃣ РЕДАГУЄМО ПОВІДОМЛЕННЯ
+        await query.edit_message_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+        await query.answer("🎉 Добавлено в кошик!", show_alert=False)
+        
+    except Exception as e:
+        logger.error(f"❌ Error accepting surprise: {e}")
+        await query.answer("❌ Помилка при додаванні!", show_alert=True)
+
+
+# ============================================================================
+# 📋 SHOW MENU - ПОКАЗАТИ МЕНЮ
+# ============================================================================
+
+async def show_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback: show_menu - показує меню"""
+    query = update.callback_query
+    user = query.from_user
+    
+    logger.info(f"📋 User {user.id} opened menu")
+    
+    menu_text = """📋 **МЕНЮ**
+
+**🍕 ПІЦІ:**
+🔹 Маргарита — 120 грн ⭐⭐⭐⭐
+🔹 Пепероні — 150 грн ⭐⭐⭐⭐⭐
+🔹 Чотири сири — 180 грн ⭐⭐⭐⭐
+
+**🥗 САЛАТИ:**
+🔹 Цезар — 80 грн ⭐⭐⭐⭐
+🔹 Грецький — 90 грн ⭐⭐⭐⭐
+
+**🍣 СУШІ:**
+🔹 Філадельфія — 180 грн ⭐⭐⭐⭐⭐
+🔹 Каліфорнія — 160 грн ⭐⭐⭐⭐
+
+**🥤 НАПОЇ:**
+🔹 Cola, Sprite, Fanta — 30 грн
+🔹 Сік — 40 грн
+
+💬 Напишіть назву щоб додати у кошик!"""
     
     keyboard = [
-        [InlineKeyboardButton("✅ Оформити!", callback_data="checkout")],
-        [InlineKeyboardButton("📋 Ще щось додати", callback_data="show_menu")],
-        [InlineKeyboardButton("🛒 Перегляд кошика", callback_data="show_cart")],
+        [InlineKeyboardButton("🛒 Мій кошик", callback_data="show_cart")],
+        [InlineKeyboardButton("🎁 Сюрприз", callback_data="surprise_me")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        message,
+        menu_text,
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
+    await query.answer()
 
 
 # ============================================================================
-# ACHIEVEMENTS - ПОКАЗАТИ ДОСЯГНЕННЯ
+# 🛒 SHOW CART - ПОКАЗИТИ КОШИК
 # ============================================================================
 
-async def show_achievements_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати досягнення користувача"""
+async def show_cart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback: show_cart - показує кошик"""
     query = update.callback_query
     user = query.from_user
+    
+    logger.info(f"🛒 User {user.id} opened cart")
+    
+    cart = get_user_cart(user.id)
+    
+    if not cart or len(cart) == 0:
+        keyboard = [[InlineKeyboardButton("📋 Меню", callback_data="show_menu")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🛒 **Ваш кошик порожній!** 😔\n\n"
+            "Додайте щось смачне! 🍕",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        await query.answer()
+        return
+    
+    # Формуємо кошик
+    cart_text = "🛒 **Ваш кошик:**\n\n"
+    total = 0
+    
+    for idx, item in enumerate(cart, 1):
+        name = item.get('name', 'Unknown')
+        price = item.get('price', 0)
+        qty = item.get('quantity', 1)
+        subtotal = price * qty
+        total += subtotal
+        
+        cart_text += f"{idx}. {name}\n"
+        cart_text += f"   {qty} × {price} грн = **{subtotal} грн**\n\n"
+    
+    cart_text += f"\n💰 **Всього: {total} грн**"
+    
+    keyboard = [
+        [InlineKeyboardButton("🎁 Промокод", callback_data="enter_promocode")],
+        [InlineKeyboardButton("✅ Оформити", callback_data="checkout")],
+        [InlineKeyboardButton("🗑️ Очистити", callback_data="clear_cart")],
+        [InlineKeyboardButton("📋 Ще товарів", callback_data="show_menu")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        cart_text,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+    await query.answer()
+
+
+# ============================================================================
+# 👤 SHOW PROFILE - ПРОФІЛЬ КОРИСТУВАЧА
+# ============================================================================
+
+async def show_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback: show_profile - показує профіль"""
+    query = update.callback_query
+    user = query.from_user
+    
+    logger.info(f"👤 User {user.id} opened profile")
     
     stats = get_user_stats(user.id)
-    achievements = stats['achievements_count']
+    badge = stats['badge']
     
-    message = "🏆 **ТВОЇ ДОСЯГНЕННЯ**\n\n"
-    
-    if achievements == 0:
-        message += "Поки немає досягнень! 😔\n\n"
-        message += "Але ти можеш розпочати прямо зараз! 💪\n"
-        message += "• Зроби перше замовлення\n"
-        message += "• Залиши відгук\n"
-        message += "• Привіди друга\n"
-    else:
-        session = get_user_session(user.id)
-        achieved = session.get('achievements', [])
-        
-        for achievement_key in achieved:
-            if achievement_key in ACHIEVEMENTS:
-                ach = ACHIEVEMENTS[achievement_key]
-                message += f"{ach['emoji']} **{ach['title']}**\n"
-                message += f"   Бонус: +{ach['bonus']} ⭐\n\n"
-    
-    message += "\n📌 **НАСТУПНІ達СЯГНЕННЯ:**\n"
-    
-    # Показуємо можливі досягнення
-    upcoming = {
-        'first_order': '🎯 Перше замовлення',
-        'order_5': '👨‍🍳 П\'ять замовлень',
-        'order_10': '🏆 Десять замовлень',
-        'refer_friend': '👥 Привести друга',
-    }
-    
-    for key, desc in upcoming.items():
-        message += f"• {desc}\n"
+    profile_text = f"""**👤 ТЕ ПРОФІЛЬ**
+
+**Статус:** {badge['emoji']} {badge['name']}
+
+📊 **СТАТИСТИКА:**
+• Замовлення: **{stats['order_count']}** 🍕
+• Бонуси: **{stats['bonus_points']}** ⭐
+• Допомога: /help
+
+✨ Спасибі що з нами! 💚"""
     
     keyboard = [
-        [InlineKeyboardButton("⬅️ Назад до профілю", callback_data="show_profile")],
-        [InlineKeyboardButton("📋 Меню", callback_data="show_menu")]
+        [InlineKeyboardButton("📋 Меню", callback_data="show_menu")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        message,
+        profile_text,
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
+    await query.answer()
 
 
 # ============================================================================
-# REFERRALS - РЕФЕРАЛЬНА СИСТЕМА
+# 🎯 SHOW CHALLENGE - ЧЕЛЛЕНДЖ
 # ============================================================================
 
-async def show_referrals_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати реферальну систему"""
+async def show_challenge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback: show_challenge - показує челлендж"""
     query = update.callback_query
     user = query.from_user
     
-    session = get_user_session(user.id)
-    referred_users = session.get('referred_users', [])
-    referral_link = get_referral_link(user.id)
+    logger.info(f"🎯 User {user.id} opened challenge")
     
-    message = f"""👥 **РЕФЕРАЛЬНА СИСТЕМА**
+    challenge_text = """**🎯 ЧЕЛЛЕНДЖ ТИЖНЯ**
 
-🔗 **ТІ ПОСИЛАННЯ:**
-`{referral_link}`
+🌅 **СНІДАНОК ЧЕМПІОНА**
+Замовте 3 різні сніданки!
 
-_(Натисни щоб скопіювати)_
+📊 Прогрес: 0/3
+[░░░░░░░░░░]
 
-💚 **ПРЕМІА:**
-• Ти отримуєш **100 бонусів** за кожного друга
-• Твій друг отримує **100 бонусів** на першому замовленні
-• Обидва вигрували! 🎉
+🏆 Награда: 150 бонусів! ⭐
 
-👥 **ПРИВЕДЕНО ДРУЗІВ:** {len(referred_users)}
-
-💰 **ЗАГАЛЬНИЙ БОНУС:** {len(referred_users) * 100} ⭐
-
-📊 **ТОП РЕФЕРЕАЛИ:**
-1. Зробити своїм друзям подарунок! 🎁
-2. Готово! Чекай на їхні замовлення! ⏰
-
-✨ **ОДИН УМОВ:**
-Друг повинен замовити щоб обидва отримали бонус! 🎯"""
+💪 Дай, ти справиш! 🔥"""
     
     keyboard = [
-        [InlineKeyboardButton("📤 Поділитись в Telegram", callback_data="share_referral")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="show_profile")],
+        [InlineKeyboardButton("📋 Меню", callback_data="show_menu")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        message,
+        challenge_text,
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
+    await query.answer()
 
 
 # ============================================================================
-# BACK NAVIGATION
+# ⬅️ BACK TO MENU - НАЗАД
 # ============================================================================
 
 async def back_to_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Повернутися в головне меню"""
+    """Callback: back_to_menu - назад до головного меню"""
     query = update.callback_query
+    user = query.from_user
+    
+    logger.info(f"⬅️ User {user.id} went back to menu")
+    
+    stats = get_user_stats(user.id)
+    greeting = WarmGreetings.get_greeting_by_order_count(stats['order_count'])
     
     keyboard = [
         [
@@ -268,7 +361,7 @@ async def back_to_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         ],
         [
             InlineKeyboardButton("🛒 Кошик", callback_data="show_cart"),
-            InlineKeyboardButton("⭐ Мій профіль", callback_data="show_profile"),
+            InlineKeyboardButton("⭐ Профіль", callback_data="show_profile"),
         ],
         [
             InlineKeyboardButton("🎯 Челлендж", callback_data="show_challenge"),
@@ -278,164 +371,150 @@ async def back_to_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        "🏠 **ГОЛОВНЕ МЕНЮ**\n\n"
-        "Вибери, що бажаєш зробити! 😊",
+        greeting,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+    await query.answer()
+
+
+# ============================================================================
+# ℹ️ SHOW HELP - ДОПОМОГА
+# ============================================================================
+
+async def show_help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback: show_help - допомога"""
+    query = update.callback_query
+    
+    help_text = """❓ **ДОПОМОГА**
+
+**Команди:**
+/start — Почати
+/menu — Меню
+/cart — Кошик
+/order — Замовити
+/help — Допомога
+
+**Як замовити:**
+1️⃣ Вибери товари з меню
+2️⃣ Натисни [✅ Оформити]
+3️⃣ Введи телефон та адресу
+
+**Питання?**
+📞 Напиши нам!"""
+    
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        help_text,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+    await query.answer()
+
+
+# ============================================================================
+# 🗑️ CLEAR CART - ОЧИСТИТИ КОШИК
+# ============================================================================
+
+async def clear_cart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback: clear_cart - очистити кошик"""
+    query = update.callback_query
+    user = query.from_user
+    
+    logger.info(f"🗑️ User {user.id} cleared cart")
+    
+    clear_user_cart(user.id)
+    
+    await query.answer("🗑️ Кошик очищено!", show_alert=False)
+    
+    keyboard = [
+        [InlineKeyboardButton("📋 Меню", callback_data="show_menu")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🛒 **Кошик очищено!** 🗑️\n\n"
+        "Почни заново! 🍕",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
 
 # ============================================================================
-# ЗАГАЛЬНИЙ МАРШРУТИЗАТОР
+# 🔘 ГОЛОВНИЙ CALLBACK ROUTER
 # ============================================================================
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Головний обробник callback queries"""
+    """
+    ГОЛОВНИЙ ROUTER для всіх callback queries
+    Розпізнає callback_data і викликає потрібну функцію
+    """
     query = update.callback_query
-    
-    try:
-        await query.answer()
-    except Exception as e:
-        logger.error(f"❌ Error answering query: {e}")
-        return
-    
-    user = query.from_user
     callback_data = query.data
     
-    logger.info(f"👤 User {user.id} callback: {callback_data}")
-    
-    # ===== Маршрутизація callbacks =====
-    
-    # Меню та навігація
-    if callback_data == "show_menu":
-        await show_menu_callback(update, context)
-    
-    elif callback_data == "show_cart":
-        await show_cart_callback(update, context)
-    
-    elif callback_data == "show_help":
-        await show_help_callback(update, context)
-    
-    elif callback_data == "show_profile":
-        await show_profile_callback(update, context)
-    
-    elif callback_data == "show_challenge":
-        await show_challenge_callback(update, context)
-    
-    # Сюрприз
-    elif callback_data == "surprise_me":
-        await surprise_me_callback(update, context)
-    
-    elif callback_data == "accept_surprise":
-        await accept_surprise_callback(update, context)
-    
-    # Кошик
-    elif callback_data == "clear_cart":
-        await clear_cart_callback(update, context)
-    
-    elif callback_data == "checkout":
-        await checkout_callback(update, context)
-    
-    elif callback_data == "confirm_order":
-        await confirm_order_callback(update, context)
-    
-    elif callback_data == "cancel_order":
-        await cancel_order_callback(update, context)
-    
-    # Досягнення та рефералі
-    elif callback_data == "show_achievements":
-        await show_achievements_callback(update, context)
-    
-    elif callback_data == "show_referrals":
-        await show_referrals_callback(update, context)
-    
-    # Назад
-    elif callback_data == "back_to_menu":
-        await back_to_menu_callback(update, context)
-    
-    else:
-        await query.edit_message_text(f"❓ Невідома команда: {callback_data}")
-
-
-# ============================================================================
-# ДОПОМІЖНІ ФУНКЦІЇ (СТАРІ)
-# ============================================================================
-
-async def show_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати меню"""
-    query = update.callback_query
-    sheets_service = context.bot_data.get('sheets_service')
-    
-    if not sheets_service:
-        await query.edit_message_text("❌ Сервіс недоступний")
-        return
+    logger.info(f"🔘 Callback: {callback_data}")
     
     try:
-        menu_items = sheets_service.get_menu()
+        # МАРШРУТИЗАЦІЯ
+        if callback_data == "surprise_me":
+            await surprise_me_callback(update, context)
         
-        if not menu_items:
-            await query.edit_message_text("😔 Меню наразі порожнє")
-            return
+        elif callback_data == "accept_surprise":
+            await accept_surprise_callback(update, context)
         
-        message_parts = ["📋 **МЕНЮ**\n"]
-        categories = {}
+        elif callback_data == "show_menu":
+            await show_menu_callback(update, context)
         
-        for item in menu_items:
-            cat = item.get('category', 'Інше')
-            if cat not in categories:
-                categories[cat] = []
-            categories[cat].append(item)
+        elif callback_data == "show_cart":
+            await show_cart_callback(update, context)
         
-        for category, items in list(categories.items())[:3]:  # Обмежуємо для preview
-            message_parts.append(f"\n**{category}**")
-            for item in items[:3]:
-                name = item.get('name', '')
-                price = item.get('price', 0)
-                rating = item.get('rating', 0)
-                stars = "⭐" * int(rating)
-                message_parts.append(f"🔹 {name} — {price} грн {stars}")
+        elif callback_data == "show_profile":
+            await show_profile_callback(update, context)
         
-        message_parts.append("\n💬 Напишіть назву страви щоб додати!")
+        elif callback_data == "show_challenge":
+            await show_challenge_callback(update, context)
         
-        keyboard = [
-            [InlineKeyboardButton("🛒 Мій кошик", callback_data="show_cart")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        elif callback_data == "show_help":
+            await show_help_callback(update, context)
         
-        await query.edit_message_text(
-            "\n".join(message_parts),
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        elif callback_data == "back_to_menu":
+            await back_to_menu_callback(update, context)
+        
+        elif callback_data == "clear_cart":
+            await clear_cart_callback(update, context)
+        
+        # ЗАГЛУШКА для невідомих
+        else:
+            logger.warning(f"⚠️ Unknown callback: {callback_data}")
+            await query.answer(f"❓ Невідома команда: {callback_data}", show_alert=True)
     
     except Exception as e:
-        logger.error(f"❌ Error in show_menu: {e}")
-        await query.edit_message_text("❌ Помилка")
+        logger.error(f"❌ Error in callback: {e}")
+        await query.answer("❌ Помилка! Спробуйте пізніше", show_alert=True)
 
 
-async def show_cart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати кошик"""
-    query = update.callback_query
-    user = query.from_user
+# ============================================================================
+# ДОПОМІЖНА ФУНКЦІЯ
+# ============================================================================
+
+def register_callback_handlers(application):
+    """
+    Реєстрація callback handler
     
-    cart = get_user_cart(user.id)
+    Використовуйте в main.py:
+    ───────────────────────────
+    from app.handlers.callbacks import register_callback_handlers
     
-    if not cart or len(cart) == 0:
-        keyboard = [[InlineKeyboardButton("📋 Меню", callback_data="show_menu")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "🛒 Ваш кошик порожній!\n\n"
-            "Додайте щось смачне! 🍕",
-            reply_markup=reply_markup
-        )
-        return
+    # У функції setup_handlers():
+    register_callback_handlers(app)
+    """
+    from telegram.ext import CallbackQueryHandler
     
-    order_data = {'items': cart}
-    summary = format_order_summary(order_data)
+    application.add_handler(CallbackQueryHandler(callback_query_handler))
     
-    keyboard = [
-        [
-            InlineKeyboardButton("🎁 Промокод", callback_data="enter_promocode"),
-            InlineKeyboardButton("✅ Оформити", callback_data="checkout")
+    logger.info("✅ Callback handlers registered")

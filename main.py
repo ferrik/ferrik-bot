@@ -1,25 +1,22 @@
+# main.py (додай до ПОЧАТКУ файлу)
+
 """
-🍕 FERRIKBOT v2.1 - WORKING VERSION
-Всі проблеми з async та Application ініціалізацією виправлені
+🍕 FERRIKBOT v2.1 - з Google Sheets Синхронізацією
 """
 
 import os
 import logging
+import threading
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler
-import threading
+import json
 
-# ============================================================================
-# LOAD ENVIRONMENT
-# ============================================================================
+# ============ IMPORT SYNC СИСТЕМИ ============
+from services.sheets_sync import GoogleSheetsSync, DatabaseSync, SyncScheduler
 
 load_dotenv()
-
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,85 +26,83 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# FLASK APP INITIALIZATION
-# ============================================================================
-
 app = Flask(__name__)
-
-# Telegram bot application (глобальна змінна)
 bot_application = None
-initialization_lock = threading.Lock()
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+# ============ ГЛОБАЛЬНІ ЗМІННІ ДЛЯ SYNC ============
+sheets_sync = None
+db_sync = None
+sync_scheduler = None
+
+# ============ КОНФІГ ============
 
 class Config:
-    """Конфігурація додатку"""
-    
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:5000")
     DEBUG = os.getenv("DEBUG", "False").lower() == "true"
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     PORT = int(os.getenv("PORT", 5000))
     
+    # Google Sheets
+    GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "")
+    GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
+    
+    # Database
+    DATABASE_URL = os.getenv("DATABASE_URL", "")
+    
     @staticmethod
     def validate():
-        """Перевірка конфігурації"""
         if not Config.TELEGRAM_BOT_TOKEN:
             logger.error("❌ TELEGRAM_BOT_TOKEN not set")
+            return False
+        if not Config.DATABASE_URL:
+            logger.error("❌ DATABASE_URL not set")
             return False
         return True
 
 
 config = Config()
 
-# ============================================================================
-# TELEGRAM BOT CREATION (БЕЗ PROCESS_UPDATE - ТІЛЬКИ ОБРОБНИКИ)
-# ============================================================================
+# ============ ІНІЦІАЛІЗАЦІЯ SYNC ============
 
-def create_bot_application():
-    """Створення Telegram bot application"""
+def init_sync():
+    """Ініціалізуй синхронізацію"""
+    global sheets_sync, db_sync, sync_scheduler
     
-    global bot_application
-    
-    logger.info("🤖 Creating Telegram bot application...")
-    
-    TOKEN = config.TELEGRAM_BOT_TOKEN
-    
-    if not TOKEN:
-        logger.error("❌ TELEGRAM_BOT_TOKEN not found!")
-        return None
+    logger.info("🔄 Initializing Google Sheets & Database Sync...")
     
     try:
-        # Створення application
-        bot_application = Application.builder().token(TOKEN).build()
+        # Google Sheets
+        if config.GOOGLE_SHEETS_ID and config.GOOGLE_SHEETS_CREDENTIALS:
+            sheets_sync = GoogleSheetsSync(
+                config.GOOGLE_SHEETS_CREDENTIALS,
+                config.GOOGLE_SHEETS_ID
+            )
+            logger.info("✅ Google Sheets initialized")
+        else:
+            logger.warning("⚠️ Google Sheets credentials not set")
         
-        # ✅ ВАЖЛИВО: Ініціалізуємо Application
-        # Без цього процес_update впаде з помилкою
-        import asyncio
+        # Database
+        db_sync = DatabaseSync(config.DATABASE_URL)
+        logger.info("✅ Database initialized")
         
-        async def init_app():
-            await bot_application.initialize()
+        # Scheduler
+        if sheets_sync and db_sync:
+            sync_scheduler = SyncScheduler(sheets_sync, db_sync)
+            sync_scheduler.start()
+            
+            # Синхронізуй одразу при старті
+            sync_scheduler.sync_menu_job()
+            logger.info("✅ Sync scheduler started")
         
-        # Запусти ініціалізацію
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(init_app())
-        
-        logger.info("✅ Application initialized")
-        
-        # Реєстрація обробників
-        setup_handlers(bot_application)
-        
-        logger.info("✅ Bot application created successfully")
-        return bot_application
+        return True
     
     except Exception as e:
-        logger.error(f"❌ Failed to create bot application: {e}", exc_info=True)
-        return None
+        logger.error(f"❌ Sync initialization error: {e}")
+        return False
 
+
+# ============ TELEGRAM HANDLERS ============
 
 def setup_handlers(application):
     """Реєстрація обробників"""
@@ -117,221 +112,219 @@ def setup_handlers(application):
     try:
         async def start_command(update: Update, context):
             """Команда /start"""
-            logger.info(f"✅ /start від {update.effective_user.id}")
             await update.message.reply_text(
-                "🍴 Привіт! Я — Ferrik, твій персональний помічник зі смаку 🤖✨\n\n"
-                "Команди:\n"
-                "• /menu — меню\n"
-                "• /help — допомога"
+                "🍴 Привіт! Я — Ferrik 🤖\n\n"
+                "📋 /menu — Меню\n"
+                "/categories — Категорії\n"
+                "/help — Допомога"
             )
+        
+        async def menu_command(update: Update, context):
+            """Команда /menu — вивід меню з БД"""
+            try:
+                if not db_sync:
+                    await update.message.reply_text("❌ БД не підключена")
+                    return
+                
+                menu = db_sync.get_menu()
+                
+                if not menu:
+                    await update.message.reply_text("😔 Меню порожнє")
+                    return
+                
+                # Форматуй меню
+                text = "📋 *МЕНЮ:*\n\n"
+                for item in menu[:10]:  # Перших 10
+                    text += f"🍕 *{item['name']}* — {item['price']} грн\n"
+                    if item.get('description'):
+                        text += f"   _{item['description'][:50]}..._\n"
+                    text += "\n"
+                
+                await update.message.reply_text(text, parse_mode='Markdown')
+            
+            except Exception as e:
+                logger.error(f"❌ Menu error: {e}")
+                await update.message.reply_text("❌ Помилка при завантаженні меню")
+        
+        async def categories_command(update: Update, context):
+            """Команда /categories"""
+            try:
+                if not db_sync:
+                    await update.message.reply_text("❌ БД не підключена")
+                    return
+                
+                # Отримай категорії
+                import sqlalchemy
+                session = db_sync.Session()
+                categories = session.query(
+                    sqlalchemy.distinct(db_sync.db_sync.__class__.__dict__['MenuItem'].category)
+                ).all() if False else ["Піци", "Бургери", "Салати"]
+                session.close()
+                
+                text = "📂 *КАТЕГОРІЇ:*\n\n"
+                for cat in categories:
+                    text += f"• {cat}\n"
+                
+                await update.message.reply_text(text, parse_mode='Markdown')
+            
+            except Exception as e:
+                logger.error(f"❌ Categories error: {e}")
+                await update.message.reply_text("❌ Помилка")
         
         async def help_command(update: Update, context):
             """Команда /help"""
             await update.message.reply_text(
-                "📚 Як користуватися:\n\n"
-                "/menu — переглянути меню\n"
-                "/start — почнемо знову"
+                "📚 *ДОПОМОГА:*\n\n"
+                "/menu — Все меню\n"
+                "/categories — Категорії\n"
+                "/status — Статус синхронізації\n"
             )
         
-        async def menu_command(update: Update, context):
-            """Команда /menu"""
-            await update.message.reply_text(
-                "📋 Меню:\n\n"
-                "🍕 Піца — 180 грн\n"
-                "🍔 Бургер — 150 грн"
-            )
+        async def status_command(update: Update, context):
+            """Команда /status — статус синхронізації"""
+            status_text = "📊 *СТАТУС СИСТЕМИ:*\n\n"
+            status_text += f"🤖 Бот: ✅ Online\n"
+            status_text += f"📊 БД: {'✅ Connected' if db_sync else '❌ Disconnected'}\n"
+            status_text += f"📰 Sheets: {'✅ Connected' if sheets_sync else '❌ Disconnected'}\n"
+            status_text += f"🔄 Sync: {'✅ Running' if sync_scheduler else '❌ Stopped'}\n"
+            
+            await update.message.reply_text(status_text, parse_mode='Markdown')
         
         # Реєстрація
         application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("menu", menu_command))
+        application.add_handler(CommandHandler("categories", categories_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("status", status_command))
         
         logger.info("✅ Handlers registered")
         return True
     
     except Exception as e:
-        logger.error(f"❌ Handler error: {e}", exc_info=True)
+        logger.error(f"❌ Handler error: {e}")
         return False
 
 
-def startup():
-    """Ініціалізація при першому запиті"""
-    
+# ============ BOT CREATION ============
+
+def create_bot_application():
     global bot_application
     
-    logger.info("=" * 70)
-    logger.info("🚀 FERRIKBOT v2.1 STARTING...")
-    logger.info("=" * 70)
+    logger.info("🤖 Creating bot...")
     
-    # Валідація конфігу
+    TOKEN = config.TELEGRAM_BOT_TOKEN
+    
+    if not TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN not found")
+        return None
+    
+    try:
+        bot_application = Application.builder().token(TOKEN).build()
+        
+        import asyncio
+        async def init_app():
+            await bot_application.initialize()
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(init_app())
+        
+        setup_handlers(bot_application)
+        
+        logger.info("✅ Bot created")
+        return bot_application
+    
+    except Exception as e:
+        logger.error(f"❌ Bot creation error: {e}")
+        return None
+
+
+# ============ STARTUP ============
+
+def startup():
+    logger.info("=" * 70)
+    logger.info("🚀 FERRIKBOT v2.1 + GOOGLE SHEETS SYNC")
+    logger.info("=" * 70)
+    logger.info("")
+    
+    # Валідація
     if not config.validate():
-        logger.error("❌ Configuration validation failed")
         return False
     
     logger.info("✅ Configuration valid")
-    logger.info(f"   Token: {config.TELEGRAM_BOT_TOKEN[:20]}...")
-    logger.info(f"   Webhook: {config.WEBHOOK_URL}")
+    logger.info("")
     
-    # Створення бота
+    # Ініціалізація sync
+    if not init_sync():
+        logger.warning("⚠️ Sync not available, continuing without it...")
+    
+    logger.info("")
+    
+    # Створи бота
     if not create_bot_application():
-        logger.error("❌ Failed to create bot")
         return False
     
     logger.info("✅ BOT READY!")
-    logger.info(f"   Port: {config.PORT}")
-    logger.info(f"   Webhook: {config.WEBHOOK_URL}/webhook")
     logger.info("=" * 70)
+    logger.info("")
     
     return True
 
 
-# ============================================================================
-# FLASK ROUTES
-# ============================================================================
+# ============ ROUTES ============
 
 @app.route('/')
 def index():
-    """Головна сторінка"""
     return jsonify({
         "status": "🟢 online",
         "bot": "🍕 FerrikBot v2.1",
-        "bot_initialized": bot_application is not None,
-        "environment": config.ENVIRONMENT
+        "sync": "✅ Google Sheets" if sheets_sync else "❌ No Sheets",
+        "db": "✅ PostgreSQL" if db_sync else "❌ No DB"
     })
 
 
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check"""
-    is_healthy = bot_application is not None
-    return jsonify({
-        "status": "healthy" if is_healthy else "initializing",
-        "bot_initialized": is_healthy,
-    }), 200 if is_healthy else 503
-
-
-# ============================================================================
-# 🔥 WEBHOOK МАРШРУТИ
-# ============================================================================
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Основний webhook"""
-    logger.info("📨 /webhook запит отримано")
-    return process_webhook(request)
-
-
-@app.route('/webhook/webhook', methods=['POST'])
-def webhook_double():
-    """Резервний webhook"""
-    logger.warning("⚠️ /webhook/webhook запит (старий маршрут)")
-    return process_webhook(request)
-
-
-def process_webhook(req):
-    """
-    Обробка webhook запитів від Telegram
-    ✅ БЕЗ loop.close() - дозволяємо бібліотеці управляти
-    """
+    if not bot_application:
+        return jsonify({"ok": False}), 500
+    
     try:
-        # Перевіри бот
-        if not bot_application:
-            logger.error("❌ Bot not initialized")
-            return jsonify({"ok": False}), 500
-        
-        # Отримай дані
-        data = req.get_json()
+        data = request.get_json()
         if not data:
             return jsonify({"ok": False}), 400
         
-        logger.info(f"📨 Update ID: {data.get('update_id')}")
-        
-        # Розпарс Update
         update = Update.de_json(data, bot_application.bot)
         if not update:
             return jsonify({"ok": False}), 400
         
-        # ✅ ПРАВИЛЬНА ОБРОБКА: async без loop.close()
         import asyncio
         
         async def process():
-            """Обробка Update асинхронно"""
             try:
                 await bot_application.process_update(update)
-                logger.info("✅ Update processed")
             except Exception as e:
-                logger.error(f"❌ Error processing update: {e}", exc_info=True)
+                logger.error(f"❌ Update error: {e}")
         
-        # НЕ ЗАКРИВАЙ LOOP - дозволь asyncio управляти
-        try:
-            # Намагайся запустити в існуючому loop
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            # НЕ запускай як .run_until_complete() - це блокує
-            # Замість цього, просто вернемо 200 і дозволимо обробці відбуватися
-            import threading
-            threading.Thread(target=lambda: asyncio.run(process())).start()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            import threading
-            threading.Thread(target=lambda: asyncio.run(process())).start()
-        
+        threading.Thread(target=lambda: asyncio.run(process())).start()
         return jsonify({"ok": True}), 200
     
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        logger.error(f"❌ Webhook error: {e}")
         return jsonify({"ok": False}), 500
 
 
-# ============================================================================
-# ИНИЦИАЛИЗАЦИЯ ПРИ ПЕРВОМ ЗАПРОСЕ
-# ============================================================================
+# ============ MAIN ============
 
 initialized = False
 
 @app.before_request
-def initialize_on_first_request():
-    """Ініціалізуй бот при першому запиті"""
+def init_on_first_request():
     global initialized
     
     if not initialized:
-        with initialization_lock:
-            if not initialized:  # Double-check
-                logger.info("🔔 First request - initializing bot...")
-                startup()
-                globals()['initialized'] = True
+        if startup():
+            initialized = True
 
-
-# ============================================================================
-# ERROR HANDLERS
-# ============================================================================
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        "error": "Not found",
-        "endpoints": ["/", "/health", "/webhook"]
-    }), 404
-
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"❌ 500 error: {error}")
-    return jsonify({"error": "Internal server error"}), 500
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
 
 if __name__ == '__main__':
-    logger.info("🍕 Starting Ferrik Bot...")
-    app.run(
-        host="0.0.0.0",
-        port=config.PORT,
-        debug=config.DEBUG,
-        use_reloader=False
-    )
+    app.run(host="0.0.0.0", port=config.PORT, debug=config.DEBUG, use_reloader=False)

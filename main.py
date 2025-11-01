@@ -11,8 +11,8 @@ import requests
 from dotenv import load_dotenv
 
 # Локальні імпорти
-from services.database import Database
-from services.sheets import SheetsService
+from services.database import get_database
+from services.sheets import get_sheets_service
 from app.utils.validators import (
     safe_parse_price, validate_phone, 
     normalize_phone, validate_address
@@ -33,8 +33,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-db = Database()
-sheets = SheetsService()
+db = get_database()
+sheets = get_sheets_service()
 
 # ============================================================================
 # ЕМОДЖІ ТА ТЕКСТИ (Персональність бота)
@@ -69,19 +69,6 @@ EMOJI = {
     'crown': '👑'
 }
 
-WELCOME_MESSAGES = [
-    "Гей! Я Ferrik — твій смаковий супутник! {emoji} Готовий допомогти знайти щось смачненьке?",
-    "Вітаю! {emoji} Я тут, щоб зробити твій день смачнішим! Що будемо їсти сьогодні?",
-    "Привіт, друже! {emoji} Я Ferrik, і я знаю, що тобі сподобається. Розпочнемо пригоду?",
-]
-
-MOOD_PROMPTS = {
-    'happy': f"{EMOJI['fire']} Бачу гарний настрій! Ось що підійде:",
-    'hungry': f"{EMOJI['chef']} Розумію, час поїсти! Швидкі страви:",
-    'lazy': f"{EMOJI['yummy']} Хочеш щось без зусиль? Топові комбо:",
-    'romantic': f"{EMOJI['heart']} Романтична вечеря? Маю ідеї:",
-}
-
 # ============================================================================
 # СТАНИ КОРИСТУВАЧА
 # ============================================================================
@@ -105,7 +92,7 @@ def send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
         payload['reply_markup'] = json.dumps(reply_markup)
     
     try:
-        response = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+        response = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
         return response.json()
     except Exception as e:
         logger.error(f"❌ Send message error: {e}")
@@ -125,29 +112,10 @@ def send_photo(chat_id, photo_url, caption=None, reply_markup=None):
         payload['reply_markup'] = json.dumps(reply_markup)
     
     try:
-        response = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload)
+        response = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=10)
         return response.json()
     except Exception as e:
         logger.error(f"❌ Send photo error: {e}")
-        return None
-
-
-def edit_message(chat_id, message_id, text, reply_markup=None):
-    """Редагувати повідомлення"""
-    payload = {
-        'chat_id': chat_id,
-        'message_id': message_id,
-        'text': text,
-        'parse_mode': 'HTML'
-    }
-    if reply_markup:
-        payload['reply_markup'] = json.dumps(reply_markup)
-    
-    try:
-        response = requests.post(f"{TELEGRAM_API}/editMessageText", json=payload)
-        return response.json()
-    except Exception as e:
-        logger.error(f"❌ Edit message error: {e}")
         return None
 
 
@@ -161,7 +129,7 @@ def answer_callback(callback_id, text=None, show_alert=False):
         payload['text'] = text
     
     try:
-        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json=payload)
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json=payload, timeout=5)
     except Exception as e:
         logger.error(f"❌ Answer callback error: {e}")
 
@@ -270,8 +238,10 @@ def get_category_emoji(category):
 # ============================================================================
 def get_user_state(user_id):
     """Отримати стан користувача"""
-    state = db.get_user_state(user_id)
-    return state if state else STATE_IDLE
+    state_data = db.get_user_state(user_id)
+    if state_data:
+        return state_data.get('state', STATE_IDLE)
+    return STATE_IDLE
 
 
 def set_user_state(user_id, state, data=None):
@@ -288,9 +258,9 @@ def add_to_cart(user_id, item):
     """Додати товар у кошик"""
     db.add_to_cart(
         user_id,
-        item['ID'],
-        item['Страви'],
-        safe_parse_price(item['Ціна']),
+        str(item.get('ID', '')),
+        item.get('Страви', ''),
+        safe_parse_price(item.get('Ціна', 0)),
         1
     )
 
@@ -323,7 +293,8 @@ def get_user_level(user_id):
 def handle_start(user_id, username):
     """Обробка /start"""
     # Перевірка, чи це новий користувач
-    is_new = db.get_user_state(user_id) is None
+    state_data = db.get_user_state(user_id)
+    is_new = state_data is None
     
     if is_new:
         # Вітальне повідомлення для нових
@@ -417,10 +388,13 @@ def show_item(user_id, item):
     desc = item.get('Опис', '')
     price = safe_parse_price(item.get('Ціна', 0))
     rating = item.get('Рейтинг', 0)
-    time = item.get('Час_приготування', 30)
+    time = item.get('Час Доставки (хв)', 30)
     
     # Зірочки рейтингу
-    stars = EMOJI['star'] * int(rating) if rating else ''
+    try:
+        stars = EMOJI['star'] * int(float(rating)) if rating else ''
+    except:
+        stars = ''
     
     caption = f"""
 <b>{name}</b> {stars}
@@ -435,7 +409,8 @@ def show_item(user_id, item):
     
     # Перевірка, чи вже в кошику
     cart = get_user_cart(user_id)
-    in_cart = any(c['item_id'] == item['ID'] for c in cart)
+    item_id = str(item.get('ID', ''))
+    in_cart = any(str(c.get('item_id')) == item_id for c in cart)
     
     photo_url = item.get('Фото URL', '')
     
@@ -444,13 +419,13 @@ def show_item(user_id, item):
             user_id,
             photo_url,
             caption=caption,
-            reply_markup=get_item_keyboard(item['ID'], in_cart)
+            reply_markup=get_item_keyboard(item_id, in_cart)
         )
     else:
         send_message(
             user_id,
             caption,
-            reply_markup=get_item_keyboard(item['ID'], in_cart)
+            reply_markup=get_item_keyboard(item_id, in_cart)
         )
 
 
@@ -458,7 +433,7 @@ def handle_add_to_cart(user_id, item_id, callback_id):
     """Додати в кошик"""
     try:
         items = sheets.get_menu_items()
-        item = next((i for i in items if i['ID'] == item_id), None)
+        item = next((i for i in items if str(i.get('ID')) == item_id), None)
         
         if not item:
             answer_callback(callback_id, "Страва не знайдена", show_alert=True)
@@ -468,7 +443,7 @@ def handle_add_to_cart(user_id, item_id, callback_id):
         
         answer_callback(
             callback_id,
-            f"{EMOJI['check']} Додано! {item['Страви']}"
+            f"{EMOJI['check']} Додано! {item.get('Страви', '')}"
         )
         
         # Показуємо кошик
@@ -505,12 +480,12 @@ def handle_cart(user_id):
     total = 0
     
     for item in cart:
-        qty = item['quantity']
-        price = item['price']
+        qty = item.get('quantity', 1)
+        price = item.get('price', 0)
         subtotal = qty * price
         total += subtotal
         
-        text += f"• <b>{item['name']}</b>\n"
+        text += f"• <b>{item.get('name', '')}</b>\n"
         text += f"  {qty} × {price:.0f} грн = {subtotal:.0f} грн\n\n"
     
     text += f"\n{EMOJI['money']} <b>Разом: {total:.0f} грн</b>"
@@ -574,11 +549,19 @@ def handle_address_input(user_id, address):
     
     # Отримуємо дані
     state_data = db.get_user_state(user_id)
+    if not state_data:
+        send_message(user_id, "Помилка, почни спочатку /start")
+        return
+    
     phone = state_data.get('state_data', {}).get('phone')
+    if not phone:
+        send_message(user_id, "Помилка, почни спочатку /start")
+        return
+    
     cart = get_user_cart(user_id)
     
     # Формуємо замовлення
-    total = sum(item['quantity'] * item['price'] for item in cart)
+    total = sum(item.get('quantity', 1) * item.get('price', 0) for item in cart)
     items_json = json.dumps(cart, ensure_ascii=False)
     
     # Зберігаємо
@@ -631,18 +614,22 @@ def handle_address_input(user_id, address):
 # ============================================================================
 # WEBHOOK HANDLER
 # ============================================================================
-@app.route('/webhook', methods=['POST'])  # ⬅️ ВИПРАВЛЕНО: було /webhook/webhook
+@app.route('/webhook', methods=['POST'])
 def webhook():
     """Основний обробник webhook"""
     try:
         update = request.get_json()
-        logger.info(f"📨 Received update: {json.dumps(update, ensure_ascii=False)[:200]}")
+        
+        if not update:
+            return {'ok': False}, 400
+        
+        logger.info(f"📨 Received update")
         
         # Обробка повідомлень
         if 'message' in update:
             message = update['message']
             user_id = message['from']['id']
-            username = message['from'].get('username', '')
+            username = message['from'].get('username', message['from'].get('first_name', ''))
             
             # Команди
             if 'text' in message:
@@ -663,7 +650,7 @@ def webhook():
                     elif state == STATE_AWAITING_ADDRESS:
                         handle_address_input(user_id, text)
                     else:
-                        # Пошук по меню (AI-подібно)
+                        # Пошук по меню
                         send_message(
                             user_id,
                             f"{EMOJI['search']} Шукаю «{text}»...\n\n<i>Функція пошуку в розробці!</i> {EMOJI['wink']}",
@@ -680,10 +667,13 @@ def webhook():
             # Роутинг callback
             if data == 'menu':
                 handle_menu(user_id)
+                answer_callback(callback_id)
             elif data == 'cart':
                 handle_cart(user_id)
+                answer_callback(callback_id)
             elif data == 'checkout':
                 handle_checkout(user_id)
+                answer_callback(callback_id)
             elif data == 'clear_cart':
                 clear_cart(user_id)
                 answer_callback(callback_id, f"{EMOJI['check']} Кошик очищено")
@@ -691,23 +681,33 @@ def webhook():
             elif data.startswith('cat_'):
                 category = data[4:]
                 handle_category(user_id, category)
+                answer_callback(callback_id)
             elif data.startswith('add_'):
                 item_id = data[4:]
                 handle_add_to_cart(user_id, item_id, callback_id)
             elif data == 'promos':
                 send_message(user_id, f"{EMOJI['gift']} Акції скоро!")
+                answer_callback(callback_id)
             elif data == 'history':
                 orders = db.get_user_orders(user_id)
                 send_message(
                     user_id,
                     f"{EMOJI['history']} Ти зробив {len(orders)} замовлень! {EMOJI['fire']}"
                 )
+                answer_callback(callback_id)
             elif data == 'badges':
                 level = get_user_level(user_id)
                 send_message(
                     user_id,
                     f"{level['emoji']} <b>Твій рівень: {level['level']}</b>\n\nПродовжуй замовляти!"
                 )
+                answer_callback(callback_id)
+            elif data == 'search':
+                send_message(
+                    user_id,
+                    f"{EMOJI['search']} <b>Пошук</b>\n\nНапиши назву страви або інгредієнт:"
+                )
+                answer_callback(callback_id)
             else:
                 answer_callback(callback_id)
         
@@ -722,10 +722,66 @@ def webhook():
 def index():
     """Головна сторінка"""
     return f"""
-    <h1>{EMOJI['rocket']} Ferrik Bot is running!</h1>
-    <p>Status: {EMOJI['check']} Active</p>
-    <p>Version: 2.0 - Enhanced Experience</p>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Ferrik Bot</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                max-width: 800px;
+                margin: 50px auto;
+                padding: 20px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }}
+            .container {{
+                background: rgba(255,255,255,0.1);
+                padding: 40px;
+                border-radius: 20px;
+                backdrop-filter: blur(10px);
+            }}
+            h1 {{
+                font-size: 3em;
+                margin-bottom: 20px;
+            }}
+            .status {{
+                font-size: 1.5em;
+                margin: 20px 0;
+            }}
+            .emoji {{
+                font-size: 2em;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1><span class="emoji">🍴</span> Ferrik Bot</h1>
+            <div class="status">
+                <span class="emoji">{EMOJI['check']}</span> Status: <strong>Active</strong>
+            </div>
+            <p>Version: 2.0 - Enhanced Experience</p>
+            <p>Твій персональний смаковий супутник {EMOJI['chef']}</p>
+        </div>
+    </body>
+    </html>
     """
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    try:
+        return {
+            'status': 'healthy',
+            'timestamp': datetime.now().isoformat(),
+            'version': '2.0'
+        }, 200
+    except Exception as e:
+        return {
+            'status': 'unhealthy',
+            'error': str(e)
+        }, 503
 
 
 # ============================================================================
@@ -733,4 +789,9 @@ def index():
 # ============================================================================
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    
+    logger.info("🚀 Starting Ferrik Bot...")
+    logger.info(f"📊 Database: {'Connected' if db else 'Not connected'}")
+    logger.info(f"📋 Google Sheets: {'Connected' if sheets and sheets.is_connected() else 'Not connected'}")
+    
+    app.run(host='0.0.0.0', port=port, debug=False)

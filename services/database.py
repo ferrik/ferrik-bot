@@ -17,8 +17,6 @@ try:
     HAS_SQLALCHEMY = True
 except ImportError:
     HAS_SQLALCHEMY = False
-    logger = logging.getLogger(__name__)
-    logger.warning("⚠️ SQLAlchemy not installed, using simple dict storage")
 
 logger = logging.getLogger(__name__)
 
@@ -196,3 +194,217 @@ class Database:
         if not self.use_sqlalchemy:
             self.storage['user_states'][user_id] = {
                 'state': state,
+                'state_data': data or {}
+            }
+            return
+        
+        with self.get_session() as session:
+            user_state = session.query(UserState).filter_by(user_id=user_id).first()
+            
+            if user_state:
+                user_state.state = state
+                user_state.state_data = data or {}
+                user_state.updated_at = datetime.utcnow()
+            else:
+                user_state = UserState(
+                    user_id=user_id,
+                    state=state,
+                    state_data=data or {}
+                )
+                session.add(user_state)
+    
+    # ========================================================================
+    # CART METHODS
+    # ========================================================================
+    
+    def get_cart(self, user_id: int) -> List[Dict]:
+        """Отримати кошик користувача"""
+        if not self.use_sqlalchemy:
+            cart = self.storage['user_carts'].get(user_id, [])
+            return cart
+        
+        with self.get_session() as session:
+            cart_items = session.query(UserCart).filter_by(user_id=user_id).all()
+            
+            return [{
+                'id': item.id,
+                'item_id': item.item_id,
+                'name': item.name,
+                'price': item.price,
+                'quantity': item.quantity
+            } for item in cart_items]
+    
+    def add_to_cart(self, user_id: int, item_id: str, name: str, price: float, quantity: int = 1):
+        """Додати товар у кошик"""
+        if not self.use_sqlalchemy:
+            if user_id not in self.storage['user_carts']:
+                self.storage['user_carts'][user_id] = []
+            
+            # Перевірка чи вже є
+            for item in self.storage['user_carts'][user_id]:
+                if item['item_id'] == item_id:
+                    item['quantity'] += quantity
+                    return
+            
+            self.storage['user_carts'][user_id].append({
+                'item_id': item_id,
+                'name': name,
+                'price': price,
+                'quantity': quantity
+            })
+            return
+        
+        with self.get_session() as session:
+            existing = session.query(UserCart).filter_by(
+                user_id=user_id,
+                item_id=item_id
+            ).first()
+            
+            if existing:
+                existing.quantity += quantity
+                existing.updated_at = datetime.utcnow()
+            else:
+                cart_item = UserCart(
+                    user_id=user_id,
+                    item_id=item_id,
+                    name=name,
+                    price=price,
+                    quantity=quantity
+                )
+                session.add(cart_item)
+    
+    def clear_cart(self, user_id: int):
+        """Очистити кошик"""
+        if not self.use_sqlalchemy:
+            self.storage['user_carts'][user_id] = []
+            return
+        
+        with self.get_session() as session:
+            session.query(UserCart).filter_by(user_id=user_id).delete()
+    
+    # ========================================================================
+    # ORDER METHODS
+    # ========================================================================
+    
+    def create_order(
+        self,
+        user_id: int,
+        phone: str,
+        address: str,
+        items_json: str,
+        total_amount: float
+    ) -> str:
+        """Створити замовлення"""
+        order_number = f"F{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        if not self.use_sqlalchemy:
+            order = {
+                'order_number': order_number,
+                'user_id': user_id,
+                'phone': phone,
+                'address': address,
+                'items_json': items_json,
+                'total_amount': total_amount,
+                'status': 'pending',
+                'created_at': datetime.utcnow()
+            }
+            self.storage['orders'].append(order)
+            
+            # Оновлюємо профіль
+            if user_id not in self.storage['user_profiles']:
+                self.storage['user_profiles'][user_id] = {
+                    'total_orders': 0,
+                    'total_spent': 0.0
+                }
+            self.storage['user_profiles'][user_id]['total_orders'] += 1
+            self.storage['user_profiles'][user_id]['total_spent'] += total_amount
+            
+            return order_number
+        
+        with self.get_session() as session:
+            order = Order(
+                order_number=order_number,
+                user_id=user_id,
+                phone=phone,
+                address=address,
+                items_json=items_json if isinstance(items_json, str) else json.dumps(items_json),
+                total_amount=total_amount,
+                status='pending'
+            )
+            session.add(order)
+            session.flush()
+            
+            # Оновлюємо профіль
+            self._update_user_profile(session, user_id, total_amount)
+            
+            return order_number
+    
+    def get_user_orders(self, user_id: int, limit: int = 50) -> List[Dict]:
+        """Отримати замовлення користувача"""
+        if not self.use_sqlalchemy:
+            orders = [o for o in self.storage['orders'] if o['user_id'] == user_id]
+            return orders[-limit:]
+        
+        with self.get_session() as session:
+            orders = session.query(Order)\
+                .filter_by(user_id=user_id)\
+                .order_by(Order.created_at.desc())\
+                .limit(limit)\
+                .all()
+            
+            return [{
+                'id': order.id,
+                'order_number': order.order_number,
+                'total_amount': order.total_amount,
+                'status': order.status,
+                'created_at': order.created_at,
+                'items_json': order.items_json
+            } for order in orders]
+    
+    def _update_user_profile(self, session: Session, user_id: int, amount: float):
+        """Оновити профіль користувача"""
+        profile = session.query(UserProfile).filter_by(user_id=user_id).first()
+        
+        if profile:
+            profile.total_orders += 1
+            profile.total_spent += amount
+            profile.updated_at = datetime.utcnow()
+        else:
+            profile = UserProfile(
+                user_id=user_id,
+                total_orders=1,
+                total_spent=amount
+            )
+            session.add(profile)
+    
+    def get_user_profile(self, user_id: int) -> Optional[Dict]:
+        """Отримати профіль користувача"""
+        if not self.use_sqlalchemy:
+            return self.storage['user_profiles'].get(user_id)
+        
+        with self.get_session() as session:
+            profile = session.query(UserProfile).filter_by(user_id=user_id).first()
+            
+            if profile:
+                return {
+                    'user_id': profile.user_id,
+                    'username': profile.username,
+                    'total_orders': profile.total_orders,
+                    'total_spent': profile.total_spent,
+                    'level': profile.level,
+                    'badges': profile.badges or []
+                }
+            return None
+
+
+# ============================================================================
+# SINGLETON
+# ============================================================================
+_db_instance = None
+
+def get_database() -> Database:
+    """Отримати singleton instance бази даних"""
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = Database()
+    return _db_instance

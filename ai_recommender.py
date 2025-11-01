@@ -155,4 +155,4 @@ class AIRecommender:
         # Сортуємо по релевантності
         results.sort(key=lambda x: x[1], reverse=True)
         
-        return [item for item, score in results[:10]] 
+        return [item for item, score in results[:10]]

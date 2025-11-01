@@ -1,4 +1,4 @@
- """
+"""
 🏆 Gamification - Бейджі, рівні, досягнення
 """
 from datetime import datetime, timedelta

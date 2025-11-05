@@ -1,21 +1,27 @@
-name: Auto Update Ferrik Bot
+name: 🚀 Auto Update & Deploy Ferrik Bot
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # дозволяє запуск вручну
   schedule:
-    - cron: '0 9 * * *'  # кожного дня о 9:00 ранку
+    - cron: '0 9 * * *'  # автоматично щодня о 9:00 (UTC)
 
 jobs:
-  update:
+  deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: 🧩 Checkout
+      - name: 🧩 Checkout latest version
         uses: actions/checkout@v4
 
-      - name: 🔄 Pull latest updates
+      - name: 🔍 Check for updates
         run: |
-          git pull origin main || true
-          echo "✅ Repo is up to date"
+          git fetch origin main
+          if git diff --quiet HEAD origin/main; then
+            echo "✅ Repo already up to date — no new commits"
+            exit 0
+          else
+            echo "🆕 New commits found — proceeding to deploy"
+          fi
 
       - name: 🚀 Trigger Render deploy
         run: |

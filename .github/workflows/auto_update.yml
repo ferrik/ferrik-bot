@@ -1,0 +1,26 @@
+name: Auto Update Ferrik Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * *'  # кожного дня о 9:00 ранку
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧩 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔄 Pull latest updates
+        run: |
+          git pull origin main || true
+          echo "✅ Repo is up to date"
+
+      - name: 🚀 Trigger Render deploy
+        run: |
+          curl -X POST \
+            -H "Accept: application/json" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -d '{"serviceId": "${{ secrets.RENDER_SERVICE_ID }}"}' \
+            https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys

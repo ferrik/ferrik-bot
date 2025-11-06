@@ -681,23 +681,9 @@ def setup_bot():
     bot_app.add_handler(CallbackQueryHandler(handle_callback))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Встановити webhook
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    webhook_url = f"{WEBHOOK_URL}/webhook"
-    
-    async def set_webhook():
-        await bot_app.bot.set_webhook(
-            url=webhook_url,
-            allowed_updates=["message", "callback_query"]
-        )
-        logger.info(f"✅ Webhook set to: {webhook_url}")
-    
-    loop.run_until_complete(set_webhook())
-    loop.close()
-    
     logger.info("🚀 Bot initialized and ready")
+    logger.info(f"⚠️ Webhook should be set manually to: {WEBHOOK_URL}/webhook")
+    logger.info(f"💡 Run: python3 reset_webhook.py")
 
 # Ініціалізувати бота при старті
 setup_bot()

@@ -663,7 +663,7 @@ async def main():
         listen="0.0.0.0",
         port=PORT,
         url_path="/webhook",
-        webhook_url=f"{os.getenv('WEBHOOK_URL', 'https://example.com')}/webhook"
+        webhook_url=f"{os.getenv('WEBHOOK_URL', 'https://example.com')}
     )
 
 if __name__ == '__main__':

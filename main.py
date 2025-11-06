@@ -1,24 +1,24 @@
 # ============================================================================
-# 📄 main.py - FerrikFoot Bot - Основний файл
+# 📄 main.py - FerrikFoot Bot - Основний файл (WEBHOOK VERSION)
 # ============================================================================
 """
 Telegram FoodBot для замовлення їжі в Тернополі
 Мультиресторанність + AI рекомендації + PostgreSQL
-Deploy на Render
+Deploy на Render з Webhook
 """
 
 import os
 import json
 import logging
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from functools import wraps
 
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
 # Telegram
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Bot
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     CallbackQueryHandler, ContextTypes, filters
@@ -53,6 +53,7 @@ GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
 GOOGLE_CREDENTIALS_JSON = os.getenv('GOOGLE_CREDENTIALS_JSON')
 OPERATOR_CHAT_ID = int(os.getenv('OPERATOR_CHAT_ID', 0)) if os.getenv('OPERATOR_CHAT_ID') else None
 DATABASE_URL = os.getenv('DATABASE_URL')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://ferrik-bot-zvev.onrender.com')
 PORT = int(os.getenv('PORT', 5000))
 
 # ============================================================================
@@ -118,7 +119,7 @@ def get_ai_recommendations(query: str, menu_items: List[Dict], session: Session)
             for item in menu_items[:20]
         ])
         
-        prompt = f"""Ти асистент їдьоз для замовлення їжі в Тернополі.
+        prompt = f"""Ти асистент для замовлення їжі в Тернополі.
 
 МЕНЮ:
 {menu_text}
@@ -139,10 +140,13 @@ def get_ai_recommendations(query: str, menu_items: List[Dict], session: Session)
         return "❌ AI асистент тимчасово недоступний"
 
 # ============================================================================
-# FLASK APP
+# FLASK APP + BOT SETUP
 # ============================================================================
 
 app = Flask(__name__)
+
+# Global bot application
+bot_app: Optional[Application] = None
 
 # In-memory storage для сесій
 user_carts: Dict[int, List[Dict]] = {}
@@ -517,14 +521,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cart = user_states[user_id]['cart']
                 
                 total = sum(item['price'] * item['quantity'] for item in cart)
-                restaurant_id = cart[0]['restaurant_id']  # Всі товари від одного ресторану
+                restaurant_id = cart[0]['restaurant_id']
                 
                 # Отримати ресторан для комісії
                 restaurant = session.query(Restaurant).filter(
                     Restaurant.id == restaurant_id
                 ).first()
                 
-                commission_rate = restaurant.commission_rate / 100
+                commission_rate = restaurant.commission_rate / 100 if restaurant else 0.15
                 commission_amount = total * commission_rate
                 
                 order = Order(
@@ -532,7 +536,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     telegram_user_id=user_id,
                     restaurant_id=restaurant_id,
                     total_amount=total,
-                    delivery_cost=30,  # Фіксована доставка
+                    delivery_cost=30,
                     final_amount=total + 30,
                     address=address,
                     phone=phone,
@@ -640,32 +644,67 @@ def health():
 
 @app.route('/webhook', methods=['POST'])
 def webhook_handler():
-    """Telegram webhook"""
-    return "ok"
+    """Telegram webhook endpoint"""
+    try:
+        if bot_app is None:
+            logger.error("❌ Bot application not initialized")
+            return jsonify({"status": "error", "message": "Bot not ready"}), 503
+        
+        # Отримати JSON від Telegram
+        data = request.get_json(force=True)
+        
+        # Створити Update об'єкт
+        update = Update.de_json(data, bot_app.bot)
+        
+        # Обробити update в окремому потоці
+        asyncio.run(bot_app.process_update(update))
+        
+        return jsonify({"status": "ok"})
+    
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ============================================================================
-# ЗАПУСК
+# BOT INITIALIZATION
 # ============================================================================
 
-async def main():
-    """Запуск бота"""
-    app_bot = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+def setup_bot():
+    """Налаштувати бота"""
+    global bot_app
     
-    # Handlers
-    app_bot.add_handler(CommandHandler("start", start_command))
-    app_bot.add_handler(CallbackQueryHandler(handle_callback))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Створити Application
+    bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    logger.info("🚀 Bot started...")
+    # Додати handlers
+    bot_app.add_handler(CommandHandler("start", start_command))
+    bot_app.add_handler(CallbackQueryHandler(handle_callback))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Запустити webhook
-    await app_bot.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="/webhook",
-        webhook_url=f"{os.getenv('WEBHOOK_URL', 'https://example.com')}"
+    # Встановити webhook
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    webhook_url = f"{WEBHOOK_URL}/webhook"
+    
+    async def set_webhook():
+        await bot_app.bot.set_webhook(
+            url=webhook_url,
+            allowed_updates=["message", "callback_query"]
+        )
+        logger.info(f"✅ Webhook set to: {webhook_url}")
+    
+    loop.run_until_complete(set_webhook())
+    loop.close()
+    
+    logger.info("🚀 Bot initialized and ready")
 
-)
+# Ініціалізувати бота при старті
+setup_bot()
+
+# ============================================================================
+# GUNICORN ENTRY POINT
+# ============================================================================
+
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())
+    app.run(host='0.0.0.0', port=PORT, debug=False)

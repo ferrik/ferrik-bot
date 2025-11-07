@@ -651,39 +651,40 @@ def webhook_handler():
     """Telegram webhook endpoint (основний)"""
     return handle_telegram_webhook()
 
+
 @app.route('/webhook/webhook', methods=['POST'])
 def webhook_handler_double():
     """Telegram webhook endpoint (подвійний шлях для сумісності)"""
     return handle_telegram_webhook()
 
+
 def handle_telegram_webhook():
     """Спільна логіка обробки webhook"""
-try:
-    if bot_app is None:
-        logger.error("❌ Bot application not initialized")
-        return jsonify({"status": "error", "message": "Bot not ready"}), 503
+    try:
+        if bot_app is None:
+            logger.error("❌ Bot application not initialized")
+            return jsonify({"status": "error", "message": "Bot not ready"}), 503
 
-    # Отримати JSON від Telegram
-    data = request.get_json(force=True)
-    logger.info(f"📥 Received webhook: {data.get('update_id', 'unknown')}")
+        # Отримати JSON від Telegram
+        data = request.get_json(force=True)
+        logger.info(f"📥 Received webhook: {data.get('update_id', 'unknown')}")
 
-    # Створити Update об'єкт
-    update = Update.de_json(data, bot_app.bot)
+        # Створити Update об'єкт
+        update = Update.de_json(data, bot_app.bot)
 
-    # Асинхронна обробка update з перевіркою ініціалізації
-    async def process_webhook_update():
-        if not bot_app._initialized:
-            await bot_app.initialize()
-        await bot_app.process_update(update)
+        # Асинхронна обробка update з перевіркою ініціалізації
+        async def process_webhook_update():
+            if not bot_app._initialized:
+                await bot_app.initialize()
+            await bot_app.process_update(update)
 
-    asyncio.run(process_webhook_update())
+        asyncio.run(process_webhook_update())
 
-    return jsonify({"status": "ok"}), 200
+        return jsonify({"status": "ok"}), 200
 
-except Exception as e:
-    logger.error(f"❌ Webhook error: {e}", exc_info=True)
-    return jsonify({"status": "error", "message": str(e)}), 500
-
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 # ============================================================================
 # BOT INITIALIZATION
 # ============================================================================

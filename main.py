@@ -1,4 +1,4 @@
-и """
+"""
 🍕 FERRIKBOT v2.1 - MAIN APPLICATION (FULLY FIXED)
 Готовий до використання на GitHub та Render
 """

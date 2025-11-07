@@ -1,153 +1,243 @@
+и """
+🍕 FERRIKBOT v2.1 - MAIN APPLICATION (FULLY FIXED)
+Готовий до використання на GitHub та Render
 """
-🤖 FerrikFoot Bot v2.1 - ЛЮДЯНА ВЕРСІЯ
-Telegram бот з AI, бейджами, челленджами та теплими привітаннями
-"""
+
 import os
 import logging
+import sys
 from flask import Flask, request, jsonify
+from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes
-)
+from telegram.ext import Application, CommandHandler
 
-from app.config import load_config
-from app.services.sheets_service import SheetsService
-from app.services.gemini_service import GeminiService
+# ============================================================================
+# LOAD ENVIRONMENT
+# ============================================================================
 
-# Імпортуємо обновлені handlers
-from app.handlers.commands import (
-    start_handler,
-    menu_handler,
-    cart_handler,
-    order_handler,
-    help_handler,
-    cancel_handler,
-    show_profile_callback,
-    show_challenge_callback,
-)
-from app.handlers.messages import message_handler
-from app.handlers.callbacks import callback_query_handler
+load_dotenv()
 
-# Ініціалізація логування
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
+
 logger = logging.getLogger(__name__)
 
-# Завантаження конфігурації
-try:
-    telegram_config, gemini_config, sheets_config, app_config = load_config()
-except Exception as e:
-    logger.error(f"❌ Configuration failed: {e}")
-    raise
+# ============================================================================
+# FLASK APP INITIALIZATION
+# ============================================================================
 
-# Flask app
 app = Flask(__name__)
 
-# Telegram bot application
+# Telegram bot application (глобальна змінна)
 bot_application = None
 
-# Сервіси
-sheets_service = None
-gemini_service = None
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-
-def init_services():
-    """Ініціалізація сервісів"""
-    global sheets_service, gemini_service
+class Config:
+    """Конфігурація додатку"""
     
-    try:
-        # Google Sheets
-        sheets_service = SheetsService(sheets_config)
-        logger.info("✅ Google Sheets service initialized")
+    # Telegram
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:5000")
+    ADMIN_IDS = [
+        int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") 
+        if id.strip()
+    ]
+    
+    # Google
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "")
+    GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
+    
+    # Database
+    DATABASE_URL = os.getenv(
+        "DATABASE_URL",
+        "postgresql://ferrik_user:ferrik_secure_123!@localhost:5432/ferrik_bot"
+    )
+    
+    # App
+    DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+    ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+    PORT = int(os.getenv("PORT", 5000))
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    
+    @staticmethod
+    def validate():
+        """Перевірка необхідних конфігурацій"""
+        errors = []
         
-        # Gemini AI
-        gemini_service = GeminiService(gemini_config)
-        if gemini_service.test_connection():
-            logger.info("✅ Gemini AI service initialized and tested")
-        else:
-            logger.warning("⚠️ Gemini AI test failed, but service initialized")
+        if not Config.TELEGRAM_BOT_TOKEN:
+            errors.append("❌ TELEGRAM_BOT_TOKEN not set")
+        
+        if errors:
+            for error in errors:
+                logger.error(error)
+            return False
         
         return True
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize services: {e}")
-        return False
 
 
-def setup_handlers(application: Application):
-    """Налаштування обробників команд"""
-    
-    # Команди
-    application.add_handler(CommandHandler("start", start_handler))
-    application.add_handler(CommandHandler("menu", menu_handler))
-    application.add_handler(CommandHandler("cart", cart_handler))
-    application.add_handler(CommandHandler("order", order_handler))
-    application.add_handler(CommandHandler("help", help_handler))
-    application.add_handler(CommandHandler("cancel", cancel_handler))
-    
-    # Callback queries (inline кнопки)
-    application.add_handler(CallbackQueryHandler(callback_query_handler))
-    
-    # Текстові повідомлення (AI обробка)
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        message_handler
-    ))
-    
-    logger.info("✅ Handlers registered")
+config = Config()
 
+# ============================================================================
+# TELEGRAM BOT SETUP
+# ============================================================================
 
-async def setup_webhook(application: Application):
-    """Налаштування webhook для Render"""
-    if not telegram_config.webhook_url:
-        logger.warning("⚠️ WEBHOOK_URL not set, skipping webhook setup")
-        return False
+def setup_handlers(application):
+    """Реєстрація обробників Telegram команд"""
+    
+    logger.info("📝 Setting up Telegram handlers...")
     
     try:
-        await application.bot.set_webhook(
-            url=f"{telegram_config.webhook_url}/webhook",
-            allowed_updates=["message", "callback_query", "edited_message"]
-        )
-        logger.info(f"✅ Webhook set: {telegram_config.webhook_url}/webhook")
+        # Базові обробники команд
+        async def start_command(update: Update, context):
+            """Команда /start"""
+            logger.info(f"✅ /start від користувача {update.effective_user.id}")
+            await update.message.reply_text(
+                "🍴 Привіт! Я — Ferrik, твій персональний помічник зі смаку 🤖✨\n\n"
+                "Що я можу робити:\n"
+                "• 🔍 Шукати — просто напиши, що хочеш\n"
+                "• 📋 Показати меню\n"
+                "• 🎁 Дати тобі бонус на першу закупку\n"
+                "• 💬 Порадити на основі твоїх смаків\n\n"
+                "Готовий почати? 👇"
+            )
+        
+        async def help_command(update: Update, context):
+            """Команда /help"""
+            logger.info(f"📚 /help від користувача {update.effective_user.id}")
+            await update.message.reply_text(
+                "📚 *Як працює Ferrik?*\n\n"
+                "1️⃣ /menu — переглянути меню\n"
+                "2️⃣ натисни товар — додати в кошик\n"
+                "3️⃣ /cart — переглянути кошик\n"
+                "4️⃣ оформи замовлення\n\n"
+                "Потреби допомога? Напиши /support",
+                parse_mode='Markdown'
+            )
+        
+        async def menu_command(update: Update, context):
+            """Команда /menu"""
+            logger.info(f"📋 /menu від користувача {update.effective_user.id}")
+            await update.message.reply_text(
+                "📋 *Меню:*\n\n"
+                "🍕 Піца Маргарита — 180 грн\n"
+                "🍔 Бургер Класик — 150 грн\n"
+                "🌮 Тако Мексиканське — 120 грн\n\n"
+                "_Скоро будуть більш деталі!_",
+                parse_mode='Markdown'
+            )
+        
+        # Реєстрація команд
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("menu", menu_command))
+        
+        logger.info("✅ All handlers registered")
         return True
+    
     except Exception as e:
-        logger.error(f"❌ Failed to set webhook: {e}")
+        logger.error(f"❌ Handler registration error: {e}")
         return False
 
 
 def create_bot_application():
     """Створення Telegram bot application"""
+    
     global bot_application
     
-    # Створюємо application
-    bot_application = (
-        Application.builder()
-        .token(telegram_config.bot_token)
-        .build()
-    )
+    logger.info("🤖 Creating Telegram bot application...")
     
-    # Налаштовуємо обробники
-    setup_handlers(bot_application)
+    TOKEN = config.TELEGRAM_BOT_TOKEN
     
-    # Зберігаємо сервіси в bot_data для доступу з handlers
-    bot_application.bot_data['sheets_service'] = sheets_service
-    bot_application.bot_data['gemini_service'] = gemini_service
-    bot_application.bot_data['app_config'] = app_config
-    bot_application.bot_data['telegram_config'] = telegram_config
+    if not TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN not found!")
+        return None
     
-    logger.info("✅ Bot application created")
+    try:
+        # Створення application
+        bot_application = Application.builder().token(TOKEN).build()
+        
+        # Реєстрація обробників
+        if not setup_handlers(bot_application):
+            return None
+        
+        # Зберігання конфіга у bot_data
+        bot_application.bot_data['config'] = config
+        
+        logger.info("✅ Bot application created successfully")
+        return bot_application
     
-    return bot_application
+    except Exception as e:
+        logger.error(f"❌ Failed to create bot application: {e}", exc_info=True)
+        return None
 
 
 # ============================================================================
-# Flask routes
+# STARTUP FUNCTION (КРИТИЧНО!)
+# ============================================================================
+
+def startup():
+    """Ініціалізація при запуску (ВИКЛИКАЄТЬСЯ ОДИН РАЗ)"""
+    
+    global bot_application
+    
+    logger.info("=" * 70)
+    logger.info("🚀 FERRIKBOT v2.1 STARTING...")
+    logger.info("=" * 70)
+    logger.info("")
+    
+    # 1️⃣ ВАЛІДАЦІЯ КОНФІГ
+    logger.info("🔍 Validating configuration...")
+    if not config.validate():
+        logger.error("❌ Configuration validation failed")
+        return False
+    
+    logger.info("✅ Configuration valid")
+    logger.info(f"   Token: {config.TELEGRAM_BOT_TOKEN[:20]}...")
+    logger.info(f"   Webhook: {config.WEBHOOK_URL}")
+    logger.info("")
+    
+    # 2️⃣ СТВОРЕННЯ БОТА
+    logger.info("🤖 Creating bot application...")
+    if not create_bot_application():
+        logger.error("❌ Failed to create bot application")
+        return False
+    
+    logger.info("✅ Bot application created")
+    logger.info("")
+    
+    # 3️⃣ ІНФОРМАЦІЯ ПРО ЗАПУСК
+    logger.info("✅ BOT READY!")
+    logger.info("")
+    logger.info("📊 FEATURES ENABLED:")
+    logger.info("  ✓ /start команда")
+    logger.info("  ✓ /help команда")
+    logger.info("  ✓ /menu команда")
+    logger.info("  ✓ Webhook обробка")
+    logger.info("")
+    logger.info(f"🌐 Running on port {config.PORT}")
+    logger.info(f"🌍 Environment: {config.ENVIRONMENT}")
+    logger.info(f"🐛 Debug mode: {config.DEBUG}")
+    logger.info(f"📍 Telegram Webhook: {config.WEBHOOK_URL}/webhook")
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("")
+    
+    return True
+
+
+# ============================================================================
+# FLASK ROUTES
 # ============================================================================
 
 @app.route('/')
@@ -155,157 +245,168 @@ def index():
     """Головна сторінка"""
     return jsonify({
         "status": "🟢 online",
-        "service": "🍕 FerrikFoot Bot",
+        "bot": "🍕 FerrikBot v2.1",
         "version": "2.1.0",
-        "features": [
-            "AI recommendations",
-            "Badges & achievements",
-            "Weekly challenges",
-            "Referral system",
-            "Warm greetings",
-            "Multi-partner platform"
-        ],
-        "environment": app_config.environment
+        "bot_initialized": bot_application is not None,
+        "environment": config.ENVIRONMENT,
+        "debug": config.DEBUG
     })
 
 
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health():
-    """Health check для Render"""
-    try:
-        return jsonify({
-            "status": "healthy",
-            "timestamp": __import__('datetime').datetime.now().isoformat(),
-            "services": {
-                "telegram": bot_application is not None,
-                "sheets": sheets_service is not None,
-                "gemini": gemini_service is not None
-            },
-            "uptime": "OK"
-        })
-    except Exception as e:
-        logger.error(f"❌ Health check error: {e}")
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e)
-        }), 500
+    """Health check"""
+    return jsonify({
+        "status": "healthy" if bot_application else "initializing",
+        "bot_initialized": bot_application is not None,
+        "timestamp": __import__('datetime').datetime.now().isoformat(),
+    }), 200 if bot_application else 503
 
 
-@app.route('/stats')
-def stats():
-    """Статистика платформи"""
-    try:
-        from app.utils.session import get_platform_stats
-        platform_stats = get_platform_stats()
-        
-        return jsonify({
-            "status": "ok",
-            "platform": platform_stats
-        })
-    except Exception as e:
-        logger.error(f"❌ Stats error: {e}")
-        return jsonify({"error": str(e)}), 500
-
+# ============================================================================
+# 🔥 WEBHOOK ROUTES (КРИТИЧНО!)
+# ============================================================================
 
 @app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Webhook endpoint для Telegram"""
+def webhook():
+    """
+    Основний webhook маршрут для Telegram
+    POST /webhook
+    """
+    logger.info("📨 Webhook /webhook отримав запит")
+    return process_webhook(request)
+
+
+@app.route('/webhook/webhook', methods=['POST'])
+def webhook_double():
+    """
+    Резервний webhook маршрут (для старого налаштування)
+    POST /webhook/webhook
+    """
+    logger.warning("⚠️ Webhook /webhook/webhook отримав запит (старий маршрут)")
+    return process_webhook(request)
+
+
+def process_webhook(req):
+    """
+    Спільна обробка всіх webhook запитів
+    """
     try:
-        # Отримуємо update від Telegram
-        update = Update.de_json(request.get_json(), bot_application.bot)
+        # Перевіри, чи бот ініціалізований
+        if not bot_application:
+            logger.error("❌ Bot application not initialized")
+            return jsonify({"ok": False, "error": "Bot not initialized"}), 500
         
-        # Обробляємо update
-        await bot_application.process_update(update)
+        # Отримай JSON від Telegram
+        data = req.get_json()
         
-        return jsonify({"ok": True})
+        if not data:
+            logger.error("❌ Webhook: порожні дані")
+            return jsonify({"ok": False, "error": "Empty data"}), 400
+        
+        logger.info(f"📨 Webhook data received: update_id={data.get('update_id')}")
+        
+        # Розпарс Update від Telegram
+        update = Update.de_json(data, bot_application.bot)
+        
+        if not update:
+            logger.error("❌ Failed to parse update")
+            return jsonify({"ok": False}), 400
+        
+        # Обробити месідж через зареєстровані обробники
+        # ВАЖЛИВО: це синхронна функція, запускаємо обробку асинхронно
+        import asyncio
+        
+        async def process():
+            await bot_application.process_update(update)
+        
+        # Запусти асинхронну обробку
+        try:
+            asyncio.run(process())
+        except RuntimeError:
+            # Якщо вже є event loop
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(process())
+        
+        logger.info("✅ Update processed successfully")
+        return jsonify({"ok": True}), 200
     
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route('/set_webhook', methods=['GET', 'POST'])
-async def set_webhook_route():
-    """Ручне встановлення webhook"""
-    if not telegram_config.webhook_url:
-        return jsonify({
-            "ok": False,
-            "error": "WEBHOOK_URL not configured"
-        }), 400
+def set_webhook_route():
+    """Встановлення webhook для Telegram"""
+    if not bot_application:
+        return jsonify({"ok": False, "error": "Bot not initialized"}), 500
     
     try:
-        await setup_webhook(bot_application)
+        webhook_url = f"{config.WEBHOOK_URL}/webhook"
+        
+        import asyncio
+        
+        async def set_it():
+            await bot_application.bot.set_webhook(
+                url=webhook_url,
+                allowed_updates=["message", "callback_query"]
+            )
+        
+        try:
+            asyncio.run(set_it())
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(set_it())
+        
+        logger.info(f"✅ Webhook set: {webhook_url}")
+        
         return jsonify({
             "ok": True,
-            "webhook_url": f"{telegram_config.webhook_url}/webhook",
-            "message": "✅ Webhook установлен успешно"
-        })
+            "webhook_url": webhook_url,
+            "message": "✅ Webhook установлено успішно"
+        }), 200
+    
     except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/delete_webhook', methods=['GET', 'POST'])
-async def delete_webhook_route():
-    """Видалення webhook"""
-    try:
-        await bot_application.bot.delete_webhook()
-        return jsonify({
-            "ok": True,
-            "message": "✅ Webhook удален"
-        })
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/menu')
-def get_menu_api():
-    """API для отримання меню (для вебу)"""
-    try:
-        if sheets_service:
-            menu = sheets_service.get_menu()
-            return jsonify({
-                "ok": True,
-                "items_count": len(menu),
-                "menu": menu[:50]  # Обмежуємо для API
-            })
-        return jsonify({"ok": False, "error": "Service unavailable"}), 500
-    except Exception as e:
+        logger.error(f"❌ Set webhook error: {e}", exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route('/send_message/<int:user_id>/<message>', methods=['POST'])
-def send_message(user_id: int, message: str):
-    """Адмін API - відправити повідомлення користувачу"""
+@app.route('/delete_webhook', methods=['GET', 'POST'])
+def delete_webhook_route():
+    """Видалення webhook"""
+    if not bot_application:
+        return jsonify({"ok": False}), 500
+    
     try:
-        # Перевіряємо адміна
-        if user_id not in telegram_config.admin_ids:
-            return jsonify({"ok": False, "error": "Unauthorized"}), 403
+        import asyncio
         
-        # Відправляємо
-        # await bot_application.bot.send_message(
-        #     chat_id=user_id,
-        #     text=message
-        # )
+        async def delete_it():
+            await bot_application.bot.delete_webhook()
         
-        return jsonify({"ok": True, "message": "Sent"})
+        try:
+            asyncio.run(delete_it())
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(delete_it())
+        
+        logger.info("✅ Webhook deleted")
+        return jsonify({"ok": True, "message": "✅ Webhook видалено"}), 200
+    
     except Exception as e:
+        logger.error(f"❌ Delete webhook error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ============================================================================
-# Startup and Error Handlers
+# ERROR HANDLERS
 # ============================================================================
 
 @app.before_request
 def before_request():
     """Логування перед кожним запитом"""
-    logger.debug(f"📨 {request.method} {request.path}")
+    if request.path != '/health':  # Не логуй health checks
+        logger.debug(f"📨 {request.method} {request.path}")
 
 
 @app.errorhandler(404)
@@ -313,14 +414,14 @@ def not_found(error):
     """404 обробник"""
     return jsonify({
         "error": "Not found",
+        "status": 404,
         "available_endpoints": [
             "/",
             "/health",
-            "/stats",
             "/webhook",
+            "/webhook/webhook",
             "/set_webhook",
-            "/delete_webhook",
-            "/menu"
+            "/delete_webhook"
         ]
     }), 404
 
@@ -328,59 +429,33 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     """500 обробник"""
-    logger.error(f"❌ Internal error: {error}")
+    logger.error(f"❌ Internal server error: {error}")
     return jsonify({
         "error": "Internal server error",
-        "message": str(error)
+        "status": 500
     }), 500
 
 
-def startup():
-    """Ініціалізація при запуску"""
-    logger.info("=" * 70)
-    logger.info("🚀 FERRIKFOOT BOT v2.1 - STARTING")
-    logger.info("=" * 70)
-    
-    # Ініціалізація сервісів
-    if not init_services():
-        logger.error("❌ Failed to start: services initialization failed")
-        return False
-    
-    # Створення bot application
-    create_bot_application()
-    
-    logger.info("")
-    logger.info("✅ Bot started successfully!")
-    logger.info("")
-    logger.info("📊 FEATURES ENABLED:")
-    logger.info("  ✓ AI Recommendations (Gemini)")
-    logger.info("  ✓ User Badges & Achievements")
-    logger.info("  ✓ Weekly Challenges")
-    logger.info("  ✓ Referral System")
-    logger.info("  ✓ Warm Greetings")
-    logger.info("  ✓ Multi-Partner Platform")
-    logger.info("  ✓ Session Management")
-    logger.info("")
-    logger.info(f"🌐 Running on {app_config.host}:{app_config.port}")
-    logger.info(f"🌍 Environment: {app_config.environment}")
-    logger.info(f"🐛 Debug mode: {app_config.debug}")
-    logger.info("")
-    logger.info("=" * 70)
-    
-    return True
-
-
 # ============================================================================
-# Main
+# MAIN
 # ============================================================================
 
 if __name__ == '__main__':
-    # Запуск
+    logger.info("🍕 Initializing FerrikBot...")
+    logger.info("")
+    
+    # ВИКЛИКАЙ STARTUP - ЦЕ КРИТИЧНО!
     if startup():
-        # Flask server
+        logger.info("🚀 Starting Flask server...")
+        logger.info("")
+        
+        # Запуск Flask
         app.run(
-            host=app_config.host,
-            port=app_config.port,
-            debug=app_config.debug,
-            use_reloader=False  # Important for Telegram webhook
+            host="0.0.0.0",
+            port=config.PORT,
+            debug=config.DEBUG,
+            use_reloader=False  # Важливо для Telegram webhook
         )
+    else:
+        logger.error("❌ Failed to start bot!")
+        sys.exit(1)

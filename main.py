@@ -169,7 +169,7 @@ def add_to_cart(user_id: int, menu_item: MenuItem, quantity: int = 1):
     if user_id not in user_carts:
         user_carts[user_id] = []
     
-    # Перевіруємо чи товар вже в кошику
+    # Перевіряємо чи товар вже в кошику
     for item in user_carts[user_id]:
         if item['id'] == menu_item.id:
             item['quantity'] += quantity
@@ -642,9 +642,22 @@ def health():
         "bot": "ready"
     })
 
+# ============================================================================
+# 🔧 ВИПРАВЛЕННЯ: Додано обидва роути для webhook
+# ============================================================================
+
 @app.route('/webhook', methods=['POST'])
 def webhook_handler():
-    """Telegram webhook endpoint"""
+    """Telegram webhook endpoint (основний)"""
+    return handle_telegram_webhook()
+
+@app.route('/webhook/webhook', methods=['POST'])
+def webhook_handler_double():
+    """Telegram webhook endpoint (подвійний шлях для сумісності)"""
+    return handle_telegram_webhook()
+
+def handle_telegram_webhook():
+    """Спільна логіка обробки webhook"""
     try:
         if bot_app is None:
             logger.error("❌ Bot application not initialized")
@@ -652,6 +665,7 @@ def webhook_handler():
         
         # Отримати JSON від Telegram
         data = request.get_json(force=True)
+        logger.info(f"📥 Received webhook: {data.get('update_id', 'unknown')}")
         
         # Створити Update об'єкт
         update = Update.de_json(data, bot_app.bot)
@@ -659,10 +673,10 @@ def webhook_handler():
         # Обробити update в окремому потоці
         asyncio.run(bot_app.process_update(update))
         
-        return jsonify({"status": "ok"})
+        return jsonify({"status": "ok"}), 200
     
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ============================================================================
@@ -682,8 +696,9 @@ def setup_bot():
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("🚀 Bot initialized and ready")
-    logger.info(f"⚠️ Webhook should be set manually to: {WEBHOOK_URL}/webhook")
-    logger.info(f"💡 Run: python3 reset_webhook.py")
+    logger.info(f"⚠️ Webhook endpoints:")
+    logger.info(f"   • {WEBHOOK_URL}/webhook")
+    logger.info(f"   • {WEBHOOK_URL}/webhook/webhook")
 
 # Ініціалізувати бота при старті
 setup_bot()

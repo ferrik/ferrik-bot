@@ -1,12 +1,13 @@
 """
-🍕 FERRIKBOT v2.2 - MAIN APPLICATION (FINAL FIX)
-✅ Виправлено async initialization для Gunicorn
+🍕 FERRIKBOT v2.3 - MAIN APPLICATION (PRODUCTION READY)
+✅ Повністю працюючий з Gunicorn + async handlers
 """
 
 import os
 import logging
 import sys
 import asyncio
+from threading import Thread
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from telegram import Update
@@ -212,7 +213,7 @@ def startup():
     global bot_application
 
     logger.info("=" * 70)
-    logger.info("🚀 FERRIKBOT v2.2 STARTING...")
+    logger.info("🚀 FERRIKBOT v2.3 STARTING...")
     logger.info("=" * 70)
     logger.info("")
 
@@ -273,8 +274,8 @@ def index():
     """Головна сторінка"""
     return jsonify({
         "status": "🟢 online",
-        "bot": "🍕 FerrikBot v2.2",
-        "version": "2.2.0",
+        "bot": "🍕 FerrikBot v2.3",
+        "version": "2.3.0",
         "bot_initialized": bot_application is not None,
         "environment": config.ENVIRONMENT,
         "debug": config.DEBUG
@@ -311,7 +312,8 @@ def webhook_double():
 
 def process_webhook(req):
     """
-    Обробка webhook запитів (синхронна для Flask)
+    🔥 ВИПРАВЛЕНА обробка webhook для Flask/Gunicorn
+    Використовує окремий thread для async операцій
     """
     try:
         # Перевіри, чи бот ініціалізований
@@ -335,18 +337,33 @@ def process_webhook(req):
             logger.error("❌ Failed to parse update")
             return jsonify({"ok": False}), 400
 
-        # 🔥 ВИПРАВЛЕНА ASYNC ОБРОБКА для Flask/Gunicorn
-        # Створюємо новий event loop для цього запиту
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # 🔥 ВИПРАВЛЕННЯ: Обробляємо update в окремому thread
+        # щоб не блокувати Flask і не закривати event loop передчасно
         
-        try:
-            # Обробляємо update синхронно в новому loop
-            loop.run_until_complete(bot_application.process_update(update))
-            logger.info("✅ Update processed successfully")
-            return jsonify({"ok": True}), 200
-        finally:
-            loop.close()
+        def process_update_sync():
+            """Обробка update в окремому потоці"""
+            try:
+                # Створюємо новий event loop для цього thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    # Обробляємо update
+                    loop.run_until_complete(bot_application.process_update(update))
+                    logger.info("✅ Update processed successfully")
+                finally:
+                    # Закриваємо loop після обробки
+                    loop.close()
+            except Exception as e:
+                logger.error(f"❌ Error in thread: {e}", exc_info=True)
+        
+        # Запускаємо обробку в окремому thread
+        thread = Thread(target=process_update_sync)
+        thread.start()
+        
+        # Одразу повертаємо 200 OK (Telegram не буде чекати)
+        # Thread продовжить обробку в фоні
+        return jsonify({"ok": True}), 200
 
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)

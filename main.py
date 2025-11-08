@@ -1,6 +1,6 @@
 """
-🍕 FERRIKBOT v2.3 - MAIN APPLICATION (PRODUCTION READY)
-✅ Повністю працюючий з Gunicorn + async handlers
+🍕 FERRIKBOT v3.0 - MAIN APPLICATION
+Повна інтеграція всіх модулів з гібридним меню
 """
 
 import os
@@ -11,7 +11,7 @@ from threading import Thread
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, MessageHandler, filters
 
 # ============================================================================
 # LOAD ENVIRONMENT
@@ -55,12 +55,14 @@ class Config:
         if id.strip()
     ]
 
-    # Google
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    # Google Sheets
     GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "")
     GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
+    
+    # Gemini AI
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-    # Database
+    # Database (для майбутнього)
     DATABASE_URL = os.getenv(
         "DATABASE_URL",
         "postgresql://ferrik_user:ferrik_secure_123!@localhost:5432/ferrik_bot"
@@ -71,6 +73,15 @@ class Config:
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     PORT = int(os.getenv("PORT", 5000))
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    
+    # Google Sheets Config (для SheetsService)
+    @property
+    def credentials_json(self):
+        return self.GOOGLE_SHEETS_CREDENTIALS
+    
+    @property
+    def spreadsheet_id(self):
+        return self.GOOGLE_SHEETS_ID
 
     @staticmethod
     def validate():
@@ -95,60 +106,41 @@ config = Config()
 # ============================================================================
 
 def setup_handlers(application):
-    """Реєстрація обробників Telegram команд"""
+    """Реєстрація всіх обробників Telegram команд"""
 
     logger.info("📝 Setting up Telegram handlers...")
 
     try:
-        # Базові обробники команд
-        async def start_command(update: Update, context):
-            """Команда /start"""
-            logger.info(f"✅ /start від користувача {update.effective_user.id}")
-            await update.message.reply_text(
-                "🍴 Привіт! Я — Ferrik, твій персональний помічник зі смаку 🤖✨\n\n"
-                "Що я можу робити:\n"
-                "• 🔍 Шукати — просто напиши, що хочеш\n"
-                "• 📋 Показати меню\n"
-                "• 🎁 Дати тобі бонус на першу закупку\n"
-                "• 💬 Порадити на основі твоїх смаків\n\n"
-                "Готовий почати? 👇"
+        # 1️⃣ КОМАНДИ (існуючі)
+        from app.handlers.commands import register_command_handlers
+        register_command_handlers(application)
+        logger.info("✅ Command handlers registered")
+        
+        # 2️⃣ CALLBACK QUERIES (існуючі)
+        from app.handlers.callbacks import register_callback_handlers
+        register_callback_handlers(application)
+        logger.info("✅ Callback handlers registered")
+        
+        # 3️⃣ ГІБРИДНЕ МЕНЮ V2 (нове)
+        from app.handlers.menu_v2 import register_menu_v2_handlers
+        register_menu_v2_handlers(application)
+        logger.info("✅ Menu v2 handlers registered")
+        
+        # 4️⃣ TEXT MESSAGES (AI обробка)
+        from app.handlers.messages import message_handler
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                message_handler
             )
+        )
+        logger.info("✅ Message handler registered")
 
-        async def help_command(update: Update, context):
-            """Команда /help"""
-            logger.info(f"📚 /help від користувача {update.effective_user.id}")
-            await update.message.reply_text(
-                "📚 *Як працює Ferrik?*\n\n"
-                "1️⃣ /menu — переглянути меню\n"
-                "2️⃣ натисни товар — додати в кошик\n"
-                "3️⃣ /cart — переглянути кошик\n"
-                "4️⃣ оформи замовлення\n\n"
-                "Потреби допомога? Напиши /support",
-                parse_mode='Markdown'
-            )
-
-        async def menu_command(update: Update, context):
-            """Команда /menu"""
-            logger.info(f"📋 /menu від користувача {update.effective_user.id}")
-            await update.message.reply_text(
-                "📋 *Меню:*\n\n"
-                "🍕 Піца Маргарита — 180 грн\n"
-                "🍔 Бургер Класик — 150 грн\n"
-                "🌮 Тако Мексиканське — 120 грн\n\n"
-                "_Скоро будуть більш деталі!_",
-                parse_mode='Markdown'
-            )
-
-        # Реєстрація команд
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("menu", menu_command))
-
-        logger.info("✅ All handlers registered")
+        logger.info("✅ All handlers registered successfully")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Handler registration error: {e}")
+        logger.error(f"❌ Handler registration error: {e}", exc_info=True)
         return False
 
 
@@ -204,6 +196,48 @@ def create_bot_application():
 
 
 # ============================================================================
+# SERVICES INITIALIZATION
+# ============================================================================
+
+def initialize_services(application):
+    """Ініціалізація всіх сервісів (Google Sheets, Gemini)"""
+    
+    logger.info("🔧 Initializing services...")
+    
+    # 1️⃣ GOOGLE SHEETS SERVICE
+    try:
+        if config.GOOGLE_SHEETS_ID and config.GOOGLE_SHEETS_CREDENTIALS:
+            from app.services.sheets_service import SheetsService
+            
+            sheets_service = SheetsService(config)
+            application.bot_data['sheets_service'] = sheets_service
+            
+            logger.info("✅ Google Sheets Service initialized")
+        else:
+            logger.warning("⚠️ Google Sheets credentials not found (bot will work without it)")
+    except Exception as e:
+        logger.error(f"❌ Google Sheets Service error: {e}")
+        logger.warning("⚠️ Bot will work without Google Sheets")
+    
+    # 2️⃣ GEMINI AI SERVICE (опціонально)
+    try:
+        if config.GEMINI_API_KEY:
+            from app.services.gemini_service import GeminiService
+            
+            gemini_service = GeminiService(config.GEMINI_API_KEY)
+            application.bot_data['gemini_service'] = gemini_service
+            
+            logger.info("✅ Gemini AI Service initialized")
+        else:
+            logger.warning("⚠️ Gemini API key not found (AI features disabled)")
+    except Exception as e:
+        logger.error(f"❌ Gemini Service error: {e}")
+        logger.warning("⚠️ Bot will work without AI features")
+    
+    logger.info("✅ Services initialization completed")
+
+
+# ============================================================================
 # STARTUP FUNCTION
 # ============================================================================
 
@@ -213,7 +247,7 @@ def startup():
     global bot_application
 
     logger.info("=" * 70)
-    logger.info("🚀 FERRIKBOT v2.3 STARTING...")
+    logger.info("🚀 FERRIKBOT v3.0 STARTING...")
     logger.info("=" * 70)
     logger.info("")
 
@@ -226,6 +260,7 @@ def startup():
     logger.info("✅ Configuration valid")
     logger.info(f"   Token: {config.TELEGRAM_BOT_TOKEN[:20]}...")
     logger.info(f"   Webhook: {config.WEBHOOK_URL}")
+    logger.info(f"   Google Sheets ID: {config.GOOGLE_SHEETS_ID[:20] if config.GOOGLE_SHEETS_ID else 'Not set'}...")
     logger.info("")
 
     # 2️⃣ СТВОРЕННЯ БОТА
@@ -239,13 +274,24 @@ def startup():
     logger.info("✅ Bot application created")
     logger.info("")
 
-    # 3️⃣ ІНФОРМАЦІЯ ПРО ЗАПУСК
+    # 3️⃣ ІНІЦІАЛІЗАЦІЯ СЕРВІСІВ
+    logger.info("🔧 Initializing services...")
+    initialize_services(bot_application)
+    logger.info("")
+
+    # 4️⃣ ІНФОРМАЦІЯ ПРО ЗАПУСК
     logger.info("✅ BOT READY!")
     logger.info("")
     logger.info("📊 FEATURES ENABLED:")
-    logger.info("  ✓ /start команда")
-    logger.info("  ✓ /help команда")
-    logger.info("  ✓ /menu команда")
+    logger.info("  ✓ /start команда (warm greetings)")
+    logger.info("  ✓ /menu команда (існуюче меню)")
+    logger.info("  ✓ /menu_v2 команда (гібридне меню)")
+    logger.info("  ✓ /cart команда")
+    logger.info("  ✓ /order команда")
+    logger.info("  ✓ Callback handlers (кнопки)")
+    logger.info("  ✓ AI обробка повідомлень")
+    logger.info("  ✓ Surprise Me функція")
+    logger.info("  ✓ Google Sheets інтеграція")
     logger.info("  ✓ Webhook обробка")
     logger.info("")
     logger.info(f"🌐 Running on port {config.PORT}")
@@ -274,11 +320,18 @@ def index():
     """Головна сторінка"""
     return jsonify({
         "status": "🟢 online",
-        "bot": "🍕 FerrikBot v2.3",
-        "version": "2.3.0",
+        "bot": "🍕 FerrikBot v3.0",
+        "version": "3.0.0",
         "bot_initialized": bot_application is not None,
         "environment": config.ENVIRONMENT,
-        "debug": config.DEBUG
+        "debug": config.DEBUG,
+        "features": {
+            "google_sheets": config.GOOGLE_SHEETS_ID != "",
+            "gemini_ai": config.GEMINI_API_KEY != "",
+            "hybrid_menu": True,
+            "warm_greetings": True,
+            "surprise_me": True
+        }
     })
 
 

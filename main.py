@@ -1,11 +1,12 @@
 """
-🍕 FERRIKBOT v2.1 - MAIN APPLICATION (FULLY FIXED)
-Готовий до використання на GitHub та Render
+🍕 FERRIKBOT v2.2 - MAIN APPLICATION (FINAL FIX)
+✅ Виправлено async initialization для Gunicorn
 """
 
 import os
 import logging
 import sys
+import asyncio
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from telegram import Update
@@ -150,10 +151,8 @@ def setup_handlers(application):
         return False
 
 
-def create_bot_application():
-    """Створення Telegram bot application"""
-
-    global bot_application
+async def create_bot_application_async():
+    """Асинхронне створення та ініціалізація Telegram bot application"""
 
     logger.info("🤖 Creating Telegram bot application...")
 
@@ -165,34 +164,55 @@ def create_bot_application():
 
     try:
         # Створення application
-        bot_application = Application.builder().token(TOKEN).build()
+        application = Application.builder().token(TOKEN).build()
+
+        # 🔥 КРИТИЧНО: Ініціалізувати application
+        logger.info("🔄 Initializing bot application...")
+        await application.initialize()
+        logger.info("✅ Bot application initialized")
 
         # Реєстрація обробників
-        if not setup_handlers(bot_application):
+        if not setup_handlers(application):
             return None
 
         # Зберігання конфіга у bot_data
-        bot_application.bot_data['config'] = config
+        application.bot_data['config'] = config
 
         logger.info("✅ Bot application created successfully")
-        return bot_application
+        return application
 
     except Exception as e:
         logger.error(f"❌ Failed to create bot application: {e}", exc_info=True)
         return None
 
 
+def create_bot_application():
+    """Синхронна обгортка для асинхронного створення бота"""
+    try:
+        # Створюємо новий event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Запускаємо асинхронну функцію
+        application = loop.run_until_complete(create_bot_application_async())
+        
+        return application
+    except Exception as e:
+        logger.error(f"❌ Failed in sync wrapper: {e}", exc_info=True)
+        return None
+
+
 # ============================================================================
-# STARTUP FUNCTION (КРИТИЧНО!)
+# STARTUP FUNCTION
 # ============================================================================
 
 def startup():
-    """Ініціалізація при запуску (ВИКЛИКАЄТЬСЯ ОДИН РАЗ)"""
+    """Ініціалізація при запуску"""
 
     global bot_application
 
     logger.info("=" * 70)
-    logger.info("🚀 FERRIKBOT v2.1 STARTING...")
+    logger.info("🚀 FERRIKBOT v2.2 STARTING...")
     logger.info("=" * 70)
     logger.info("")
 
@@ -209,7 +229,9 @@ def startup():
 
     # 2️⃣ СТВОРЕННЯ БОТА
     logger.info("🤖 Creating bot application...")
-    if not create_bot_application():
+    bot_application = create_bot_application()
+    
+    if not bot_application:
         logger.error("❌ Failed to create bot application")
         return False
 
@@ -237,10 +259,9 @@ def startup():
 
 
 # ============================================================================
-# 🔥 AUTO-STARTUP (КРИТИЧНО ДЛЯ GUNICORN!)
+# AUTO-STARTUP (для Gunicorn)
 # ============================================================================
 
-# Викликаємо startup() при імпорті модуля (для Gunicorn)
 startup()
 
 # ============================================================================
@@ -252,8 +273,8 @@ def index():
     """Головна сторінка"""
     return jsonify({
         "status": "🟢 online",
-        "bot": "🍕 FerrikBot v2.1",
-        "version": "2.1.0",
+        "bot": "🍕 FerrikBot v2.2",
+        "version": "2.2.0",
         "bot_initialized": bot_application is not None,
         "environment": config.ENVIRONMENT,
         "debug": config.DEBUG
@@ -271,32 +292,26 @@ def health():
 
 
 # ============================================================================
-# 🔥 WEBHOOK ROUTES (КРИТИЧНО!)
+# WEBHOOK ROUTES
 # ============================================================================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """
-    Основний webhook маршрут для Telegram
-    POST /webhook
-    """
+    """Основний webhook маршрут"""
     logger.info("📨 Webhook /webhook отримав запит")
     return process_webhook(request)
 
 
 @app.route('/webhook/webhook', methods=['POST'])
 def webhook_double():
-    """
-    Резервний webhook маршрут (для старого налаштування)
-    POST /webhook/webhook
-    """
+    """Резервний webhook маршрут"""
     logger.warning("⚠️ Webhook /webhook/webhook отримав запит (старий маршрут)")
     return process_webhook(request)
 
 
 def process_webhook(req):
     """
-    Спільна обробка всіх webhook запитів
+    Обробка webhook запитів (синхронна для Flask)
     """
     try:
         # Перевіри, чи бот ініціалізований
@@ -320,23 +335,18 @@ def process_webhook(req):
             logger.error("❌ Failed to parse update")
             return jsonify({"ok": False}), 400
 
-        # Обробити месідж через зареєстровані обробники
-        # ВАЖЛИВО: це синхронна функція, запускаємо обробку асинхронно
-        import asyncio
-
-        async def process():
-            await bot_application.process_update(update)
-
-        # Запусти асинхронну обробку
+        # 🔥 ВИПРАВЛЕНА ASYNC ОБРОБКА для Flask/Gunicorn
+        # Створюємо новий event loop для цього запиту
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         try:
-            asyncio.run(process())
-        except RuntimeError:
-            # Якщо вже є event loop
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(process())
-
-        logger.info("✅ Update processed successfully")
-        return jsonify({"ok": True}), 200
+            # Обробляємо update синхронно в новому loop
+            loop.run_until_complete(bot_application.process_update(update))
+            logger.info("✅ Update processed successfully")
+            return jsonify({"ok": True}), 200
+        finally:
+            loop.close()
 
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
@@ -352,27 +362,27 @@ def set_webhook_route():
     try:
         webhook_url = f"{config.WEBHOOK_URL}/webhook"
 
-        import asyncio
-
-        async def set_it():
-            await bot_application.bot.set_webhook(
-                url=webhook_url,
-                allowed_updates=["message", "callback_query"]
-            )
-
+        # Створюємо event loop для async операції
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         try:
-            asyncio.run(set_it())
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(set_it())
+            loop.run_until_complete(
+                bot_application.bot.set_webhook(
+                    url=webhook_url,
+                    allowed_updates=["message", "callback_query"]
+                )
+            )
+            
+            logger.info(f"✅ Webhook set: {webhook_url}")
 
-        logger.info(f"✅ Webhook set: {webhook_url}")
-
-        return jsonify({
-            "ok": True,
-            "webhook_url": webhook_url,
-            "message": "✅ Webhook установлено успішно"
-        }), 200
+            return jsonify({
+                "ok": True,
+                "webhook_url": webhook_url,
+                "message": "✅ Webhook установлено успішно"
+            }), 200
+        finally:
+            loop.close()
 
     except Exception as e:
         logger.error(f"❌ Set webhook error: {e}", exc_info=True)
@@ -386,19 +396,15 @@ def delete_webhook_route():
         return jsonify({"ok": False}), 500
 
     try:
-        import asyncio
-
-        async def delete_it():
-            await bot_application.bot.delete_webhook()
-
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         try:
-            asyncio.run(delete_it())
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(delete_it())
-
-        logger.info("✅ Webhook deleted")
-        return jsonify({"ok": True, "message": "✅ Webhook видалено"}), 200
+            loop.run_until_complete(bot_application.bot.delete_webhook())
+            logger.info("✅ Webhook deleted")
+            return jsonify({"ok": True, "message": "✅ Webhook видалено"}), 200
+        finally:
+            loop.close()
 
     except Exception as e:
         logger.error(f"❌ Delete webhook error: {e}")
@@ -412,7 +418,7 @@ def delete_webhook_route():
 @app.before_request
 def before_request():
     """Логування перед кожним запитом"""
-    if request.path != '/health':  # Не логуй health checks
+    if request.path != '/health':
         logger.debug(f"📨 {request.method} {request.path}")
 
 
@@ -448,21 +454,16 @@ def internal_error(error):
 # ============================================================================
 
 if __name__ == '__main__':
-    logger.info("🍕 Running in development mode (direct Python execution)...")
-    logger.info("")
-
-    # Startup вже викликаний вище, тому тут просто запускаємо Flask
+    logger.info("🍕 Running in development mode...")
+    
     if bot_application:
         logger.info("🚀 Starting Flask development server...")
-        logger.info("")
-
-        # Запуск Flask
         app.run(
             host="0.0.0.0",
             port=config.PORT,
             debug=config.DEBUG,
-            use_reloader=False  # Важливо для Telegram webhook
+            use_reloader=False
         )
     else:
-        logger.error("❌ Bot not initialized, cannot start server!")
+        logger.error("❌ Bot not initialized!")
         sys.exit(1)

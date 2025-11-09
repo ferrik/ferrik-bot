@@ -126,20 +126,23 @@ def setup_handlers(application):
         register_menu_v2_handlers(application)
         logger.info("✅ Menu v2 handlers registered")
         
-        # 4️⃣ TEXT MESSAGES (AI обробка) - ТИМЧАСОВО ВИМКНЕНО
-        # TODO: Перевірити назву функції в app/handlers/messages.py
-        # from app.handlers.messages import message_handler
-        # application.add_handler(
-        #     MessageHandler(
-        #         filters.TEXT & ~filters.COMMAND,
-        #         message_handler
-        #     )
-        # )
-        # logger.info("✅ Message handler registered")
+        # 4️⃣ TEXT MESSAGES (AI обробка + багатокрокові діалоги)
+        from app.handlers.messages import message_handler
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                message_handler
+            )
+        )
+        logger.info("✅ Text message handler registered")
 
         logger.info("✅ All handlers registered successfully")
         return True
 
+    except ImportError as e:
+        logger.error(f"❌ Handler import error: {e}", exc_info=True)
+        logger.warning("⚠️ Some handlers may not be available")
+        return False
     except Exception as e:
         logger.error(f"❌ Handler registration error: {e}", exc_info=True)
         return False
@@ -167,7 +170,7 @@ async def create_bot_application_async():
 
         # Реєстрація обробників
         if not setup_handlers(application):
-            return None
+            logger.warning("⚠️ Some handlers failed to register, but continuing...")
 
         # Зберігання конфіга у bot_data
         application.bot_data['config'] = config
@@ -194,6 +197,9 @@ def create_bot_application():
     except Exception as e:
         logger.error(f"❌ Failed in sync wrapper: {e}", exc_info=True)
         return None
+    finally:
+        # НЕ закриваємо loop тут, бо він може використовуватись далі
+        pass
 
 
 # ============================================================================
@@ -290,7 +296,7 @@ def startup():
     logger.info("  ✓ /cart команда")
     logger.info("  ✓ /order команда")
     logger.info("  ✓ Callback handlers (кнопки)")
-    logger.info("  ✓ AI обробка повідомлень")
+    logger.info("  ✓ Text message handler (AI + діалоги)")
     logger.info("  ✓ Surprise Me функція")
     logger.info("  ✓ Google Sheets інтеграція")
     logger.info("  ✓ Webhook обробка")
@@ -331,7 +337,8 @@ def index():
             "gemini_ai": config.GEMINI_API_KEY != "",
             "hybrid_menu": True,
             "warm_greetings": True,
-            "surprise_me": True
+            "surprise_me": True,
+            "text_message_handler": True
         }
     })
 

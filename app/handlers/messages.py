@@ -484,3 +484,201 @@ def format_order_summary(order: dict) -> str:
         lines.append(f"📍 **Адреса:** {order['address']}")
     
     return "\n".join(lines)
+# Додай ЦЕЙ КОД в КІНЕЦЬ файлу app/handlers/messages.py
+# (після всіх інших функцій)
+
+
+# ============================================================================
+# ГОЛОВНИЙ HANDLER ДЛЯ ТЕКСТОВИХ ПОВІДОМЛЕНЬ
+# ============================================================================
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Головний обробник текстових повідомлень
+    Викликається для всіх текстів (крім команд)
+    
+    Підтримує:
+    - Багатокрокові діалоги (телефон, адреса, промокод)
+    - Визначення намірів (меню, кошик, checkout)
+    - AI рекомендації через Gemini
+    """
+    user = update.effective_user
+    text = update.message.text
+    
+    logger.info(f"💬 Message from {user.id}: {text[:50]}...")
+    
+    # Очистити введення від шкідливих символів
+    text = sanitize_input(text)
+    
+    # Отримати сесію та статистику користувача
+    session = get_user_session(user.id)
+    stats = get_user_stats(user.id)
+    
+    current_state = session.get('state', 'idle')
+    
+    # ========================================================================
+    # ОБРОБКА БАГАТОКРОКОВИХ ДІАЛОГІВ
+    # ========================================================================
+    
+    # СТАН: очікуємо телефон для замовлення
+    if current_state == 'awaiting_phone':
+        if validate_phone(text):
+            normalized = normalize_phone(text)
+            update_user_session(user.id, {
+                'phone': normalized,
+                'state': 'awaiting_address'
+            })
+            
+            await update.message.reply_text(
+                "✅ Телефон збережено!\n\n"
+                "📍 Тепер введіть адресу доставки:\n"
+                "_(наприклад: вул. Хрещатик, 12, кв. 5)_",
+                parse_mode='Markdown'
+            )
+            return
+        else:
+            await update.message.reply_text(
+                "❌ Невірний формат телефону!\n\n"
+                "Спробуйте ще раз:\n"
+                "✅ +380501234567\n"
+                "✅ 0501234567\n"
+                "✅ 050 123 45 67",
+                parse_mode='Markdown'
+            )
+            return
+    
+    # СТАН: очікуємо адресу доставки
+    if current_state == 'awaiting_address':
+        if len(text) >= 10 and any(c.isdigit() for c in text):
+            update_user_session(user.id, {
+                'address': text,
+                'state': 'confirming_order'
+            })
+            
+            # Показуємо підсумок замовлення
+            cart = get_user_cart(user.id)
+            if cart:
+                phone = session.get('phone', 'Не вказано')
+                
+                # Формуємо текст замовлення
+                items_text = "\n".join([
+                    f"{i+1}. {item['name']} x{item.get('quantity', 1)} = {item['price'] * item.get('quantity', 1)} грн"
+                    for i, item in enumerate(cart)
+                ])
+                
+                total = get_cart_total(user.id)
+                delivery_cost = 50  # TODO: динамічна ціна доставки
+                final_total = total + delivery_cost
+                
+                summary = (
+                    "📋 *Підсумок замовлення:*\n\n"
+                    f"{items_text}\n\n"
+                    f"💰 Сума: {total} грн\n"
+                    f"🚚 Доставка: {delivery_cost} грн\n"
+                    f"*Разом: {final_total} грн*\n\n"
+                    f"📞 Телефон: {phone}\n"
+                    f"📍 Адреса: {text}\n"
+                )
+                
+                keyboard = [
+                    [
+                        InlineKeyboardButton("✅ Підтвердити", callback_data="confirm_order"),
+                        InlineKeyboardButton("✏️ Змінити", callback_data="edit_order"),
+                    ],
+                    [
+                        InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order"),
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    f"{summary}\n💬 Все правильно?",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Кошик порожній! Спершу додайте товари через /menu_v2"
+                )
+            return
+        else:
+            await update.message.reply_text(
+                "❌ Адреса занадто коротка або не містить номера будинку! 😕\n\n"
+                "Повинна бути мінімум 10 символів.\n\n"
+                "Приклад: _вул. Хрещатик, 12, кв. 5_",
+                parse_mode='Markdown'
+            )
+            return
+    
+    # СТАН: очікуємо промокод
+    if current_state == 'awaiting_promocode':
+        sheets_service = context.bot_data.get('sheets_service')
+        if sheets_service:
+            promo_data = sheets_service.validate_promocode(text)
+            if promo_data:
+                update_user_session(user.id, {
+                    'promocode': text,
+                    'discount': promo_data['discount_percent'],
+                    'state': 'idle'
+                })
+                
+                await update.message.reply_text(
+                    f"🎉 Промокод *{text}* застосовано!\n\n"
+                    f"Знижка: *{promo_data['discount_percent']}%* ⭐\n\n"
+                    "Продовжуйте оформлення замовлення!",
+                    parse_mode='Markdown'
+                )
+                return
+            else:
+                await update.message.reply_text(
+                    "❌ Промокод невірний або закінчився! 😔\n\n"
+                    "Спробуйте інший або продовжуйте без промокоду.",
+                    parse_mode='Markdown'
+                )
+                return
+    
+    # ========================================================================
+    # НОРМАЛЬНИЙ РЕЖИМ: аналізуємо намір користувача
+    # ========================================================================
+    
+    # Визначаємо намір та настрій
+    intent = detect_intent(text)
+    mood = detect_mood(text)
+    
+    logger.info(f"🎯 Detected intent: {intent}, mood: {mood}")
+    
+    # Обробляємо на основі наміру
+    if intent == 'recommendation':
+        await handle_recommendation(update, context, text, mood, stats)
+    
+    elif intent == 'menu':
+        await handle_menu_request(update, context)
+    
+    elif intent == 'cart':
+        await handle_cart_request(update, context)
+    
+    elif intent == 'checkout':
+        await handle_checkout_request(update, context)
+    
+    else:
+        # За замовчуванням - показати підказку з можливостями
+        keyboard = [
+            [
+                InlineKeyboardButton("📋 Меню", callback_data="v2_show_menu"),
+                InlineKeyboardButton("🛒 Кошик", callback_data="v2_view_cart"),
+            ],
+            [
+                InlineKeyboardButton("🎲 Здивуй мене!", callback_data="surprise_me"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "💡 Не зовсім зрозумів 🤔\n\n"
+            "Спробуй:\n"
+            "• /menu_v2 — переглянути меню\n"
+            "• /cart — мій кошик\n"
+            "• Або натисни кнопку нижче:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )

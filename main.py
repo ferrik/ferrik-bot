@@ -126,15 +126,16 @@ def setup_handlers(application):
         register_menu_v2_handlers(application)
         logger.info("✅ Menu v2 handlers registered")
         
-        # 4️⃣ TEXT MESSAGES (AI обробка)
-        from app.handlers.messages import message_handler
-        application.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                message_handler
-            )
-        )
-        logger.info("✅ Message handler registered")
+        # 4️⃣ TEXT MESSAGES (AI обробка) - ТИМЧАСОВО ВИМКНЕНО
+        # TODO: Перевірити назву функції в app/handlers/messages.py
+        # from app.handlers.messages import message_handler
+        # application.add_handler(
+        #     MessageHandler(
+        #         filters.TEXT & ~filters.COMMAND,
+        #         message_handler
+        #     )
+        # )
+        # logger.info("✅ Message handler registered")
 
         logger.info("✅ All handlers registered successfully")
         return True

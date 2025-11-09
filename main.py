@@ -1,6 +1,6 @@
 """
 🍕 FERRIKBOT v3.0 - MAIN APPLICATION
-Повна інтеграція всіх модулів з гібридним меню
+Повна інтеграція всіх модулів з гібридним меню + виправлення Connection Pool
 """
 
 import os
@@ -12,6 +12,7 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters
+from telegram.request import HTTPXRequest
 
 # ============================================================================
 # LOAD ENVIRONMENT
@@ -122,19 +123,25 @@ def setup_handlers(application):
         logger.info("✅ Callback handlers registered")
         
         # 3️⃣ ГІБРИДНЕ МЕНЮ V2 (нове)
-        from app.handlers.menu_v2 import register_menu_v2_handlers
-        register_menu_v2_handlers(application)
-        logger.info("✅ Menu v2 handlers registered")
+        try:
+            from app.handlers.menu_v2 import register_menu_v2_handlers
+            register_menu_v2_handlers(application)
+            logger.info("✅ Menu v2 handlers registered")
+        except ImportError as e:
+            logger.warning(f"⚠️ Menu v2 not available: {e}")
         
         # 4️⃣ TEXT MESSAGES (AI обробка + багатокрокові діалоги)
-        from app.handlers.messages import message_handler
-        application.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                message_handler
+        try:
+            from app.handlers.messages import message_handler
+            application.add_handler(
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    message_handler
+                )
             )
-        )
-        logger.info("✅ Text message handler registered")
+            logger.info("✅ Text message handler registered")
+        except ImportError as e:
+            logger.warning(f"⚠️ Message handler not available: {e}")
 
         logger.info("✅ All handlers registered successfully")
         return True
@@ -160,8 +167,27 @@ async def create_bot_application_async():
         return None
 
     try:
-        # Створення application
-        application = Application.builder().token(TOKEN).build()
+        # 🔥 ВИПРАВЛЕННЯ: Збільшуємо connection pool для Render Free tier
+        request = HTTPXRequest(
+            connection_pool_size=16,  # Збільшено з 8 до 16
+            pool_timeout=30.0,        # Таймаут очікування вільного з'єднання
+            connect_timeout=20.0,     # Таймаут підключення до Telegram
+            read_timeout=20.0,        # Таймаут читання відповіді
+            write_timeout=20.0        # Таймаут запису
+        )
+        
+        logger.info("🔧 HTTPXRequest configured:")
+        logger.info(f"   Pool size: 16 connections")
+        logger.info(f"   Pool timeout: 30s")
+        logger.info(f"   Connect/Read timeout: 20s")
+        
+        # Створення application з власним request
+        application = (
+            Application.builder()
+            .token(TOKEN)
+            .request(request)  # 🔥 Використовуємо власний request
+            .build()
+        )
 
         # 🔥 КРИТИЧНО: Ініціалізувати application
         logger.info("🔄 Initializing bot application...")
@@ -300,6 +326,7 @@ def startup():
     logger.info("  ✓ Surprise Me функція")
     logger.info("  ✓ Google Sheets інтеграція")
     logger.info("  ✓ Webhook обробка")
+    logger.info("  ✓ Connection Pool: 16 connections")
     logger.info("")
     logger.info(f"🌐 Running on port {config.PORT}")
     logger.info(f"🌍 Environment: {config.ENVIRONMENT}")
@@ -328,7 +355,7 @@ def index():
     return jsonify({
         "status": "🟢 online",
         "bot": "🍕 FerrikBot v3.0",
-        "version": "3.0.0",
+        "version": "3.0.1",
         "bot_initialized": bot_application is not None,
         "environment": config.ENVIRONMENT,
         "debug": config.DEBUG,
@@ -338,7 +365,8 @@ def index():
             "hybrid_menu": True,
             "warm_greetings": True,
             "surprise_me": True,
-            "text_message_handler": True
+            "text_message_handler": True,
+            "connection_pool": "16 connections"
         }
     })
 

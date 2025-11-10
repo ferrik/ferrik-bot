@@ -1,154 +1,172 @@
 """
-🛒 CART MANAGER - Управління кошиком користувача
-Окремий модуль для роботи з кошиком
+🛒 Cart Manager з Redis підтримкою
+Зберігає кошики навіть після рестарту
 """
 
+import os
+import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# CART STORAGE
-# ============================================================================
+# Спроба імпорту Redis
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    logger.warning("⚠️ Redis not installed, using in-memory fallback")
 
+# Fallback: in-memory storage
 _carts: Dict[int, List[Dict[str, Any]]] = {}
 
 
-def get_user_cart(user_id: int) -> List[Dict[str, Any]]:
-    """
-    Отримати кошик користувача
+class CartManager:
+    """Менеджер кошика з підтримкою Redis або in-memory"""
     
-    Args:
-        user_id: ID користувача
-    
-    Returns:
-        Список товарів у кошику
-    """
-    if user_id not in _carts:
-        _carts[user_id] = []
-    
-    return _carts[user_id]
-
-
-def add_to_cart(user_id: int, item: Dict[str, Any]) -> bool:
-    """
-    Додати товар до кошика
-    
-    Args:
-        user_id: ID користувача
-        item: Товар {'id', 'name', 'price', 'quantity'}
-    
-    Returns:
-        True якщо успішно
-    """
-    try:
-        cart = get_user_cart(user_id)
+    def __init__(self):
+        self.redis_client = None
+        self.use_redis = False
         
-        # Перевірити чи товар уже в кошику
+        if REDIS_AVAILABLE:
+            redis_url = os.getenv('REDIS_URL')
+            if redis_url:
+                try:
+                    self.redis_client = redis.from_url(
+                        redis_url,
+                        decode_responses=True,
+                        socket_timeout=5
+                    )
+                    # Тест з'єднання
+                    self.redis_client.ping()
+                    self.use_redis = True
+                    logger.info("✅ Redis connected for cart storage")
+                except Exception as e:
+                    logger.error(f"❌ Redis connection failed: {e}")
+                    self.use_redis = False
+    
+    def _get_key(self, user_id: int) -> str:
+        """Генерація ключа для Redis"""
+        return f"cart:{user_id}"
+    
+    def get_cart(self, user_id: int) -> List[Dict[str, Any]]:
+        """Отримати кошик користувача"""
+        if self.use_redis and self.redis_client:
+            try:
+                data = self.redis_client.get(self._get_key(user_id))
+                if data:
+                    return json.loads(data)
+                return []
+            except Exception as e:
+                logger.error(f"❌ Redis get error: {e}")
+                # Fallback to memory
+                return _carts.get(user_id, [])
+        else:
+            return _carts.get(user_id, [])
+    
+    def save_cart(self, user_id: int, cart: List[Dict[str, Any]]) -> bool:
+        """Зберегти кошик"""
+        if self.use_redis and self.redis_client:
+            try:
+                key = self._get_key(user_id)
+                # Зберігаємо на 7 днів
+                self.redis_client.setex(
+                    key,
+                    7 * 24 * 60 * 60,  # 7 днів у секундах
+                    json.dumps(cart)
+                )
+                return True
+            except Exception as e:
+                logger.error(f"❌ Redis save error: {e}")
+                # Fallback to memory
+                _carts[user_id] = cart
+                return True
+        else:
+            _carts[user_id] = cart
+            return True
+    
+    def add_item(self, user_id: int, item: Dict[str, Any]) -> bool:
+        """Додати товар до кошика"""
+        cart = self.get_cart(user_id)
+        
+        # Перевірити чи товар уже є
         for cart_item in cart:
             if cart_item.get('id') == item.get('id'):
                 # Збільшити кількість
                 cart_item['quantity'] = cart_item.get('quantity', 1) + item.get('quantity', 1)
-                logger.info(f"✏️ Updated {item.get('name')} qty in cart")
-                return True
+                return self.save_cart(user_id, cart)
         
         # Додати новий товар
         cart.append(item)
-        logger.info(f"➕ Added {item.get('name')} to cart")
+        return self.save_cart(user_id, cart)
+    
+    def remove_item(self, user_id: int, item_id: str) -> bool:
+        """Видалити товар з кошика"""
+        cart = self.get_cart(user_id)
+        cart = [item for item in cart if item.get('id') != item_id]
+        return self.save_cart(user_id, cart)
+    
+    def clear_cart(self, user_id: int) -> bool:
+        """Очистити кошик"""
+        if self.use_redis and self.redis_client:
+            try:
+                self.redis_client.delete(self._get_key(user_id))
+                return True
+            except Exception as e:
+                logger.error(f"❌ Redis delete error: {e}")
+        
+        _carts[user_id] = []
         return True
     
-    except Exception as e:
-        logger.error(f"❌ Error adding to cart: {e}")
-        return False
+    def get_total(self, user_id: int) -> float:
+        """Розрахувати загальну вартість"""
+        cart = self.get_cart(user_id)
+        total = sum(
+            item.get('price', 0) * item.get('quantity', 1)
+            for item in cart
+        )
+        return round(total, 2)
+    
+    def get_item_count(self, user_id: int) -> int:
+        """Кількість товарів у кошику"""
+        cart = self.get_cart(user_id)
+        return sum(item.get('quantity', 1) for item in cart)
+
+
+# Глобальний екземпляр
+cart_manager = CartManager()
+
+
+# ============================================================================
+# ПУБЛІЧНІ ФУНКЦІЇ (для сумісності зі старим кодом)
+# ============================================================================
+
+def get_user_cart(user_id: int) -> List[Dict[str, Any]]:
+    """Отримати кошик користувача"""
+    return cart_manager.get_cart(user_id)
+
+
+def add_to_cart(user_id: int, item: Dict[str, Any]) -> bool:
+    """Додати товар до кошика"""
+    return cart_manager.add_item(user_id, item)
 
 
 def remove_from_cart(user_id: int, item_id: str) -> bool:
-    """
-    Видалити товар з кошика
-    
-    Args:
-        user_id: ID користувача
-        item_id: ID товара
-    
-    Returns:
-        True якщо успішно
-    """
-    try:
-        cart = get_user_cart(user_id)
-        _carts[user_id] = [item for item in cart if item.get('id') != item_id]
-        logger.info(f"🗑️ Removed item {item_id} from cart")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Error removing from cart: {e}")
-        return False
-
-
-def update_cart_item(user_id: int, item_id: str, quantity: int) -> bool:
-    """
-    Оновити кількість товара в кошику
-    
-    Args:
-        user_id: ID користувача
-        item_id: ID товара
-        quantity: Нова кількість
-    
-    Returns:
-        True якщо успішно
-    """
-    try:
-        cart = get_user_cart(user_id)
-        
-        for item in cart:
-            if item.get('id') == item_id:
-                if quantity <= 0:
-                    return remove_from_cart(user_id, item_id)
-                
-                item['quantity'] = quantity
-                logger.info(f"📝 Updated item {item_id} quantity to {quantity}")
-                return True
-        
-        return False
-    except Exception as e:
-        logger.error(f"❌ Error updating cart: {e}")
-        return False
+    """Видалити товар з кошика"""
+    return cart_manager.remove_item(user_id, item_id)
 
 
 def clear_user_cart(user_id: int) -> bool:
-    """Очистити кошик користувача"""
-    try:
-        _carts[user_id] = []
-        logger.info(f"🧹 Cleared cart for user {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Error clearing cart: {e}")
-        return False
+    """Очистити кошик"""
+    return cart_manager.clear_cart(user_id)
 
 
 def get_cart_total(user_id: int) -> float:
-    """
-    Розрахувати загальну вартість кошика
-    
-    Args:
-        user_id: ID користувача
-    
-    Returns:
-        Загальна вартість
-    """
-    cart = get_user_cart(user_id)
-    total = sum(
-        item.get('price', 0) * item.get('quantity', 1)
-        for item in cart
-    )
-    return round(total, 2)
+    """Загальна вартість кошика"""
+    return cart_manager.get_total(user_id)
 
 
 def get_cart_item_count(user_id: int) -> int:
-    """Отримати кількість товарів у кошику"""
-    cart = get_user_cart(user_id)
-    return sum(item.get('quantity', 1) for item in cart)
-
-
-def is_cart_empty(user_id: int) -> bool:
-    """Перевірити чи кошик порожній"""
-    return len(get_user_cart(user_id)) == 0
+    """Кількість товарів"""
+    return cart_manager.get_item_count(user_id)

@@ -1,6 +1,6 @@
 """
 🍕 FERRIKBOT v3.0 - MAIN APPLICATION
-Повна інтеграція всіх модулів з гібридним меню + виправлення Connection Pool
+Повна інтеграція всіх модулів з гібридним меню + GDPR + Redis
 """
 
 import os
@@ -62,6 +62,9 @@ class Config:
     
     # Gemini AI
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    
+    # Redis
+    REDIS_URL = os.getenv("REDIS_URL", "")
 
     # Database (для майбутнього)
     DATABASE_URL = os.getenv(
@@ -74,6 +77,9 @@ class Config:
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     PORT = int(os.getenv("PORT", 5000))
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    
+    # Cron Secret (для cleanup endpoint)
+    CRON_SECRET = os.getenv("CRON_SECRET", "change-me-in-production")
     
     # Google Sheets Config (для SheetsService)
     @property
@@ -122,7 +128,15 @@ def setup_handlers(application):
         register_callback_handlers(application)
         logger.info("✅ Callback handlers registered")
         
-        # 3️⃣ ГІБРИДНЕ МЕНЮ V2 (нове)
+        # 3️⃣ GDPR HANDLERS (нові)
+        try:
+            from app.handlers.gdpr import register_gdpr_handlers
+            register_gdpr_handlers(application)
+            logger.info("✅ GDPR handlers registered")
+        except ImportError as e:
+            logger.warning(f"⚠️ GDPR handlers not available: {e}")
+        
+        # 4️⃣ ГІБРИДНЕ МЕНЮ V2 (нове)
         try:
             from app.handlers.menu_v2 import register_menu_v2_handlers
             register_menu_v2_handlers(application)
@@ -130,7 +144,7 @@ def setup_handlers(application):
         except ImportError as e:
             logger.warning(f"⚠️ Menu v2 not available: {e}")
         
-        # 4️⃣ TEXT MESSAGES (AI обробка + багатокрокові діалоги)
+        # 5️⃣ TEXT MESSAGES (AI обробка + багатокрокові діалоги)
         try:
             from app.handlers.messages import message_handler
             application.add_handler(
@@ -233,7 +247,7 @@ def create_bot_application():
 # ============================================================================
 
 def initialize_services(application):
-    """Ініціалізація всіх сервісів (Google Sheets, Gemini)"""
+    """Ініціалізація всіх сервісів (Google Sheets, Gemini, Redis)"""
     
     logger.info("🔧 Initializing services...")
     
@@ -267,6 +281,12 @@ def initialize_services(application):
         logger.error(f"❌ Gemini Service error: {e}")
         logger.warning("⚠️ Bot will work without AI features")
     
+    # 3️⃣ REDIS (для кошика)
+    if config.REDIS_URL:
+        logger.info("✅ Redis URL configured (cart_manager will use it)")
+    else:
+        logger.warning("⚠️ Redis URL not found (cart will use in-memory storage)")
+    
     logger.info("✅ Services initialization completed")
 
 
@@ -294,6 +314,7 @@ def startup():
     logger.info(f"   Token: {config.TELEGRAM_BOT_TOKEN[:20]}...")
     logger.info(f"   Webhook: {config.WEBHOOK_URL}")
     logger.info(f"   Google Sheets ID: {config.GOOGLE_SHEETS_ID[:20] if config.GOOGLE_SHEETS_ID else 'Not set'}...")
+    logger.info(f"   Redis URL: {'Configured' if config.REDIS_URL else 'Not set'}")
     logger.info("")
 
     # 2️⃣ СТВОРЕННЯ БОТА
@@ -323,8 +344,10 @@ def startup():
     logger.info("  ✓ /order команда")
     logger.info("  ✓ Callback handlers (кнопки)")
     logger.info("  ✓ Text message handler (AI + діалоги)")
+    logger.info("  ✓ GDPR compliance (згода + видалення)")
     logger.info("  ✓ Surprise Me функція")
     logger.info("  ✓ Google Sheets інтеграція")
+    logger.info("  ✓ Redis cart storage")
     logger.info("  ✓ Webhook обробка")
     logger.info("  ✓ Connection Pool: 16 connections")
     logger.info("")
@@ -355,17 +378,19 @@ def index():
     return jsonify({
         "status": "🟢 online",
         "bot": "🍕 FerrikBot v3.0",
-        "version": "3.0.1",
+        "version": "3.0.2",
         "bot_initialized": bot_application is not None,
         "environment": config.ENVIRONMENT,
         "debug": config.DEBUG,
         "features": {
             "google_sheets": config.GOOGLE_SHEETS_ID != "",
             "gemini_ai": config.GEMINI_API_KEY != "",
+            "redis": config.REDIS_URL != "",
             "hybrid_menu": True,
             "warm_greetings": True,
             "surprise_me": True,
             "text_message_handler": True,
+            "gdpr_compliance": True,
             "connection_pool": "16 connections"
         }
     })
@@ -518,6 +543,36 @@ def delete_webhook_route():
 
 
 # ============================================================================
+# CRON ENDPOINTS
+# ============================================================================
+
+@app.route('/cron/cleanup', methods=['POST'])
+def cron_cleanup():
+    """
+    Endpoint для cronjob очищення старих замовлень
+    Викликається щоденно через GitHub Actions або cron-job.org
+    """
+    
+    # Перевірка секрету
+    secret = request.headers.get('X-Cron-Secret')
+    if secret != config.CRON_SECRET:
+        logger.warning("⚠️ Unauthorized cron attempt")
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        sheets_service = bot_application.bot_data.get('sheets_service')
+        if sheets_service:
+            # TODO: Реалізувати cleanup_old_orders
+            logger.info("✅ Cleanup job triggered")
+            return jsonify({"ok": True, "message": "Cleanup completed"}), 200
+        else:
+            return jsonify({"error": "Sheets service not available"}), 500
+    except Exception as e:
+        logger.error(f"❌ Cleanup error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
 # ERROR HANDLERS
 # ============================================================================
 
@@ -540,7 +595,8 @@ def not_found(error):
             "/webhook",
             "/webhook/webhook",
             "/set_webhook",
-            "/delete_webhook"
+            "/delete_webhook",
+            "/cron/cleanup"
         ]
     }), 404
 

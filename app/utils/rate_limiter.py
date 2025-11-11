@@ -1,108 +1,74 @@
 """
-⏱️ RATE LIMITER - Захист від спаму та DDoS
-Керує частотою API запитів користувачів
+⏱️ Rate Limiter для API викликів
+Обмежує частоту запитів до API (Gemini, Sheets тощо)
 """
 
 import time
 import logging
-from collections import defaultdict
-from typing import Tuple, Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
-    """
-    Простий in-memory rate limiter
+    """Обмежувач частоти запитів"""
     
-    Обмежує кількість запитів на користувача за визначений період часу
-    """
-    
-    def __init__(self, max_requests: int = 5, time_window: int = 60):
+    def __init__(self, cooldown: int = 30):
         """
-        Ініціалізація rate limiter
-        
         Args:
-            max_requests: Максимум запитів (за замовчуванням 5)
-            time_window: Часовий період в секундах (за замовчуванням 60)
+            cooldown: Час очікування між запитами (секунди)
         """
-        self.max_requests = max_requests
-        self.time_window = time_window
-        self.requests = defaultdict(list)
-        
-        logger.info(f"📊 RateLimiter initialized: {max_requests} requests per {time_window}s")
+        self.cooldown = cooldown
+        self.last_call: Dict[str, float] = {}
     
-    def is_allowed(self, user_id: int) -> bool:
+    def can_call(self, user_id: int, api_name: str) -> bool:
         """
-        Перевірити чи дозволено користувачу робити запит
+        Перевірка чи можна виконати запит
         
         Args:
             user_id: ID користувача
+            api_name: Назва API (gemini, sheets, etc)
         
         Returns:
-            True якщо дозволено, False якщо перевищено ліміт
+            bool: True якщо можна викликати
         """
+        key = f"{user_id}:{api_name}"
         now = time.time()
         
-        # Видалити старі запити за межами часового вікна
-        self.requests[user_id] = [
-            req_time for req_time in self.requests[user_id]
-            if now - req_time < self.time_window
-        ]
+        if key in self.last_call:
+            elapsed = now - self.last_call[key]
+            if elapsed < self.cooldown:
+                remaining = int(self.cooldown - elapsed)
+                logger.warning(
+                    f"⏱️ Rate limit for {api_name}: user {user_id}, "
+                    f"wait {remaining}s"
+                )
+                return False
         
-        # Перевірити ліміт
-        if len(self.requests[user_id]) < self.max_requests:
-            self.requests[user_id].append(now)
-            return True
-        
-        return False
+        self.last_call[key] = now
+        return True
     
-    def get_wait_time(self, user_id: int) -> int:
-        """
-        Дізнатися скільки секунд чекати до наступного запиту
-        
-        Args:
-            user_id: ID користувача
-        
-        Returns:
-            Кількість секунд очікування (0 якщо можна робити запит)
-        """
-        if not self.requests[user_id]:
-            return 0
-        
-        oldest = self.requests[user_id][0]
-        wait = int(self.time_window - (time.time() - oldest)) + 1
-        return max(0, wait)
-    
-    def reset(self, user_id: int):
+    def reset(self, user_id: int, api_name: str):
         """Скинути лічильник для користувача"""
-        if user_id in self.requests:
-            del self.requests[user_id]
+        key = f"{user_id}:{api_name}"
+        if key in self.last_call:
+            del self.last_call[key]
+            logger.info(f"✅ Rate limit reset for {api_name}: user {user_id}")
     
-    def reset_all(self):
-        """Скинути всі лічильники"""
-        self.requests.clear()
-        logger.info("🔄 All rate limits reset")
+    def get_remaining_time(self, user_id: int, api_name: str) -> int:
+        """Отримати час очікування (секунди)"""
+        key = f"{user_id}:{api_name}"
+        now = time.time()
+        
+        if key in self.last_call:
+            elapsed = now - self.last_call[key]
+            if elapsed < self.cooldown:
+                return int(self.cooldown - elapsed)
+        
+        return 0
 
 
-# ============================================================================
-# ГЛОБАЛЬНІ INSTANCES
-# ============================================================================
-
-# Для AI запитів (суворий ліміт)
-ai_rate_limiter = RateLimiter(
-    max_requests=5,      # 5 запитів
-    time_window=60       # за 60 секунд
-)
-
-# Для адмін-операцій (м'якший ліміт)
-admin_rate_limiter = RateLimiter(
-    max_requests=50,     # 50 запитів
-    time_window=60       # за 60 секунд
-)
-
-# Для замовлень (середній ліміт)
-order_rate_limiter = RateLimiter(
-    max_requests=10,     # 10 замовлень
-    time_window=3600     # за годину
-)
+# Глобальні екземпляри для різних API
+gemini_limiter = RateLimiter(cooldown=60)   # 1 хвилина для AI
+sheets_limiter = RateLimiter(cooldown=30)   # 30 секунд для Sheets
+general_limiter = RateLimiter(cooldown=10)  # 10 секунд для загальних запитів

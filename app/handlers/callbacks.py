@@ -499,4 +499,5 @@ def register_callback_handlers(application):
         
     except Exception as e:
         logger.error(f"❌ Failed to register callback handlers: {e}", exc_info=True)
-        raise.
+        # Не кидаємо exception, щоб бот продовжив працювати
+        pass

@@ -461,11 +461,27 @@ def process_webhook(req):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
+                # Створюємо новий HTTP client для цього loop
+                from telegram.request import HTTPXRequest
+                request = HTTPXRequest(
+                    connection_pool_size=8,
+                    pool_timeout=30.0,
+                    connect_timeout=20.0,
+                    read_timeout=20.0,
+                    write_timeout=20.0
+                )
+                
+                # Тимчасово замінюємо request
+                original_request = bot_application.bot._request
+                bot_application.bot._request = request
+                
                 try:
                     # Обробляємо update
                     loop.run_until_complete(bot_application.process_update(update))
                     logger.info("✅ Update processed successfully")
                 finally:
+                    # Відновлюємо оригінальний request
+                    bot_application.bot._request = original_request
                     # Закриваємо loop після обробки
                     loop.close()
             except Exception as e:
@@ -552,8 +568,7 @@ def cron_cleanup():
     Endpoint для cronjob очищення старих замовлень
     Викликається щоденно через GitHub Actions або cron-job.org
     """
-    
-    # Перевірка секрету
+     Перевірка секрету
     secret = request.headers.get('X-Cron-Secret')
     if secret != config.CRON_SECRET:
         logger.warning("⚠️ Unauthorized cron attempt")

@@ -565,10 +565,11 @@ def delete_webhook_route():
 @app.route('/cron/cleanup', methods=['POST'])
 def cron_cleanup():
     """
-    Endpoint для cronjob очищення старих замовлень
-    Викликається щоденно через GitHub Actions або cron-job.org
+    Endpoint for cronjob cleanup of old orders
+    Called daily via GitHub Actions or cron-job.org
     """
-     Перевірка секрету
+    
+    # Check secret
     secret = request.headers.get('X-Cron-Secret')
     if secret != config.CRON_SECRET:
         logger.warning("⚠️ Unauthorized cron attempt")
@@ -577,7 +578,7 @@ def cron_cleanup():
     try:
         sheets_service = bot_application.bot_data.get('sheets_service')
         if sheets_service:
-            # TODO: Реалізувати cleanup_old_orders
+            # TODO: Implement cleanup_old_orders
             logger.info("✅ Cleanup job triggered")
             return jsonify({"ok": True, "message": "Cleanup completed"}), 200
         else:

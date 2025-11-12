@@ -455,34 +455,20 @@ def process_webhook(req):
         # щоб не блокувати Flask і не закривати event loop передчасно
         
         def process_update_sync():
-            """Обробка update в окремому потоці"""
+            """Process update in separate thread"""
             try:
-                # Створюємо новий event loop для цього thread
+                # Create new event loop for this thread
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-                # Створюємо новий HTTP client для цього loop
-                from telegram.request import HTTPXRequest
-                request = HTTPXRequest(
-                    connection_pool_size=8,
-                    pool_timeout=30.0,
-                    connect_timeout=20.0,
-                    read_timeout=20.0,
-                    write_timeout=20.0
-                )
-                
-                # Тимчасово замінюємо request
-                original_request = bot_application.bot._request
-                bot_application.bot._request = request
-                
                 try:
-                    # Обробляємо update
+                    # Process update
                     loop.run_until_complete(bot_application.process_update(update))
                     logger.info("✅ Update processed successfully")
+                except Exception as e:
+                    logger.error(f"❌ Error processing update: {e}", exc_info=True)
                 finally:
-                    # Відновлюємо оригінальний request
-                    bot_application.bot._request = original_request
-                    # Закриваємо loop після обробки
+                    # Close loop after processing
                     loop.close()
             except Exception as e:
                 logger.error(f"❌ Error in thread: {e}", exc_info=True)

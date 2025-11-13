@@ -1,13 +1,13 @@
 # Core Telegram Bot
 python-telegram-bot==20.0
 
-# Web Framework
-Flask==3.0.0
-gunicorn==21.0.0
-gevent==24.2.1
+# Web Framework - ASGI instead of WSGI
+asgiref==3.7.2
+uvicorn==0.24.0
 
 # Async Support
 aiohttp==3.9.0
+httpx==0.25.0
 
 # Google Sheets Integration
 gspread==5.12.0

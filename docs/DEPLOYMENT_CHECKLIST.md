@@ -517,3 +517,266 @@ Dashboard → Your Service → Logs
 **Успішного запуску! 🚀🍕**
 
 Якщо все працює - ви маєте повнофункціональну платформу доставки їжі!
+
+# 🚀 Deployment Checklist - FerrikBot v3.2
+
+## ✅ Перед Deploy
+
+### 1. Файли готові
+```
+☐ requirements.txt (з gevent==24.2.1)
+☐ main.py (з monkey.patch_all())
+☐ render.yaml (з --worker-class gevent)
+☐ gunicorn_config.py (опціонально)
+☐ app/utils/cart_manager.py (оновлений)
+☐ app/utils/warm_greetings.py (оновлений)
+☐ .gitignore
+☐ README.md
+```
+
+### 2. Git готовий
+```bash
+☐ git add .
+☐ git commit -m "fix: gevent worker + missing functions"
+☐ git push origin main
+```
+
+---
+
+## 🔧 На Render Dashboard
+
+### 1. Environment Variables
+
+**ОБОВ'ЯЗКОВІ (вже налаштовані):**
+```
+✓ TELEGRAM_BOT_TOKEN = 8245370711:AAHbSRd0K...
+✓ WEBHOOK_URL = https://ferrik-bot-zvev.onrender.com
+```
+
+**ОПЦІОНАЛЬНІ (додати пізніше):**
+```
+☐ GOOGLE_SHEETS_ID
+☐ GOOGLE_SHEETS_CREDENTIALS
+☐ REDIS_URL
+☐ GEMINI_API_KEY
+```
+
+### 2. Start Command (ВАЖЛИВО!)
+
+**Перевірити що Start Command:**
+```bash
+gunicorn --worker-class gevent --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:5000 main:app
+```
+
+**Якщо використовуєш gunicorn_config.py:**
+```bash
+gunicorn -c gunicorn_config.py main:app
+```
+
+### 3. Deploy
+
+```
+☐ Manual Deploy → Deploy latest commit
+☐ Чекати "Your service is live 🎉"
+```
+
+---
+
+## 🔍 Після Deploy - Перевірки
+
+### 1. Перевірити логи
+
+**Шукати:**
+```
+✓ [INFO] Using worker: gevent  ← MUST SEE THIS!
+✓ 🍕 FERRIKBOT v3.2 STARTING
+✓ ✅ All handlers registered
+✓ ✅ Bot initialized successfully
+✓ ✅ BOT READY!
+```
+
+**НЕ має бути:**
+```
+✗ Using worker: sync  ← BAD!
+✗ RuntimeError: bound to different event loop
+✗ ModuleNotFoundError: No module named 'gevent'
+```
+
+### 2. Health check
+
+```bash
+curl https://ferrik-bot-zvev.onrender.com/health
+```
+
+**Очікувана відповідь:**
+```json
+{
+  "status": "healthy",
+  "bot_ready": true,
+  "event_loop_running": true,
+  "version": "3.2"
+}
+```
+
+### 3. Встановити webhook
+
+```bash
+curl https://ferrik-bot-zvev.onrender.com/set_webhook
+```
+
+**Очікувана відповідь:**
+```json
+{
+  "ok": true,
+  "webhook_url": "https://ferrik-bot-zvev.onrender.com/webhook",
+  "message": "Webhook set successfully"
+}
+```
+
+### 4. Перевірити webhook
+
+```bash
+curl https://ferrik-bot-zvev.onrender.com/webhook_info
+```
+
+**Очікувана відповідь:**
+```json
+{
+  "ok": true,
+  "url": "https://ferrik-bot-zvev.onrender.com/webhook",
+  "pending_update_count": 0,
+  "last_error_message": null
+}
+```
+
+---
+
+## 🤖 Тестування бота
+
+### 1. Базові команди
+
+```
+☐ Відкрити бота в Telegram
+☐ /start → має прийти привітання
+☐ /menu → має показати меню
+☐ /cart → має показати порожній кошик
+☐ /help → має показати команди
+```
+
+### 2. Додати товар
+
+```
+☐ /menu → Вибрати категорію
+☐ Натиснути "Додати в кошик"
+☐ Перевірити що товар додано
+☐ /cart → має показати товар
+```
+
+### 3. Очистити кошик
+
+```
+☐ В кошику натиснути "Очистити"
+☐ Перевірити що кошик порожній
+```
+
+---
+
+## ❌ Troubleshooting
+
+### Проблема: Worker sync замість gevent
+
+**Симптоми:**
+```
+[INFO] Using worker: sync
+RuntimeError: bound to different event loop
+```
+
+**Рішення:**
+1. Перевірити requirements.txt містить `gevent==24.2.1`
+2. Оновити Start Command на Render
+3. Clear build cache (Settings → Clear cache)
+4. Redeploy
+
+---
+
+### Проблема: ModuleNotFoundError: gevent
+
+**Симптоми:**
+```
+ModuleNotFoundError: No module named 'gevent'
+```
+
+**Рішення:**
+1. Додати `gevent==24.2.1` в requirements.txt
+2. Git push
+3. Redeploy
+
+---
+
+### Проблема: Бот не відповідає
+
+**Симптоми:**
+- Команди надсилаються, але відповіді немає
+
+**Рішення:**
+1. Перевірити webhook:
+   ```bash
+   curl https://ferrik-bot-zvev.onrender.com/webhook_info
+   ```
+
+2. Якщо URL порожній або неправильний:
+   ```bash
+   curl https://ferrik-bot-zvev.onrender.com/delete_webhook
+   curl https://ferrik-bot-zvev.onrender.com/set_webhook
+   ```
+
+3. Перевірити логи на помилки
+
+---
+
+### Проблема: Import errors
+
+**Симптоми:**
+```
+ImportError: cannot import name 'is_cart_empty'
+ImportError: cannot import name 'get_user_stats'
+```
+
+**Рішення:**
+1. Перевірити що файли оновлено:
+   - app/utils/cart_manager.py
+   - app/utils/warm_greetings.py
+2. Git push + Redeploy
+
+---
+
+## 📊 Метрики успіху
+
+**Все працює якщо:**
+```
+✓ Логи показують "Using worker: gevent"
+✓ Логи показують "BOT READY"
+✓ Health check повертає "healthy"
+✓ Webhook info показує правильний URL
+✓ /start команда працює
+✓ Бот відповідає на повідомлення
+✓ Кнопки працюють
+✓ Кошик зберігається
+```
+
+---
+
+## 🎉 Готово!
+
+Коли всі чекбокси ✓ - бот готовий до використання!
+
+**Наступні кроки:**
+1. Налаштувати Google Sheets (30 хв)
+2. Налаштувати Redis (15 хв)
+3. Запросити друзів тестувати
+4. Збирати фідбек
+
+---
+
+**Версія чеклиста:** 1.0  
+**Дата:** 13.11.2025

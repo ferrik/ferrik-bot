@@ -1,1 +1,46 @@
+"""
+Utilities package
+FerrikBot v3.2
+"""
 
+from app.utils.cart_manager import (
+    cart_manager,
+    get_user_cart,
+    add_to_cart,
+    remove_from_cart,
+    clear_user_cart,
+    is_cart_empty,
+    get_cart_item_count,
+    get_cart_total,
+    get_cart_summary,
+    format_cart_message
+)
+
+from app.utils.warm_greetings import (
+    get_user_stats,
+    update_user_stats,
+    get_greeting_for_user,
+    get_surprise_message,
+    get_loyalty_tier,
+    format_user_profile
+)
+
+
+__all__ = [
+    'cart_manager',
+    'get_user_cart',
+    'add_to_cart',
+    'remove_from_cart',
+    'clear_user_cart',
+    'is_cart_empty',
+    'get_cart_item_count',
+    'get_cart_total',
+    'get_cart_summary',
+    'format_cart_message',
+    'get_user_stats',
+    'update_user_stats',
+    'get_greeting_for_user',
+    'get_surprise_message',
+    'get_loyalty_tier',
+    'format_user_profile'
+]

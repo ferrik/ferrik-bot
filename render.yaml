@@ -1,33 +1,43 @@
 services:
   - type: web
     name: ferrik-bot
-    env: python
+    runtime: python
     region: frankfurt
     plan: free
     branch: main
+    
+    # Build command
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn main:app
+    
+    # CRITICAL: Use gevent worker for async support
+    startCommand: gunicorn --worker-class gevent --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:5000 main:app
+    
+    # Environment variables
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.12.0
+      
+      # Telegram (REQUIRED)
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GOOGLE_SHEETS_CREDENTIALS
-        sync: false
+      
+      - key: WEBHOOK_URL
+        value: https://ferrik-bot-zvev.onrender.com
+      
+      # Google Sheets (Optional but recommended)
       - key: GOOGLE_SHEETS_ID
         sync: false
-      - key: WEBHOOK_URL
+      
+      - key: GOOGLE_SHEETS_CREDENTIALS
         sync: false
-      - key: ADMIN_IDS
+      
+      # Redis (Optional)
+      - key: REDIS_URL
         sync: false
-      - key: DEBUG
-        value: False
-      - key: ENVIRONMENT
-        value: production
-      - key: LOG_LEVEL
-        value: INFO
-      - key: PORT
-        value: 5000
+      
+      # AI (Optional)
+      - key: GEMINI_API_KEY
+        sync: false
+    
+    # Health check
     healthCheckPath: /health

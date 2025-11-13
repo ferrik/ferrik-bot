@@ -1,181 +1,76 @@
 """
-🍕 FERRIKBOT - Command Handlers
-Обробка всіх команд (/start, /menu, /cart тощо)
+Command Handlers - Handle bot commands
+FerrikBot v3.2
 """
 
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CommandHandler
+from telegram.ext import ContextTypes
+
+# Import utilities
+from app.utils.cart_manager import (
+    get_cart_summary,
+    format_cart_message,
+    clear_user_cart,
+    is_cart_empty
+)
+from app.utils.warm_greetings import (
+    get_greeting_for_user,
+    get_surprise_message,
+    format_user_profile
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# КОМАНДА /start
-# ============================================================================
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Команда /start з GDPR перевіркою та warm greetings
-    """
-    user = update.effective_user
+    Handle /start command - Welcome message
     
-    logger.info(f"👤 User {user.id} (@{user.username}) started bot")
-    
-    # 🔐 GDPR: Перевірка згоди
-    try:
-        from app.handlers.gdpr import has_consented, show_gdpr_consent
-        
-        if not has_consented(user.id):
-            logger.info(f"📋 Showing GDPR consent to user {user.id}")
-            await show_gdpr_consent(update, context)
-            return
-    except ImportError:
-        logger.warning("⚠️ GDPR module not available")
-    
-    # Отримати статистику користувача (якщо є)
-    try:
-        from app.utils.warm_greetings import get_user_stats
-        stats = get_user_stats(user.id)
-        order_count = stats.get('order_count', 0)
-    except ImportError:
-        order_count = 0
-    
-    logger.info(f"📨 Greeting type: order_count={order_count}")
-    
-    # Персоналізоване привітання
-    if order_count == 0:
-        # Новий користувач
-        greeting = (
-            f"👋 Привіт, {user.first_name}!\n\n"
-            f"Я *FerrikBot* — твій особистий помічник для замовлення їжі.\n\n"
-            f"🍕 Швидко\n"
-            f"🚚 Зручно\n"
-            f"😋 Смачно\n\n"
-            f"Що хочеш замовити сьогодні?"
-        )
-    elif order_count < 3:
-        # Постійний клієнт
-        greeting = (
-            f"👋 З поверненням, {user.first_name}!\n\n"
-            f"Рада знову тебе бачити! 🎉\n"
-            f"Твоє замовлення #{order_count + 1} буде особливим!\n\n"
-            f"Що обираєш цього разу?"
-        )
-    else:
-        # VIP клієнт
-        greeting = (
-            f"⭐ Вітаю, {user.first_name}!\n\n"
-            f"Ти наш VIP клієнт! 🌟\n"
-            f"Вже {order_count} замовлень — дякуємо за довіру!\n\n"
-            f"Маємо спеціальну пропозицію для тебе..."
-        )
-    
-    # Клавіатура з кнопками
-    keyboard = [
-        [
-            InlineKeyboardButton("📋 Меню", callback_data="v2_show_menu"),
-            InlineKeyboardButton("🛒 Кошик", callback_data="view_cart")
-        ],
-        [
-            InlineKeyboardButton("🎲 Здивуй мене!", callback_data="surprise_me"),
-            InlineKeyboardButton("🎁 Акції", callback_data="v2_special_offer")
-        ],
-        [
-            InlineKeyboardButton("❓ Допомога", callback_data="show_help")
-        ]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        greeting,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-    
-    logger.info(f"✅ Welcome message sent to {user.id}")
-
-
-# ============================================================================
-# КОМАНДА /menu
-# ============================================================================
-
-async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Показати меню (старе)
-    Перенаправляє на /menu_v2
+    Args:
+        update: Telegram update
+        context: Bot context
     """
     user = update.effective_user
-    logger.info(f"📋 Menu command від {user.id}")
+    user_id = user.id
+    username = user.username
+    first_name = user.first_name
     
-    keyboard = [
-        [InlineKeyboardButton("📋 Відкрити меню", callback_data="v2_show_menu")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "📋 *Меню FerrikBot*\n\n"
-        "Натисніть кнопку нижче, щоб переглянути наше меню:",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-
-# ============================================================================
-# КОМАНДА /cart
-# ============================================================================
-
-async def cart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати кошик користувача"""
-    user = update.effective_user
-    logger.info(f"🛒 Cart command від {user.id}")
+    logger.info(f"👤 /start from {username or first_name} (ID: {user_id})")
     
     try:
-        from app.utils.cart_manager import get_user_cart, get_cart_total
+        # Get personalized greeting
+        greeting = get_greeting_for_user(user_id, username, first_name)
         
-        cart = get_user_cart(user.id)
+        # Check for surprise message
+        surprise = get_surprise_message(user_id)
         
-        if not cart:
-            keyboard = [
-                [InlineKeyboardButton("📋 Переглянути меню", callback_data="v2_show_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "🛒 *Ваш кошик порожній*\n\n"
-                "Додайте щось смачненьке через меню! 😋",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            return
+        # Build message
+        message = greeting + "\n\n"
         
-        # Формуємо текст кошика
-        items_text = "\n".join([
-            f"{i+1}. {item.get('name', 'Товар')} x{item.get('quantity', 1)} = {item.get('price', 0) * item.get('quantity', 1)} грн"
-            for i, item in enumerate(cart)
-        ])
+        if surprise:
+            message += f"{surprise}\n\n"
         
-        total = get_cart_total(user.id)
-        delivery_cost = 50
-        final_total = total + delivery_cost
-        
-        message = (
-            f"🛒 *Ваш кошик:*\n\n"
-            f"{items_text}\n\n"
-            f"💰 Сума: {total} грн\n"
-            f"🚚 Доставка: {delivery_cost} грн\n"
-            f"*Разом: {final_total} грн*"
+        message += (
+            "🍕 <b>FerrikBot</b> - твій помічник у замовленні їжі\n\n"
+            "📋 <b>Доступні команди:</b>\n"
+            "▪️ /menu - Переглянути меню\n"
+            "▪️ /cart - Кошик\n"
+            "▪️ /order - Оформити замовлення\n"
+            "▪️ /profile - Мій профіль\n"
+            "▪️ /help - Допомога\n\n"
+            "Обирай команду або просто напиши що хочеш замовити! 😊"
         )
         
+        # Create keyboard
         keyboard = [
             [
-                InlineKeyboardButton("✅ Оформити", callback_data="checkout_start"),
-                InlineKeyboardButton("🗑️ Очистити", callback_data="cart_clear")
+                InlineKeyboardButton("🍕 Меню", callback_data="menu"),
+                InlineKeyboardButton("🛒 Кошик", callback_data="cart")
             ],
             [
-                InlineKeyboardButton("📋 Додати ще", callback_data="v2_show_menu")
+                InlineKeyboardButton("👤 Профіль", callback_data="profile"),
+                InlineKeyboardButton("❓ Допомога", callback_data="help")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -183,256 +78,302 @@ async def cart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             message,
             reply_markup=reply_markup,
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
         
-    except ImportError:
-        await update.message.reply_text(
-            "❌ Кошик тимчасово недоступний. Спробуйте пізніше."
-        )
     except Exception as e:
-        logger.error(f"❌ Cart error: {e}", exc_info=True)
+        logger.error(f"❌ Error in /start: {e}", exc_info=True)
         await update.message.reply_text(
-            "❌ Помилка при завантаженні кошика."
+            "⚠️ Виникла помилка. Спробуйте ще раз або напишіть /help"
         )
 
 
-# ============================================================================
-# КОМАНДА /order
-# ============================================================================
-
-async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Швидке оформлення замовлення"""
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle /menu command - Show menu
+    
+    Args:
+        update: Telegram update
+        context: Bot context
+    """
     user = update.effective_user
-    logger.info(f"📦 Order command від {user.id}")
+    logger.info(f"👤 /menu from {user.username or user.first_name}")
     
     try:
-        from app.utils.cart_manager import get_user_cart
+        # TODO: Load menu from Google Sheets
+        # For now, show sample menu
         
-        cart = get_user_cart(user.id)
+        message = (
+            "🍕 <b>Меню FerrikBot</b>\n\n"
+            "<b>🍕 Піца:</b>\n"
+            "▪️ Маргарита - 180 грн\n"
+            "▪️ Пепероні - 200 грн\n"
+            "▪️ 4 Сири - 220 грн\n"
+            "▪️ М'ясна - 240 грн\n\n"
+            "<b>🍔 Бургери:</b>\n"
+            "▪️ Класичний - 150 грн\n"
+            "▪️ Чізбургер - 170 грн\n"
+            "▪️ Бекон бургер - 190 грн\n\n"
+            "<b>🍟 Закуски:</b>\n"
+            "▪️ Картопля фрі - 60 грн\n"
+            "▪️ Нагетси - 80 грн\n"
+            "▪️ Крильця - 120 грн\n\n"
+            "<b>🥤 Напої:</b>\n"
+            "▪️ Coca-Cola - 40 грн\n"
+            "▪️ Sprite - 40 грн\n"
+            "▪️ Сік - 50 грн\n\n"
+            "Для замовлення натисни на кнопку нижче або напиши назву страви!"
+        )
         
-        if not cart:
+        # Create keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("🍕 Піца", callback_data="category_pizza"),
+                InlineKeyboardButton("🍔 Бургери", callback_data="category_burgers")
+            ],
+            [
+                InlineKeyboardButton("🍟 Закуски", callback_data="category_snacks"),
+                InlineKeyboardButton("🥤 Напої", callback_data="category_drinks")
+            ],
+            [
+                InlineKeyboardButton("🛒 Кошик", callback_data="cart"),
+                InlineKeyboardButton("◀️ Назад", callback_data="start")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in /menu: {e}", exc_info=True)
+        await update.message.reply_text(
+            "⚠️ Не вдалося завантажити меню. Спробуйте ще раз."
+        )
+
+
+async def cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle /cart command - Show shopping cart
+    
+    Args:
+        update: Telegram update
+        context: Bot context
+    """
+    user = update.effective_user
+    user_id = user.id
+    logger.info(f"👤 /cart from {user.username or user.first_name}")
+    
+    try:
+        # Get cart summary
+        summary = get_cart_summary(user_id)
+        
+        if summary['is_empty']:
+            message = (
+                "🛒 <b>Ваш кошик порожній</b>\n\n"
+                "Використайте /menu щоб додати товари 🍕"
+            )
+            keyboard = [
+                [InlineKeyboardButton("🍕 Меню", callback_data="menu")]
+            ]
+        else:
+            # Format cart message
+            message = format_cart_message(user_id)
+            
+            # Create keyboard
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Оформити замовлення", callback_data="checkout"),
+                ],
+                [
+                    InlineKeyboardButton("🍕 Додати ще", callback_data="menu"),
+                    InlineKeyboardButton("🗑️ Очистити", callback_data="cart_clear")
+                ]
+            ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in /cart: {e}", exc_info=True)
+        await update.message.reply_text(
+            "⚠️ Не вдалося відкрити кошик. Спробуйте ще раз."
+        )
+
+
+async def order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle /order command - Start checkout process
+    
+    Args:
+        update: Telegram update
+        context: Bot context
+    """
+    user = update.effective_user
+    user_id = user.id
+    logger.info(f"👤 /order from {user.username or user.first_name}")
+    
+    try:
+        # Check if cart is empty
+        if is_cart_empty(user_id):
             await update.message.reply_text(
-                "❌ Кошик порожній!\n\n"
-                "Спершу додайте товари через /menu"
+                "⚠️ Ваш кошик порожній!\n\n"
+                "Додайте товари через /menu перед оформленням замовлення.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍕 Меню", callback_data="menu")]
+                ])
             )
             return
         
-        # Перенаправити на checkout
-        from app.utils.session import update_user_session
-        update_user_session(user.id, {'state': 'awaiting_phone'})
+        # Get cart summary
+        summary = get_cart_summary(user_id)
         
-        await update.message.reply_text(
-            "📦 *Оформлення замовлення*\n\n"
-            "Крок 1/3: Введіть ваш номер телефону\n\n"
-            "Формат:\n"
-            "• +380501234567\n"
-            "• 0501234567",
-            parse_mode='Markdown'
+        message = (
+            "📦 <b>Оформлення замовлення</b>\n\n"
+            f"{format_cart_message(user_id)}\n\n"
+            "Для оформлення замовлення:\n"
+            "1️⃣ Натисни кнопку 'Продовжити'\n"
+            "2️⃣ Введи свій номер телефону\n"
+            "3️⃣ Введи адресу доставки\n"
+            "4️⃣ Підтверди замовлення\n\n"
+            "💳 Оплата при отриманні"
         )
         
-    except ImportError:
-        await update.message.reply_text(
-            "❌ Функція тимчасово недоступна."
-        )
-    except Exception as e:
-        logger.error(f"❌ Order error: {e}")
-        await update.message.reply_text(
-            "❌ Помилка при оформленні."
-        )
-
-
-# ============================================================================
-# КОМАНДА /help
-# ============================================================================
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати довідку"""
-    user = update.effective_user
-    logger.info(f"❓ Help command від {user.id}")
-    
-    help_text = (
-        "❓ *Довідка FerrikBot*\n\n"
-        "*Основні команди:*\n"
-        "/start - Головне меню\n"
-        "/menu - Переглянути меню\n"
-        "/cart - Мій кошик\n"
-        "/order - Оформити замовлення\n"
-        "/help - Ця довідка\n\n"
-        "*GDPR команди:*\n"
-        "/delete_data - Видалити всі дані\n"
-        "/export_data - Експортувати дані\n\n"
-        "*Як замовити:*\n"
-        "1️⃣ Відкрийте меню через /menu\n"
-        "2️⃣ Оберіть страви (натисніть на кнопки)\n"
-        "3️⃣ Перевірте кошик через /cart\n"
-        "4️⃣ Оформіть замовлення\n"
-        "5️⃣ Вкажіть телефон та адресу\n"
-        "6️⃣ Підтвердіть замовлення\n\n"
-        "*Час доставки:* 30-45 хвилин\n"
-        "*Мінімальне замовлення:* 100 грн\n"
-        "*Вартість доставки:* 50 грн\n\n"
-        "*Питання?* Напишіть /support"
-    )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("📋 Меню", callback_data="v2_show_menu"),
-            InlineKeyboardButton("🛒 Кошик", callback_data="view_cart")
-        ],
-        [
-            InlineKeyboardButton("🔙 На головну", callback_data="back_to_start")
+        keyboard = [
+            [InlineKeyboardButton("✅ Продовжити", callback_data="order_phone")],
+            [InlineKeyboardButton("◀️ Назад до кошика", callback_data="cart")]
         ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        help_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in /order: {e}", exc_info=True)
+        await update.message.reply_text(
+            "⚠️ Не вдалося оформити замовлення. Спробуйте ще раз."
+        )
 
 
-# ============================================================================
-# КОМАНДА /support
-# ============================================================================
-
-async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Підтримка користувачів"""
-    user = update.effective_user
-    logger.info(f"💬 Support command від {user.id}")
-    
-    support_text = (
-        "💬 *Підтримка FerrikBot*\n\n"
-        "Є питання або проблема? Ми допоможемо!\n\n"
-        "*Зв'язок з нами:*\n"
-        "📧 Email: support@ferrikbot.com\n"
-        "📱 Telegram: @ferrikbot_support\n\n"
-        "*Часті питання:*\n"
-        "• Як змінити адресу доставки?\n"
-        "• Як використати промокод?\n"
-        "• Як відмінити замовлення?\n"
-        "• Як оплатити онлайн?\n\n"
-        "Відповіді: https://ferrikbot.com/faq"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("📄 FAQ", url="https://ferrikbot.com/faq")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="show_help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        support_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-
-# ============================================================================
-# КОМАНДА /orders (Історія замовлень)
-# ============================================================================
-
-async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати історію замовлень"""
-    user = update.effective_user
-    logger.info(f"📦 Orders history від {user.id}")
-    
-    # TODO: Реалізувати отримання з Google Sheets
-    await update.message.reply_text(
-        "📦 *Історія замовлень*\n\n"
-        "Функція в розробці. Скоро буде доступна!\n\n"
-        "Ви зможете:\n"
-        "• Переглядати історію замовлень\n"
-        "• Повторювати попередні замовлення\n"
-        "• Відстежувати статус доставки",
-        parse_mode='Markdown'
-    )
-
-
-# ============================================================================
-# КОМАНДА /promo (Промокоди)
-# ============================================================================
-
-async def promo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показати активні промокоди"""
-    user = update.effective_user
-    logger.info(f"🎁 Promo command від {user.id}")
-    
-    promo_text = (
-        "🎁 *Активні промокоди*\n\n"
-        "Введіть промокод при оформленні замовлення:\n\n"
-        "🔥 *FIRST* - 20% на перше замовлення\n"
-        "🍕 *PIZZA15* - 15% на піцу\n"
-        "🎉 *WEEKEND* - 10% у вихідні\n\n"
-        "💡 Промокод можна ввести на етапі оформлення замовлення."
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("📋 Замовити зі знижкою", callback_data="v2_show_menu")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        promo_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-
-# ============================================================================
-# КОМАНДА /cancel (Скасування дії)
-# ============================================================================
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скасувати поточну дію"""
-    user = update.effective_user
-    logger.info(f"❌ Cancel command від {user.id}")
-    
-    try:
-        from app.utils.session import update_user_session
-        update_user_session(user.id, {'state': 'idle'})
-    except ImportError:
-        pass
-    
-    keyboard = [
-        [InlineKeyboardButton("🏠 На головну", callback_data="back_to_start")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "❌ *Скасовано*\n\n"
-        "Поточну дію скасовано. Що бажаєте зробити?",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-
-# ============================================================================
-# РЕЄСТРАЦІЯ КОМАНД
-# ============================================================================
-
-def register_command_handlers(application):
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Реєстрація всіх command handlers
+    Handle /profile command - Show user profile
     
     Args:
-        application: Telegram Application instance
+        update: Telegram update
+        context: Bot context
     """
-    logger.info("📝 Registering command handlers...")
+    user = update.effective_user
+    user_id = user.id
+    username = user.username
+    logger.info(f"👤 /profile from {username or user.first_name}")
     
-    # Основні команди
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("menu", menu_command))
-    application.add_handler(CommandHandler("cart", cart_command))
-    application.add_handler(CommandHandler("order", order_command))
-    application.add_handler(CommandHandler("help", help_command))
+    try:
+        # Format profile
+        message = format_user_profile(user_id, username)
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🛒 Кошик", callback_data="cart"),
+                InlineKeyboardButton("🍕 Меню", callback_data="menu")
+            ],
+            [
+                InlineKeyboardButton("◀️ Назад", callback_data="start")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in /profile: {e}", exc_info=True)
+        await update.message.reply_text(
+            "⚠️ Не вдалося завантажити профіль. Спробуйте ще раз."
+        )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle /help command - Show help message
     
-    # Додаткові команди
-    application.add_handler(CommandHandler("support", support_command))
-    application.add_handler(CommandHandler("orders", orders_command))
-    application.add_handler(CommandHandler("promo", promo_command))
-    application.add_handler(CommandHandler("cancel", cancel_command))
+    Args:
+        update: Telegram update
+        context: Bot context
+    """
+    user = update.effective_user
+    logger.info(f"👤 /help from {user.username or user.first_name}")
     
-    logger.info("✅ Command handlers registered")
+    try:
+        message = (
+            "❓ <b>Допомога FerrikBot</b>\n\n"
+            "<b>📋 Команди:</b>\n"
+            "▪️ /start - Головне меню\n"
+            "▪️ /menu - Переглянути меню\n"
+            "▪️ /cart - Відкрити кошик\n"
+            "▪️ /order - Оформити замовлення\n"
+            "▪️ /profile - Мій профіль\n"
+            "▪️ /help - Ця довідка\n\n"
+            "<b>🎯 Як замовити:</b>\n"
+            "1. Відкрий /menu\n"
+            "2. Вибери страви\n"
+            "3. Перевір /cart\n"
+            "4. Оформи /order\n\n"
+            "<b>💎 Система лояльності:</b>\n"
+            "▪️ Bronze (0-4 замовлення) - 5% знижка\n"
+            "▪️ Silver (5-9 замовлень) - 15% знижка\n"
+            "▪️ Gold (10-24 замовлення) - 20% знижка\n"
+            "▪️ Platinum (25-49 замовлень) - 25% знижка\n"
+            "▪️ Diamond (50+ замовлень) - 30% знижка\n\n"
+            "<b>📞 Підтримка:</b>\n"
+            "Є питання? Напиши нам: @support\n\n"
+            "🍕 Смачного!"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🍕 Меню", callback_data="menu"),
+                InlineKeyboardButton("🛒 Кошик", callback_data="cart")
+            ],
+            [
+                InlineKeyboardButton("◀️ Назад", callback_data="start")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in /help: {e}", exc_info=True)
+        await update.message.reply_text(
+            "⚠️ Не вдалося завантажити довідку."
+        )
+
+
+# Export all command handlers
+__all__ = [
+    'start',
+    'menu',
+    'cart',
+    'order',
+    'profile',
+    'help_command'
+]

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-FerrikBot v3.2 - Main Entry Point
-Fixed with gevent worker for stable async processing
+FerrikBot v3.2 - Fixed gevent + asyncio compatibility
 """
 
 import os
@@ -20,9 +19,23 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-# CRITICAL: Monkey patch for gevent compatibility
+# CRITICAL: Gevent monkey patch FIRST
 from gevent import monkey
 monkey.patch_all()
+
+# CRITICAL: Fix sniffio for gevent compatibility
+import sniffio
+_original_current_async_library = sniffio.current_async_library
+
+def patched_current_async_library():
+    """Patched sniffio to work with gevent"""
+    try:
+        return _original_current_async_library()
+    except sniffio.AsyncLibraryNotFoundError:
+        # Return 'asyncio' when in gevent context
+        return 'asyncio'
+
+sniffio.current_async_library = patched_current_async_library
 
 # Configure logging
 logging.basicConfig(
@@ -49,15 +62,20 @@ bot_ready = False
 
 def create_application():
     """Create and configure bot application"""
+    logger.info("📦 Importing handlers...")
+    
     try:
         from app.handlers.commands import start, menu, cart, order, help_command
-        from app.handlers.callbacks import button_callback
-        from app.handlers.messages import handle_text_message
+        logger.info("✅ Commands imported")
         
-        logger.info("📦 Importing handlers...")
+        from app.handlers.callbacks import button_callback
+        logger.info("✅ Callbacks imported")
+        
+        from app.handlers.messages import handle_text_message
+        logger.info("✅ Messages imported")
         
     except ImportError as e:
-        logger.error(f"❌ Failed to import handlers: {e}")
+        logger.error(f"❌ Failed to import handlers: {e}", exc_info=True)
         raise
     
     # Configure request with connection pool
@@ -340,6 +358,8 @@ def internal_error(error):
 
 
 # Initialize bot on module load
+logger.info("🔧 Patching sniffio for gevent compatibility...")
+
 try:
     init_bot()
 except Exception as e:

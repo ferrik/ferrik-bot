@@ -1,1 +1,6 @@
-"""FerrikFoot Bot v2.1"""
+"""
+FerrikBot Application Package
+Version 3.2
+"""
+
+__version__ = '3.2.0'

@@ -6,38 +6,31 @@ services:
     plan: free
     branch: main
     
-    # Build command
     buildCommand: pip install -r requirements.txt
     
-    # CRITICAL: Use gevent worker for async support
-    startCommand: gunicorn --worker-class gevent --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:5000 main:app
+    # ASGI server with uvicorn (DO NOT use gunicorn!)
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info
     
-    # Environment variables
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
       
-      # Telegram (REQUIRED)
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       
       - key: WEBHOOK_URL
         value: https://ferrik-bot-zvev.onrender.com
       
-      # Google Sheets (Optional but recommended)
       - key: GOOGLE_SHEETS_ID
         sync: false
       
       - key: GOOGLE_SHEETS_CREDENTIALS
         sync: false
       
-      # Redis (Optional)
       - key: REDIS_URL
         sync: false
       
-      # AI (Optional)
       - key: GEMINI_API_KEY
         sync: false
     
-    # Health check
-    healthCheckPath: /health
+    healthCheckPath: /

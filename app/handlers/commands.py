@@ -17,8 +17,10 @@ from app.utils.cart_manager import (
 from app.utils.warm_greetings import (
     get_greeting_for_user,
     get_surprise_message,
-    format_user_profile
+    format_user_profile,
+    update_user_stats
 )
+from app.services.sheets_service import sheets_service
 
 logger = logging.getLogger(__name__)
 

@@ -574,7 +574,7 @@ async def handle_cart_clear_callback(query, context):
 
 
 async def handle_checkout_callback(query, context):
-    """Handle checkout button"""
+    """Handle checkout button with restaurant validation"""
     user_id = query.from_user.id
     
     if is_cart_empty(user_id):
@@ -584,11 +584,48 @@ async def handle_checkout_callback(query, context):
             pass
         return
     
+    # Get cart and check restaurants
+    summary = get_cart_summary(user_id)
+    restaurants = set()
+    
+    for item in summary['items']:
+        restaurant = item.get('restaurant', '')
+        if restaurant:
+            restaurants.add(restaurant)
+    
+    # If items from different restaurants, show warning
+    if len(restaurants) > 1:
+        message = (
+            "⚠️ <b>Увага!</b>\n\n"
+            "У вашому кошику товари з різних закладів:\n"
+        )
+        for rest in restaurants:
+            message += f"▪️ {rest}\n"
+        
+        message += (
+            "\nДля оформлення замовлення потрібно обрати товари "
+            "тільки з одного закладу.\n\n"
+            "Очистити кошик та почати знову?"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🗑️ Очистити кошик", callback_data="cart_clear")],
+            [InlineKeyboardButton("◀️ Назад до кошика", callback_data="cart")]
+        ]
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        return
+    
+    # Proceed with checkout
     message = (
         "📦 <b>Оформлення замовлення</b>\n\n"
         f"{format_cart_message(user_id)}\n\n"
-        "Для продовження введіть ваш номер телефону у форматі:\n"
-        "<code>+380XXXXXXXXX</code>"
+        "📞 Введіть ваш номер телефону:\n"
+        "<i>Формат: +380XXXXXXXXX</i>"
     )
     
     keyboard = [
@@ -596,4 +633,119 @@ async def handle_checkout_callback(query, context):
     ]
     
     # Set state for phone input
-    context.user_data['awaiting_p
+    context.user_data['awaiting_phone'] = True
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+
+async def handle_order_phone_callback(query, context):
+    """Handle order phone step"""
+    await handle_checkout_callback(query, context)
+
+
+async def handle_confirm_order_callback(query, context):
+    """Handle order confirmation"""
+    user_id = query.from_user.id
+    user = query.from_user
+    
+    # Get order data
+    summary = get_cart_summary(user_id)
+    phone = context.user_data.get('phone', 'Не вказано')
+    address = context.user_data.get('address', 'Не вказано')
+    
+    # Save order to Google Sheets
+    order_saved = False
+    order_id = user_id % 10000  # Fallback order ID
+    
+    if sheets_service.is_connected():
+        try:
+            order_data = {
+                'user_id': user_id,
+                'username': user.username or user.first_name,
+                'items': summary['items'],
+                'total': summary['total'],
+                'address': address,
+                'phone': phone,
+                'payment_method': 'Готівка при отриманні',
+                'delivery_cost': 0 if summary['total'] >= 300 else 50,
+                'delivery_type': 'Доставка',
+                'notes': context.user_data.get('notes', ''),
+                'promo_code': context.user_data.get('promo_code', ''),
+                'discount': context.user_data.get('discount', 0)
+            }
+            
+            order_saved = sheets_service.add_order(order_data)
+            logger.info(f"✅ Order saved to Google Sheets for user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to save order to Sheets: {e}")
+    
+    # Update user stats
+    update_user_stats(user_id, summary['total'])
+    
+    # Clear cart
+    clear_user_cart(user_id)
+    
+    # Clear user data
+    context.user_data.clear()
+    
+    delivery_cost = 0 if summary['total'] >= 300 else 50
+    total_with_delivery = summary['total'] + delivery_cost
+    
+    message = (
+        "✅ <b>Замовлення підтверджено!</b>\n\n"
+        f"📦 Номер замовлення: #{order_id}\n"
+        f"💰 Сума товарів: {summary['total']} грн\n"
+        f"🚚 Доставка: {delivery_cost} грн\n"
+        f"💵 <b>Всього до сплати: {total_with_delivery} грн</b>\n\n"
+        f"📞 Телефон: {phone}\n"
+        f"📍 Адреса: {address}\n\n"
+        "⏱ Очікуваний час доставки: 30-45 хвилин\n"
+        "💳 Оплата: Готівка при отриманні\n\n"
+    )
+    
+    if order_saved:
+        message += "✅ Замовлення збережено в системі\n\n"
+    
+    message += "Дякуємо за замовлення! 🎉"
+    
+    keyboard = [
+        [InlineKeyboardButton("🍕 Замовити ще", callback_data="menu")],
+        [InlineKeyboardButton("◀️ Головна", callback_data="start")]
+    ]
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+
+async def handle_cancel_order_callback(query, context):
+    """Handle order cancellation"""
+    # Clear user data
+    context.user_data.clear()
+    
+    message = (
+        "❌ <b>Замовлення скасовано</b>\n\n"
+        "Товари залишились у кошику."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🛒 Повернутись до кошика", callback_data="cart")],
+        [InlineKeyboardButton("◀️ Головна", callback_data="start")]
+    ]
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+
+# Export
+__all__ = ['button_callback']

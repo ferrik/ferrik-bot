@@ -92,7 +92,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handle /menu command - Show menu
+    Handle /menu command - Show restaurant selection or menu
     
     Args:
         update: Telegram update
@@ -102,47 +102,65 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"👤 /menu from {user.username or user.first_name}")
     
     try:
-        # TODO: Load menu from Google Sheets
-        # For now, show sample menu
+        # Try to load partners/restaurants from Google Sheets
+        partners = []
+        if sheets_service.is_connected():
+            partners = sheets_service.get_partners()
         
-        message = (
-            "🍕 <b>Меню FerrikBot</b>\n\n"
-            "<b>🍕 Піца:</b>\n"
-            "▪️ Маргарита - 180 грн\n"
-            "▪️ Пепероні - 200 грн\n"
-            "▪️ 4 Сири - 220 грн\n"
-            "▪️ М'ясна - 240 грн\n\n"
-            "<b>🍔 Бургери:</b>\n"
-            "▪️ Класичний - 150 грн\n"
-            "▪️ Чізбургер - 170 грн\n"
-            "▪️ Бекон бургер - 190 грн\n\n"
-            "<b>🍟 Закуски:</b>\n"
-            "▪️ Картопля фрі - 60 грн\n"
-            "▪️ Нагетси - 80 грн\n"
-            "▪️ Крильця - 120 грн\n\n"
-            "<b>🥤 Напої:</b>\n"
-            "▪️ Coca-Cola - 40 грн\n"
-            "▪️ Sprite - 40 грн\n"
-            "▪️ Сік - 50 грн\n\n"
-            "Для замовлення натисни на кнопку нижче або напиши назву страви!"
-        )
-        
-        # Create keyboard
-        keyboard = [
-            [
-                InlineKeyboardButton("🍕 Піца", callback_data="category_pizza"),
-                InlineKeyboardButton("🍔 Бургери", callback_data="category_burgers")
-            ],
-            [
-                InlineKeyboardButton("🍟 Закуски", callback_data="category_snacks"),
-                InlineKeyboardButton("🥤 Напої", callback_data="category_drinks")
-            ],
-            [
+        if partners and len(partners) > 1:
+            # Multiple restaurants - show selection
+            message = (
+                "🏪 <b>Оберіть заклад:</b>\n\n"
+                "Ми співпрацюємо з кращими закладами вашого міста!\n"
+                "Оберіть заклад для перегляду меню:"
+            )
+            
+            keyboard = []
+            for partner in partners:
+                partner_name = partner.get('Ім\'я_партнера', 'Заклад')
+                partner_id = partner.get('ID', '')
+                rating = partner.get('Рейтинг', '')
+                
+                button_text = f"🍴 {partner_name}"
+                if rating:
+                    button_text += f" ⭐ {rating}"
+                
+                keyboard.append([
+                    InlineKeyboardButton(
+                        button_text,
+                        callback_data=f"partner_{partner_id}"
+                    )
+                ])
+            
+            keyboard.append([
                 InlineKeyboardButton("🛒 Кошик", callback_data="cart"),
                 InlineKeyboardButton("◀️ Назад", callback_data="start")
+            ])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+        else:
+            # Single restaurant or no data - show categories directly
+            message = (
+                "🍕 <b>Меню FerrikBot</b>\n\n"
+                "Оберіть категорію страв:"
+            )
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("🍕 Піца", callback_data="category_Піца"),
+                    InlineKeyboardButton("🍔 Бургери", callback_data="category_Бургери")
+                ],
+                [
+                    InlineKeyboardButton("🍟 Закуски", callback_data="category_Закуски"),
+                    InlineKeyboardButton("🥤 Напої", callback_data="category_Напої")
+                ],
+                [
+                    InlineKeyboardButton("🛒 Кошик", callback_data="cart"),
+                    InlineKeyboardButton("◀️ Назад", callback_data="start")
+                ]
             ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
             message,
@@ -153,7 +171,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ Error in /menu: {e}", exc_info=True)
         await update.message.reply_text(
-            "⚠️ Не вдалося завантажити меню. Спробуйте ще раз."
+            "⚠️ Не вдалося завантажити меню. Спробуйте ще раз або /help"
         )
 
 

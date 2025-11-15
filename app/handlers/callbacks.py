@@ -98,6 +98,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "cancel_order":
             await handle_cancel_order_callback(query, context)
         
+        elif data == "change_phone":
+            await handle_change_phone_callback(query, context)
+        
+        elif data == "change_address":
+            await handle_change_address_callback(query, context)
+        
         else:
             logger.warning(f"Unknown callback data: {data}")
             await query.edit_message_text("⚠️ Невідома команда. Спробуйте /start")
@@ -569,21 +575,6 @@ async def handle_cart_clear_callback(query, context):
     except:
         pass
     
-    # Show empty cart
-    await handle_cart_callback(query, context)
-
-
-async def handle_checkout_callback(query, context):
-    """Handle checkout button with restaurant validation"""
-    user_id = query.from_user.id
-    
-    if is_cart_empty(user_id):
-        try:
-            await query.answer("⚠️ Кошик порожній!", show_alert=True)
-        except:
-            pass
-        return
-    
     # Get cart and check restaurants
     summary = get_cart_summary(user_id)
     restaurants = set()
@@ -648,14 +639,32 @@ async def handle_order_phone_callback(query, context):
 
 
 async def handle_confirm_order_callback(query, context):
-    """Handle order confirmation"""
+    """Handle order confirmation - save to Google Sheets"""
     user_id = query.from_user.id
     user = query.from_user
+    
+    # Show processing message
+    try:
+        await query.answer("⏳ Обробка замовлення...", show_alert=False)
+    except:
+        pass
     
     # Get order data
     summary = get_cart_summary(user_id)
     phone = context.user_data.get('phone', 'Не вказано')
     address = context.user_data.get('address', 'Не вказано')
+    
+    # Calculate costs
+    delivery_cost = 0 if summary['total'] >= 300 else 50
+    total_with_delivery = summary['total'] + delivery_cost
+    
+    # Get restaurant info
+    restaurant_name = "Ресторан"
+    partner_id = ""
+    if summary['items']:
+        first_item = summary['items'][0]
+        restaurant_name = first_item.get('restaurant', 'Ресторан')
+        partner_id = first_item.get('partner_id', '')
     
     # Save order to Google Sheets
     order_saved = False
@@ -671,21 +680,31 @@ async def handle_confirm_order_callback(query, context):
                 'address': address,
                 'phone': phone,
                 'payment_method': 'Готівка при отриманні',
-                'delivery_cost': 0 if summary['total'] >= 300 else 50,
+                'delivery_cost': delivery_cost,
                 'delivery_type': 'Доставка',
                 'notes': context.user_data.get('notes', ''),
                 'promo_code': context.user_data.get('promo_code', ''),
-                'discount': context.user_data.get('discount', 0)
+                'discount': context.user_data.get('discount', 0),
+                'partner_id': partner_id
             }
             
             order_saved = sheets_service.add_order(order_data)
-            logger.info(f"✅ Order saved to Google Sheets for user {user_id}")
+            
+            if order_saved:
+                logger.info(f"✅ Order saved to Google Sheets for user {user_id}")
+            else:
+                logger.error(f"❌ Failed to save order for user {user_id}")
             
         except Exception as e:
-            logger.error(f"❌ Failed to save order to Sheets: {e}")
+            logger.error(f"❌ Exception saving order: {e}", exc_info=True)
+    else:
+        logger.warning("⚠️ Google Sheets not connected, order not saved")
     
     # Update user stats
-    update_user_stats(user_id, summary['total'])
+    try:
+        update_user_stats(user_id, total_with_delivery)
+    except Exception as e:
+        logger.error(f"Error updating user stats: {e}")
     
     # Clear cart
     clear_user_cart(user_id)
@@ -693,28 +712,36 @@ async def handle_confirm_order_callback(query, context):
     # Clear user data
     context.user_data.clear()
     
-    delivery_cost = 0 if summary['total'] >= 300 else 50
-    total_with_delivery = summary['total'] + delivery_cost
-    
+    # Format success message
     message = (
-        "✅ <b>Замовлення підтверджено!</b>\n\n"
-        f"📦 Номер замовлення: #{order_id}\n"
+        "🎉 <b>ЗАМОВЛЕННЯ ПІДТВЕРДЖЕНО!</b>\n\n"
+        f"📦 <b>Номер замовлення: #{order_id}</b>\n\n"
+        f"🏪 Заклад: {restaurant_name}\n"
         f"💰 Сума товарів: {summary['total']} грн\n"
         f"🚚 Доставка: {delivery_cost} грн\n"
-        f"💵 <b>Всього до сплати: {total_with_delivery} грн</b>\n\n"
-        f"📞 Телефон: {phone}\n"
-        f"📍 Адреса: {address}\n\n"
-        "⏱ Очікуваний час доставки: 30-45 хвилин\n"
-        "💳 Оплата: Готівка при отриманні\n\n"
     )
     
-    if order_saved:
-        message += "✅ Замовлення збережено в системі\n\n"
+    if delivery_cost == 0:
+        message += "<i>(Безкоштовна від 300 грн)</i>\n"
     
-    message += "Дякуємо за замовлення! 🎉"
+    message += f"\n💵 <b>РАЗОМ: {total_with_delivery} грн</b>\n\n"
+    message += "📞 Ваш телефон: " + phone + "\n"
+    message += "📍 Адреса доставки: " + address + "\n\n"
+    message += "⏱ <b>Очікуваний час доставки: 30-45 хвилин</b>\n"
+    message += "💳 Оплата: Готівка при отриманні\n\n"
+    
+    if order_saved:
+        message += "✅ Замовлення передано в заклад\n"
+        message += "📲 Ми зв'яжемось з вами для підтвердження\n\n"
+    else:
+        message += "⚠️ Замовлення збережено локально\n"
+        message += "📞 Зателефонуйте нам для підтвердження\n\n"
+    
+    message += "Дякуємо за замовлення! 🍕"
     
     keyboard = [
         [InlineKeyboardButton("🍕 Замовити ще", callback_data="menu")],
+        [InlineKeyboardButton("📊 Мій профіль", callback_data="profile")],
         [InlineKeyboardButton("◀️ Головна", callback_data="start")]
     ]
     
@@ -722,6 +749,15 @@ async def handle_confirm_order_callback(query, context):
         message,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
+    )
+    
+    # Log order for monitoring
+    logger.info(
+        f"🎉 ORDER CONFIRMED: "
+        f"User {user_id} ({user.username or user.first_name}), "
+        f"Total: {total_with_delivery} UAH, "
+        f"Restaurant: {restaurant_name}, "
+        f"Saved: {order_saved}"
     )
 
 
@@ -732,12 +768,60 @@ async def handle_cancel_order_callback(query, context):
     
     message = (
         "❌ <b>Замовлення скасовано</b>\n\n"
-        "Товари залишились у кошику."
+        "Товари залишились у кошику.\n"
+        "Ви можете продовжити покупки або оформити замовлення пізніше."
     )
     
     keyboard = [
         [InlineKeyboardButton("🛒 Повернутись до кошика", callback_data="cart")],
+        [InlineKeyboardButton("🍕 Продовжити покупки", callback_data="menu")],
         [InlineKeyboardButton("◀️ Головна", callback_data="start")]
+    ]
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+
+async def handle_change_phone_callback(query, context):
+    """Handle change phone request"""
+    message = (
+        "📞 <b>Зміна номера телефону</b>\n\n"
+        "Введіть новий номер телефону:\n"
+        "<i>Формат: +380XXXXXXXXX</i>\n\n"
+        "Наприклад: +380501234567"
+    )
+    
+    # Set state for phone input
+    context.user_data['awaiting_phone'] = True
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")]
+    ]
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+
+async def handle_change_address_callback(query, context):
+    """Handle change address request"""
+    message = (
+        "📍 <b>Зміна адреси доставки</b>\n\n"
+        "Введіть нову адресу:\n"
+        "<i>вулиця, номер будинку, квартира</i>\n\n"
+        "Наприклад: вул. Шевченка 15, кв. 42"
+    )
+    
+    # Set state for address input
+    context.user_data['awaiting_address'] = True
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")]
     ]
     
     await query.edit_message_text(

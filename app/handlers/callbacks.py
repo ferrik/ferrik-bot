@@ -300,99 +300,238 @@ async def handle_help_callback(query, context):
 
 
 async def handle_category_callback(query, context, data):
-    """Handle category selection"""
-    category = data.replace("category_", "")
-    
-    # Sample items for each category
-    items = {
+    """Handle category selection - load from Google Sheets"""
+    try:
+        category = data.replace("category_", "")
+        
+        # Try to load menu from Google Sheets
+        items = []
+        if sheets_service.is_connected():
+            items = sheets_service.get_menu_by_category(category)
+        
+        # Fallback to sample data if no items
+        if not items:
+            items = get_sample_items_for_category(category)
+        
+        if not items:
+            await query.answer("⚠️ Немає доступних страв", show_alert=True)
+            return
+        
+        # Get category emoji
+        category_emoji = {
+            "Піца": "🍕",
+            "pizza": "🍕",
+            "Бургери": "🍔",
+            "burgers": "🍔",
+            "Закуски": "🍟",
+            "snacks": "🍟",
+            "Напої": "🥤",
+            "drinks": "🥤"
+        }.get(category, "🍴")
+        
+        message = f"<b>{category_emoji} {category}</b>\n\n"
+        
+        keyboard = []
+        for item in items[:10]:  # Limit to 10 items
+            item_id = item.get('ID', 0)
+            item_name = item.get('Страви', 'Товар')
+            item_price = item.get('Ціна', 0)
+            item_desc = item.get('Опис', '')
+            restaurant = item.get('Ресторан', '')
+            
+            message += f"<b>{item_name}</b> - {item_price} грн\n"
+            if item_desc:
+                message += f"<i>{item_desc}</i>\n"
+            if restaurant:
+                message += f"📍 {restaurant}\n"
+            message += "\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"➕ {item_name} ({item_price} грн)",
+                    callback_data=f"add_{item_id}"
+                )
+            ])
+        
+        keyboard.append([
+            InlineKeyboardButton("◀️ Меню", callback_data="menu"),
+            InlineKeyboardButton("🛒 Кошик", callback_data="cart")
+        ])
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in category callback: {e}", exc_info=True)
+        await query.answer("⚠️ Помилка завантаження", show_alert=True)
+
+
+async def handle_partner_callback(query, context, data):
+    """Handle partner/restaurant selection"""
+    try:
+        partner_id = data.replace("partner_", "")
+        
+        # Save selected partner to user context
+        context.user_data['selected_partner_id'] = partner_id
+        
+        # Get partner details
+        partner = None
+        if sheets_service.is_connected():
+            partner = sheets_service.get_partner(partner_id)
+        
+        if not partner:
+            await query.answer("⚠️ Заклад не знайдено", show_alert=True)
+            return
+        
+        partner_name = partner.get('Ім\'я_партнера', 'Заклад')
+        partner_category = partner.get('Категорія', '')
+        partner_rating = partner.get('Рейтинг', '')
+        
+        # Get unique categories for this partner
+        categories = set()
+        if sheets_service.is_connected():
+            all_menu = sheets_service.get_menu()
+            for item in all_menu:
+                if item.get('Ресторан') == partner_name:
+                    cat = item.get('Категорія', '')
+                    if cat:
+                        categories.add(cat)
+        
+        message = f"🏪 <b>{partner_name}</b>\n\n"
+        if partner_category:
+            message += f"📁 {partner_category}\n"
+        if partner_rating:
+            message += f"⭐ Рейтинг: {partner_rating}\n"
+        message += "\nОберіть категорію страв:"
+        
+        keyboard = []
+        
+        # Add category buttons
+        category_buttons = []
+        for cat in sorted(categories):
+            category_buttons.append(
+                InlineKeyboardButton(
+                    f"🍴 {cat}",
+                    callback_data=f"category_{cat}"
+                )
+            )
+        
+        # Arrange in rows of 2
+        for i in range(0, len(category_buttons), 2):
+            keyboard.append(category_buttons[i:i+2])
+        
+        # Navigation buttons
+        keyboard.append([
+            InlineKeyboardButton("🛒 Кошик", callback_data="cart"),
+            InlineKeyboardButton("◀️ Заклади", callback_data="menu")
+        ])
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in partner callback: {e}", exc_info=True)
+        await query.answer("⚠️ Помилка", show_alert=True)
+
+
+def get_sample_items_for_category(category: str) -> list:
+    """Get sample items if Google Sheets not available"""
+    samples = {
+        "Піца": [
+            {"ID": 1, "Страви": "Маргарита", "Ціна": 180, "Опис": "Томати, моцарела, базилік"},
+            {"ID": 2, "Страви": "Пепероні", "Ціна": 200, "Опис": "Гостра ковбаска пепероні"},
+        ],
         "pizza": [
-            {"id": 1, "name": "Маргарита", "price": 180, "desc": "Томати, моцарела, базилік"},
-            {"id": 2, "name": "Пепероні", "price": 200, "desc": "Гостра ковбаска пепероні"},
-            {"id": 3, "name": "4 Сири", "price": 220, "desc": "Моцарела, дор блю, пармезан, чедер"},
-            {"id": 4, "name": "М'ясна", "price": 240, "desc": "Шинка, бекон, салямі, курка"}
+            {"ID": 1, "Страви": "Маргарита", "Ціна": 180, "Опис": "Томати, моцарела, базилік"},
+            {"ID": 2, "Страви": "Пепероні", "Ціна": 200, "Опис": "Гостра ковбаска пепероні"},
+        ],
+        "Бургери": [
+            {"ID": 5, "Страви": "Класичний", "Ціна": 150, "Опис": "Яловичина, помідор, огірок"},
+            {"ID": 6, "Страви": "Чізбургер", "Ціна": 170, "Опис": "З подвійним сиром"},
         ],
         "burgers": [
-            {"id": 5, "name": "Класичний", "price": 150, "desc": "Яловичина, помідор, огірок"},
-            {"id": 6, "name": "Чізбургер", "price": 170, "desc": "З подвійним сиром"},
-            {"id": 7, "name": "Бекон бургер", "price": 190, "desc": "З хрустким беконом"}
+            {"ID": 5, "Страви": "Класичний", "Ціна": 150, "Опис": "Яловичина, помідор, огірок"},
+            {"ID": 6, "Страви": "Чізбургер", "Ціна": 170, "Опис": "З подвійним сиром"},
+        ],
+        "Закуски": [
+            {"ID": 8, "Страви": "Картопля фрі", "Ціна": 60, "Опис": "Золотиста картопля"},
+            {"ID": 9, "Страви": "Нагетси", "Ціна": 80, "Опис": "Курячі нагетси (6 шт)"},
         ],
         "snacks": [
-            {"id": 8, "name": "Картопля фрі", "price": 60, "desc": "Золотиста картопля"},
-            {"id": 9, "name": "Нагетси", "price": 80, "desc": "Курячі нагетси (6 шт)"},
-            {"id": 10, "name": "Крильця", "price": 120, "desc": "Гострі крильця (8 шт)"}
+            {"ID": 8, "Страви": "Картопля фрі", "Ціна": 60, "Опис": "Золотиста картопля"},
+            {"ID": 9, "Страви": "Нагетси", "Ціна": 80, "Опис": "Курячі нагетси (6 шт)"},
+        ],
+        "Напої": [
+            {"ID": 11, "Страви": "Coca-Cola", "Ціна": 40, "Опис": "0.5л"},
+            {"ID": 12, "Страви": "Sprite", "Ціна": 40, "Опис": "0.5л"},
         ],
         "drinks": [
-            {"id": 11, "name": "Coca-Cola", "price": 40, "desc": "0.5л"},
-            {"id": 12, "name": "Sprite", "price": 40, "desc": "0.5л"},
-            {"id": 13, "name": "Сік", "price": 50, "desc": "Апельсиновий 0.5л"}
+            {"ID": 11, "Страви": "Coca-Cola", "Ціна": 40, "Опис": "0.5л"},
+            {"ID": 12, "Страви": "Sprite", "Ціна": 40, "Опис": "0.5л"},
         ]
     }
     
-    category_names = {
-        "pizza": "🍕 Піца",
-        "burgers": "🍔 Бургери",
-        "snacks": "🍟 Закуски",
-        "drinks": "🥤 Напої"
-    }
-    
-    category_items = items.get(category, [])
-    category_name = category_names.get(category, category.title())
-    
-    message = f"<b>{category_name}</b>\n\n"
-    
-    keyboard = []
-    for item in category_items:
-        message += f"<b>{item['name']}</b> - {item['price']} грн\n"
-        message += f"<i>{item['desc']}</i>\n\n"
-        
-        keyboard.append([
-            InlineKeyboardButton(
-                f"➕ {item['name']} ({item['price']} грн)",
-                callback_data=f"add_{item['id']}"
-            )
-        ])
-    
-    keyboard.append([
-        InlineKeyboardButton("◀️ Меню", callback_data="menu"),
-        InlineKeyboardButton("🛒 Кошик", callback_data="cart")
-    ])
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+    return samples.get(category, [])
 
 
 async def handle_add_item_callback(query, context, data):
-    """Handle adding item to cart"""
+    """Handle adding item to cart - with Google Sheets support"""
     item_id = int(data.replace("add_", ""))
     user_id = query.from_user.id
     
-    # Sample item data (should come from database)
-    all_items = {
-        1: {"id": 1, "name": "Маргарита", "price": 180, "category": "pizza"},
-        2: {"id": 2, "name": "Пепероні", "price": 200, "category": "pizza"},
-        3: {"id": 3, "name": "4 Сири", "price": 220, "category": "pizza"},
-        4: {"id": 4, "name": "М'ясна", "price": 240, "category": "pizza"},
-        5: {"id": 5, "name": "Класичний", "price": 150, "category": "burgers"},
-        6: {"id": 6, "name": "Чізбургер", "price": 170, "category": "burgers"},
-        7: {"id": 7, "name": "Бекон бургер", "price": 190, "category": "burgers"},
-        8: {"id": 8, "name": "Картопля фрі", "price": 60, "category": "snacks"},
-        9: {"id": 9, "name": "Нагетси", "price": 80, "category": "snacks"},
-        10: {"id": 10, "name": "Крильця", "price": 120, "category": "snacks"},
-        11: {"id": 11, "name": "Coca-Cola", "price": 40, "category": "drinks"},
-        12: {"id": 12, "name": "Sprite", "price": 40, "category": "drinks"},
-        13: {"id": 13, "name": "Сік", "price": 50, "category": "drinks"}
-    }
+    # Try to get item from Google Sheets
+    item = None
+    if sheets_service.is_connected():
+        item = sheets_service.get_menu_item(item_id)
     
-    item = all_items.get(item_id)
+    # Fallback to sample data
+    if not item:
+        all_items = {
+            1: {"id": 1, "name": "Маргарита", "price": 180, "category": "pizza"},
+            2: {"id": 2, "name": "Пепероні", "price": 200, "category": "pizza"},
+            3: {"id": 3, "name": "4 Сири", "price": 220, "category": "pizza"},
+            4: {"id": 4, "name": "М'ясна", "price": 240, "category": "pizza"},
+            5: {"id": 5, "name": "Класичний", "price": 150, "category": "burgers"},
+            6: {"id": 6, "name": "Чізбургер", "price": 170, "category": "burgers"},
+            7: {"id": 7, "name": "Бекон бургер", "price": 190, "category": "burgers"},
+            8: {"id": 8, "name": "Картопля фрі", "price": 60, "category": "snacks"},
+            9: {"id": 9, "name": "Нагетси", "price": 80, "category": "snacks"},
+            10: {"id": 10, "name": "Крильця", "price": 120, "category": "snacks"},
+            11: {"id": 11, "name": "Coca-Cola", "price": 40, "category": "drinks"},
+            12: {"id": 12, "name": "Sprite", "price": 40, "category": "drinks"},
+            13: {"id": 13, "name": "Сік", "price": 50, "category": "drinks"}
+        }
+        sample_item = all_items.get(item_id)
+        if sample_item:
+            item = {
+                'ID': sample_item['id'],
+                'Страви': sample_item['name'],
+                'Ціна': sample_item['price'],
+                'Категорія': sample_item['category']
+            }
     
     if item:
-        add_to_cart(user_id, item)
+        # Convert to cart format
+        cart_item = {
+            'id': item.get('ID'),
+            'name': item.get('Страви', 'Товар'),
+            'price': item.get('Ціна', 0),
+            'category': item.get('Категорія', ''),
+            'restaurant': item.get('Ресторан', ''),
+            'partner_id': context.user_data.get('selected_partner_id', '')
+        }
+        
+        add_to_cart(user_id, cart_item)
+        
         try:
             await query.answer(
-                f"✅ {item['name']} додано в кошик!",
+                f"✅ {cart_item['name']} додано в кошик!",
                 show_alert=True
             )
         except:
@@ -457,119 +596,4 @@ async def handle_checkout_callback(query, context):
     ]
     
     # Set state for phone input
-    context.user_data['awaiting_phone'] = True
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
-
-
-async def handle_order_phone_callback(query, context):
-    """Handle order phone step"""
-    await handle_checkout_callback(query, context)
-
-
-async def handle_confirm_order_callback(query, context):
-    """Handle order confirmation"""
-    user_id = query.from_user.id
-    user = query.from_user
-    
-    # Get order data
-    summary = get_cart_summary(user_id)
-    phone = context.user_data.get('phone', 'Не вказано')
-    address = context.user_data.get('address', 'Не вказано')
-    
-    # Save order to Google Sheets
-    order_saved = False
-    order_id = user_id % 10000  # Fallback order ID
-    
-    if sheets_service.is_connected():
-        try:
-            order_data = {
-                'user_id': user_id,
-                'username': user.username or user.first_name,
-                'items': summary['items'],
-                'total': summary['total'],
-                'address': address,
-                'phone': phone,
-                'payment_method': 'Готівка при отриманні',
-                'delivery_cost': 0 if summary['total'] >= 300 else 50,
-                'delivery_type': 'Доставка',
-                'notes': context.user_data.get('notes', ''),
-                'promo_code': context.user_data.get('promo_code', ''),
-                'discount': context.user_data.get('discount', 0)
-            }
-            
-            order_saved = sheets_service.add_order(order_data)
-            logger.info(f"✅ Order saved to Google Sheets for user {user_id}")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to save order to Sheets: {e}")
-    
-    # Update user stats
-    update_user_stats(user_id, summary['total'])
-    
-    # Clear cart
-    clear_user_cart(user_id)
-    
-    # Clear user data
-    context.user_data.clear()
-    
-    delivery_cost = 0 if summary['total'] >= 300 else 50
-    total_with_delivery = summary['total'] + delivery_cost
-    
-    message = (
-        "✅ <b>Замовлення підтверджено!</b>\n\n"
-        f"📦 Номер замовлення: #{order_id}\n"
-        f"💰 Сума товарів: {summary['total']} грн\n"
-        f"🚚 Доставка: {delivery_cost} грн\n"
-        f"💵 <b>Всього до сплати: {total_with_delivery} грн</b>\n\n"
-        f"📞 Телефон: {phone}\n"
-        f"📍 Адреса: {address}\n\n"
-        "⏱ Очікуваний час доставки: 30-45 хвилин\n"
-        "💳 Оплата: Готівка при отриманні\n\n"
-    )
-    
-    if order_saved:
-        message += "✅ Замовлення збережено в системі\n\n"
-    
-    message += "Дякуємо за замовлення! 🎉"
-    
-    keyboard = [
-        [InlineKeyboardButton("🍕 Замовити ще", callback_data="menu")],
-        [InlineKeyboardButton("◀️ Головна", callback_data="start")]
-    ]
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
-
-
-async def handle_cancel_order_callback(query, context):
-    """Handle order cancellation"""
-    # Clear user data
-    context.user_data.clear()
-    
-    message = (
-        "❌ <b>Замовлення скасовано</b>\n\n"
-        "Товари залишились у кошику."
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("🛒 Повернутись до кошика", callback_data="cart")],
-        [InlineKeyboardButton("◀️ Головна", callback_data="start")]
-    ]
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
-
-
-# Export
-__all__ = ['button_callback']
+    context.user_data['awaiting_p

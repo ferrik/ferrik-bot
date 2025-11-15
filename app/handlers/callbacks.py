@@ -74,6 +74,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("category_"):
             await handle_category_callback(query, context, data)
         
+        elif data.startswith("partner_"):
+            await handle_partner_callback(query, context, data)
+        
         elif data.startswith("add_"):
             await handle_add_item_callback(query, context, data)
         
@@ -478,21 +481,61 @@ async def handle_confirm_order_callback(query, context):
     phone = context.user_data.get('phone', 'Не вказано')
     address = context.user_data.get('address', 'Не вказано')
     
+    # Save order to Google Sheets
+    order_saved = False
+    order_id = user_id % 10000  # Fallback order ID
+    
+    if sheets_service.is_connected():
+        try:
+            order_data = {
+                'user_id': user_id,
+                'username': user.username or user.first_name,
+                'items': summary['items'],
+                'total': summary['total'],
+                'address': address,
+                'phone': phone,
+                'payment_method': 'Готівка при отриманні',
+                'delivery_cost': 0 if summary['total'] >= 300 else 50,
+                'delivery_type': 'Доставка',
+                'notes': context.user_data.get('notes', ''),
+                'promo_code': context.user_data.get('promo_code', ''),
+                'discount': context.user_data.get('discount', 0)
+            }
+            
+            order_saved = sheets_service.add_order(order_data)
+            logger.info(f"✅ Order saved to Google Sheets for user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to save order to Sheets: {e}")
+    
+    # Update user stats
+    update_user_stats(user_id, summary['total'])
+    
     # Clear cart
     clear_user_cart(user_id)
     
     # Clear user data
     context.user_data.clear()
     
+    delivery_cost = 0 if summary['total'] >= 300 else 50
+    total_with_delivery = summary['total'] + delivery_cost
+    
     message = (
         "✅ <b>Замовлення підтверджено!</b>\n\n"
-        f"📦 Номер замовлення: #{user_id % 10000}\n"
-        f"💰 Сума: {summary['total']} грн\n"
+        f"📦 Номер замовлення: #{order_id}\n"
+        f"💰 Сума товарів: {summary['total']} грн\n"
+        f"🚚 Доставка: {delivery_cost} грн\n"
+        f"💵 <b>Всього до сплати: {total_with_delivery} грн</b>\n\n"
         f"📞 Телефон: {phone}\n"
         f"📍 Адреса: {address}\n\n"
-        "⏱ Очікуваний час доставки: 30-45 хвилин\n\n"
-        "Дякуємо за замовлення! 🎉"
+        "⏱ Очікуваний час доставки: 30-45 хвилин\n"
+        "💳 Оплата: Готівка при отриманні\n\n"
     )
+    
+    if order_saved:
+        message += "✅ Замовлення збережено в системі\n\n"
+    
+    message += "Дякуємо за замовлення! 🎉"
     
     keyboard = [
         [InlineKeyboardButton("🍕 Замовити ще", callback_data="menu")],

@@ -1,6 +1,6 @@
 """
 💬 Обробники текстових повідомлень
-FerrikBot v3.2
+FerrikBot v3.2 - ВИПРАВЛЕНА ВЕРСІЯ (підтримка редагування профілю)
 """
 import logging
 import re
@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 
 from app.utils.cart_manager import clear_user_cart, get_cart_summary
 from app.utils.warm_greetings import update_user_stats
+from app.handlers.callbacks import show_order_confirmation
 
 logger = logging.getLogger(__name__)
 
@@ -50,35 +51,59 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle phone number input"""
+    """Handle phone number input - ПОКРАЩЕНО"""
     user_id = update.effective_user.id
     
     # Validate phone
     phone_pattern = r'^\+?380\d{9}$'
     clean_phone = re.sub(r'[\s\-\(\)]', '', text)
     
+    # Додаємо +380 якщо користувач ввів без коду країни
+    if clean_phone.startswith('0') and len(clean_phone) == 10:
+        clean_phone = '+38' + clean_phone
+    elif clean_phone.startswith('380') and len(clean_phone) == 12:
+        clean_phone = '+' + clean_phone
+    
     if not re.match(phone_pattern, clean_phone):
         await update.message.reply_text(
             "⚠️ Невірний формат номера телефону.\n\n"
-            "Введіть номер у форматі: +380XXXXXXXXX\n"
-            "Наприклад: +380501234567"
+            "Введіть номер у форматі:\n"
+            "▪️ +380XXXXXXXXX\n"
+            "▪️ 380XXXXXXXXX\n"
+            "▪️ 0XXXXXXXXX\n\n"
+            "Наприклад: +380501234567 або 0501234567"
         )
         return
     
     # Save phone
     context.user_data['phone'] = clean_phone
     context.user_data['awaiting_phone'] = False
-    context.user_data['awaiting_address'] = True
     
-    await update.message.reply_text(
-        f"✅ Номер телефону збережено: {clean_phone}\n\n"
-        "Тепер введіть адресу доставки:\n"
-        "Наприклад: вул. Шевченка 15, кв. 42"
-    )
+    # Перевіряємо чи це редагування профілю чи оформлення замовлення
+    if context.user_data.get('editing_profile'):
+        context.user_data['editing_profile'] = False
+        
+        await update.message.reply_text(
+            f"✅ Номер телефону оновлено: {clean_phone}\n\n"
+            "Дані збережено у вашому профілі!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👤 До профілю", callback_data="profile")],
+                [InlineKeyboardButton("🍕 До меню", callback_data="menu")]
+            ])
+        )
+    else:
+        # Оформлення замовлення - запитуємо адресу
+        context.user_data['awaiting_address'] = True
+        
+        await update.message.reply_text(
+            f"✅ Номер телефону збережено: {clean_phone}\n\n"
+            "Тепер введіть адресу доставки:\n"
+            "Наприклад: вул. Шевченка 15, кв. 42"
+        )
 
 
 async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle address input"""
+    """Handle address input - ПОКРАЩЕНО"""
     user_id = update.effective_user.id
     
     # Validate address
@@ -95,72 +120,34 @@ async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['address'] = text
     context.user_data['awaiting_address'] = False
     
-    # Get order data
-    summary = get_cart_summary(user_id)
-    phone = context.user_data.get('phone')
-    
-    # Calculate costs
-    delivery_cost = 0 if summary['total'] >= 300 else 50
-    total_with_delivery = summary['total'] + delivery_cost
-    
-    # Get restaurant
-    restaurant_name = "Ресторан"
-    if summary['items']:
-        first_item = summary['items'][0]
-        restaurant_name = first_item.get('restaurant', 'Ресторан')
-    
-    # Format confirmation
-    message = (
-        "📋 <b>ПІДТВЕРДЖЕННЯ ЗАМОВЛЕННЯ</b>\n\n"
-        f"🏪 <b>Заклад:</b> {restaurant_name}\n\n"
-    )
-    
-    # Add items
-    message += "🛒 <b>Ваше замовлення:</b>\n"
-    for item in summary['items']:
-        name = item['name']
-        price = item['price']
-        quantity = item.get('quantity', 1)
-        subtotal = price * quantity
-        message += f"▪️ {name} × {quantity} = {subtotal} грн\n"
-    
-    message += "\n━━━━━━━━━━━━━━━━\n"
-    message += f"💰 Сума товарів: <b>{summary['total']} грн</b>\n"
-    message += f"🚚 Доставка: <b>{delivery_cost} грн</b>\n"
-    
-    if delivery_cost == 0:
-        message += "<i>(Безкоштовна від 300 грн)</i>\n"
-    
-    message += f"\n💵 <b>РАЗОМ: {total_with_delivery} грн</b>\n\n"
-    
-    # Delivery details
-    message += "📦 <b>Деталі доставки:</b>\n"
-    message += f"📞 Телефон: {phone}\n"
-    message += f"📍 Адреса: {text}\n"
-    message += "💳 Оплата: Готівка при отриманні\n"
-    message += "⏱ Час доставки: 30-45 хв\n\n"
-    
-    message += "❓ Підтвердити замовлення?"
-    
-    # Buttons
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ ПІДТВЕРДИТИ ЗАМОВЛЕННЯ", callback_data="confirm_order")
-        ],
-        [
-            InlineKeyboardButton("✏️ Змінити телефон", callback_data="change_phone"),
-            InlineKeyboardButton("✏️ Змінити адресу", callback_data="change_address")
-        ],
-        [
-            InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")
-        ]
-    ]
-    
-    await update.message.reply_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+    # Перевіряємо чи це редагування профілю чи оформлення замовлення
+    if context.user_data.get('editing_profile'):
+        context.user_data['editing_profile'] = False
+        
+        await update.message.reply_text(
+            f"✅ Адресу оновлено:\n{text}\n\n"
+            "Дані збережено у вашому профілі!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👤 До профілю", callback_data="profile")],
+                [InlineKeyboardButton("🍕 До меню", callback_data="menu")]
+            ])
+        )
+    else:
+        # Оформлення замовлення - показуємо підтвердження
+        phone = context.user_data.get('phone')
+        
+        # Використовуємо функцію з callbacks.py
+        # Створюємо mock query object
+        class MockQuery:
+            def __init__(self, message, user):
+                self.message = message
+                self.from_user = user
+            
+            async def edit_message_text(self, text, **kwargs):
+                await self.message.reply_text(text, **kwargs)
+        
+        mock_query = MockQuery(update.message, update.effective_user)
+        await show_order_confirmation(mock_query, context, phone, text)
 
 
 async def handle_promo_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
@@ -234,6 +221,17 @@ async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
     
+    # Profile keywords - ДОДАНО
+    profile_keywords = ['профіль', 'profile', 'мої дані', 'my profile']
+    if any(keyword in text_lower for keyword in profile_keywords):
+        await update.message.reply_text(
+            "👤 Відкриваю профіль...",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👤 Профіль", callback_data="profile")]
+            ])
+        )
+        return
+    
     # Help keywords
     help_keywords = ['допомога', 'help', 'довідка', 'як', 'що робити']
     if any(keyword in text_lower for keyword in help_keywords):
@@ -251,6 +249,7 @@ async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_T
         "Спробуй:\n"
         "▪️ /menu - Переглянути меню\n"
         "▪️ /cart - Відкрити кошик\n"
+        "▪️ /profile - Мій профіль\n"
         "▪️ /help - Довідка",
         reply_markup=InlineKeyboardMarkup([
             [
@@ -258,6 +257,7 @@ async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton("🛒 Кошик", callback_data="cart")
             ],
             [
+                InlineKeyboardButton("👤 Профіль", callback_data="profile"),
                 InlineKeyboardButton("❓ Допомога", callback_data="help")
             ]
         ])

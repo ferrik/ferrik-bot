@@ -1,8 +1,7 @@
 """
-Text Message Handlers - Handle text messages
+💬 Обробники текстових повідомлень
 FerrikBot v3.2
 """
-
 import logging
 import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,13 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handle all text messages (non-commands)
-    
-    Args:
-        update: Telegram update
-        context: Bot context
-    """
+    """Handle all text messages"""
     user = update.effective_user
     user_id = user.id
     text = update.message.text
@@ -29,7 +22,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     logger.info(f"💬 Message from {user.username or user.first_name}: {text[:50]}")
     
     try:
-        # Check if we're waiting for specific input
         user_data = context.user_data
         
         # Phone number input
@@ -47,7 +39,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await handle_promo_input(update, context, text)
             return
         
-        # Default: search in menu or show help
+        # Default: show help
         await handle_general_message(update, context, text)
     
     except Exception as e:
@@ -61,7 +53,7 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Handle phone number input"""
     user_id = update.effective_user.id
     
-    # Validate phone number
+    # Validate phone
     phone_pattern = r'^\+?380\d{9}$'
     clean_phone = re.sub(r'[\s\-\(\)]', '', text)
     
@@ -86,10 +78,10 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle address input with confirmation"""
+    """Handle address input"""
     user_id = update.effective_user.id
     
-    # Validate address (basic check)
+    # Validate address
     if len(text) < 10:
         await update.message.reply_text(
             "⚠️ Адреса занадто коротка.\n\n"
@@ -103,7 +95,7 @@ async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['address'] = text
     context.user_data['awaiting_address'] = False
     
-    # Get all order data
+    # Get order data
     summary = get_cart_summary(user_id)
     phone = context.user_data.get('phone')
     
@@ -111,13 +103,13 @@ async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYP
     delivery_cost = 0 if summary['total'] >= 300 else 50
     total_with_delivery = summary['total'] + delivery_cost
     
-    # Get restaurant info
+    # Get restaurant
     restaurant_name = "Ресторан"
     if summary['items']:
         first_item = summary['items'][0]
         restaurant_name = first_item.get('restaurant', 'Ресторан')
     
-    # Format order confirmation message
+    # Format confirmation
     message = (
         "📋 <b>ПІДТВЕРДЖЕННЯ ЗАМОВЛЕННЯ</b>\n\n"
         f"🏪 <b>Заклад:</b> {restaurant_name}\n\n"
@@ -150,7 +142,7 @@ async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYP
     
     message += "❓ Підтвердити замовлення?"
     
-    # Confirmation buttons
+    # Buttons
     keyboard = [
         [
             InlineKeyboardButton("✅ ПІДТВЕРДИТИ ЗАМОВЛЕННЯ", callback_data="confirm_order")
@@ -172,10 +164,10 @@ async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def handle_promo_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle promo code input"""
+    """Handle promo code"""
     promo_code = text.strip().upper()
     
-    # Sample promo codes (should come from database)
+    # Sample promos
     valid_promos = {
         'FIRST20': {'discount': 20, 'description': 'Знижка 20% на перше замовлення'},
         'WELCOME': {'discount': 15, 'description': 'Вітальна знижка 15%'},
@@ -202,7 +194,7 @@ async def handle_promo_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle general messages - search or help"""
+    """Handle general messages"""
     text_lower = text.lower()
     
     # Greetings
@@ -253,7 +245,7 @@ async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
     
-    # Default response
+    # Default
     await update.message.reply_text(
         "🤔 Не впевнений що ти маєш на увазі.\n\n"
         "Спробуй:\n"
@@ -272,5 +264,4 @@ async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
-# Export
 __all__ = ['handle_text_message']

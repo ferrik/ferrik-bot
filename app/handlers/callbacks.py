@@ -1,14 +1,12 @@
 """
-Callback Query Handlers - Handle button presses
-FerrikBot v3.2 - Final Fixed Version
+🔘 Обробники callback кнопок
+FerrikBot v3.2 - ВИПРАВЛЕНА ВЕРСІЯ
 """
-
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest
 
-# Import utilities
 from app.utils.cart_manager import (
     add_to_cart,
     remove_from_cart,
@@ -28,13 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handle all callback queries from inline buttons
-    
-    Args:
-        update: Telegram update
-        context: Bot context
-    """
+    """Головний обробник всіх callback кнопок"""
     query = update.callback_query
     user = query.from_user
     user_id = user.id
@@ -42,11 +34,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"🔘 Callback '{data}' from {user.username or user.first_name}")
     
-    # Answer callback to remove loading state (with error handling)
+    # Answer callback
     try:
         await query.answer()
     except BadRequest as e:
-        # Ignore "query too old" errors (happens when bot was sleeping on free tier)
         if "query is too old" in str(e).lower():
             logger.debug(f"Query too old (safe to ignore): {e}")
         else:
@@ -55,61 +46,44 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Unexpected query answer error: {e}")
     
     try:
-        # Route to appropriate handler
+        # Route to handlers
         if data == "start":
             await handle_start_callback(query, context)
-        
         elif data == "menu":
             await handle_menu_callback(query, context)
-        
         elif data == "cart":
             await handle_cart_callback(query, context)
-        
         elif data == "profile":
             await handle_profile_callback(query, context)
-        
         elif data == "help":
             await handle_help_callback(query, context)
-        
         elif data.startswith("category_"):
             await handle_category_callback(query, context, data)
-        
         elif data.startswith("partner_"):
             await handle_partner_callback(query, context, data)
-        
         elif data.startswith("add_"):
             await handle_add_item_callback(query, context, data)
-        
         elif data.startswith("remove_"):
             await handle_remove_item_callback(query, context, data)
-        
         elif data == "cart_clear":
             await handle_cart_clear_callback(query, context)
-        
         elif data == "checkout":
             await handle_checkout_callback(query, context)
-        
         elif data == "order_phone":
             await handle_order_phone_callback(query, context)
-        
         elif data == "confirm_order":
             await handle_confirm_order_callback(query, context)
-        
         elif data == "cancel_order":
             await handle_cancel_order_callback(query, context)
-        
         elif data == "change_phone":
             await handle_change_phone_callback(query, context)
-        
         elif data == "change_address":
             await handle_change_address_callback(query, context)
-        
         else:
             logger.warning(f"Unknown callback data: {data}")
             await query.edit_message_text("⚠️ Невідома команда. Спробуйте /start")
     
     except BadRequest as e:
-        # Handle message not modified error
         if "message is not modified" in str(e).lower():
             logger.debug("Message content unchanged, skipping edit")
         else:
@@ -128,7 +102,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_start_callback(query, context):
-    """Handle 'start' button - back to main menu"""
+    """Handle 'start' button"""
     user = query.from_user
     user_id = user.id
     username = user.username
@@ -166,7 +140,7 @@ async def handle_start_callback(query, context):
 
 
 async def handle_menu_callback(query, context):
-    """Handle 'menu' button - show menu"""
+    """Handle 'menu' button"""
     message = (
         "🍕 <b>Меню FerrikBot</b>\n\n"
         "<b>🍕 Піца:</b>\n"
@@ -212,7 +186,7 @@ async def handle_menu_callback(query, context):
 
 
 async def handle_cart_callback(query, context):
-    """Handle 'cart' button - show shopping cart"""
+    """Handle 'cart' button"""
     user_id = query.from_user.id
     summary = get_cart_summary(user_id)
     
@@ -244,7 +218,7 @@ async def handle_cart_callback(query, context):
 
 
 async def handle_profile_callback(query, context):
-    """Handle 'profile' button - show user profile"""
+    """Handle 'profile' button"""
     user_id = query.from_user.id
     username = query.from_user.username
     
@@ -266,7 +240,7 @@ async def handle_profile_callback(query, context):
 
 
 async def handle_help_callback(query, context):
-    """Handle 'help' button - show help"""
+    """Handle 'help' button"""
     message = (
         "❓ <b>Допомога FerrikBot</b>\n\n"
         "<b>📋 Команди:</b>\n"
@@ -306,16 +280,16 @@ async def handle_help_callback(query, context):
 
 
 async def handle_category_callback(query, context, data):
-    """Handle category selection - load from Google Sheets"""
+    """Handle category selection"""
     try:
         category = data.replace("category_", "")
         
-        # Try to load menu from Google Sheets
+        # Try load from Sheets
         items = []
         if sheets_service.is_connected():
             items = sheets_service.get_menu_by_category(category)
         
-        # Fallback to sample data if no items
+        # Fallback to sample
         if not items:
             items = get_sample_items_for_category(category)
         
@@ -323,22 +297,17 @@ async def handle_category_callback(query, context, data):
             await query.answer("⚠️ Немає доступних страв", show_alert=True)
             return
         
-        # Get category emoji
         category_emoji = {
-            "Піца": "🍕",
-            "pizza": "🍕",
-            "Бургери": "🍔",
-            "burgers": "🍔",
-            "Закуски": "🍟",
-            "snacks": "🍟",
-            "Напої": "🥤",
-            "drinks": "🥤"
+            "Піца": "🍕", "pizza": "🍕",
+            "Бургери": "🍔", "burgers": "🍔",
+            "Закуски": "🍟", "snacks": "🍟",
+            "Напої": "🥤", "drinks": "🥤"
         }.get(category, "🍴")
         
         message = f"<b>{category_emoji} {category}</b>\n\n"
         
         keyboard = []
-        for item in items[:10]:  # Limit to 10 items
+        for item in items[:10]:
             item_id = item.get('ID', 0)
             item_name = item.get('Страви', 'Товар')
             item_price = item.get('Ціна', 0)
@@ -375,79 +344,8 @@ async def handle_category_callback(query, context, data):
         await query.answer("⚠️ Помилка завантаження", show_alert=True)
 
 
-async def handle_partner_callback(query, context, data):
-    """Handle partner/restaurant selection"""
-    try:
-        partner_id = data.replace("partner_", "")
-        
-        # Save selected partner to user context
-        context.user_data['selected_partner_id'] = partner_id
-        
-        # Get partner details
-        partner = None
-        if sheets_service.is_connected():
-            partner = sheets_service.get_partner(partner_id)
-        
-        if not partner:
-            await query.answer("⚠️ Заклад не знайдено", show_alert=True)
-            return
-        
-        partner_name = partner.get('Ім\'я_партнера', 'Заклад')
-        partner_category = partner.get('Категорія', '')
-        partner_rating = partner.get('Рейтинг', '')
-        
-        # Get unique categories for this partner
-        categories = set()
-        if sheets_service.is_connected():
-            all_menu = sheets_service.get_menu()
-            for item in all_menu:
-                if item.get('Ресторан') == partner_name:
-                    cat = item.get('Категорія', '')
-                    if cat:
-                        categories.add(cat)
-        
-        message = f"🏪 <b>{partner_name}</b>\n\n"
-        if partner_category:
-            message += f"📁 {partner_category}\n"
-        if partner_rating:
-            message += f"⭐ Рейтинг: {partner_rating}\n"
-        message += "\nОберіть категорію страв:"
-        
-        keyboard = []
-        
-        # Add category buttons
-        category_buttons = []
-        for cat in sorted(categories):
-            category_buttons.append(
-                InlineKeyboardButton(
-                    f"🍴 {cat}",
-                    callback_data=f"category_{cat}"
-                )
-            )
-        
-        # Arrange in rows of 2
-        for i in range(0, len(category_buttons), 2):
-            keyboard.append(category_buttons[i:i+2])
-        
-        # Navigation buttons
-        keyboard.append([
-            InlineKeyboardButton("🛒 Кошик", callback_data="cart"),
-            InlineKeyboardButton("◀️ Заклади", callback_data="menu")
-        ])
-        
-        await query.edit_message_text(
-            message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in partner callback: {e}", exc_info=True)
-        await query.answer("⚠️ Помилка", show_alert=True)
-
-
 def get_sample_items_for_category(category: str) -> list:
-    """Get sample items if Google Sheets not available"""
+    """Get sample items"""
     samples = {
         "Піца": [
             {"ID": 1, "Страви": "Маргарита", "Ціна": 180, "Опис": "Томати, моцарела, базилік"},
@@ -487,70 +385,68 @@ def get_sample_items_for_category(category: str) -> list:
 
 
 async def handle_add_item_callback(query, context, data):
-    """Handle adding item to cart - with Google Sheets support"""
+    """Handle adding item to cart"""
     item_id = int(data.replace("add_", ""))
     user_id = query.from_user.id
     
-    # Try to get item from Google Sheets
-    item = None
-    if sheets_service.is_connected():
-        item = sheets_service.get_menu_item(item_id)
-    
-    # Fallback to sample data
-    if not item:
-        all_items = {
-            1: {"id": 1, "name": "Маргарита", "price": 180, "category": "pizza"},
-            2: {"id": 2, "name": "Пепероні", "price": 200, "category": "pizza"},
-            3: {"id": 3, "name": "4 Сири", "price": 220, "category": "pizza"},
-            4: {"id": 4, "name": "М'ясна", "price": 240, "category": "pizza"},
-            5: {"id": 5, "name": "Класичний", "price": 150, "category": "burgers"},
-            6: {"id": 6, "name": "Чізбургер", "price": 170, "category": "burgers"},
-            7: {"id": 7, "name": "Бекон бургер", "price": 190, "category": "burgers"},
-            8: {"id": 8, "name": "Картопля фрі", "price": 60, "category": "snacks"},
-            9: {"id": 9, "name": "Нагетси", "price": 80, "category": "snacks"},
-            10: {"id": 10, "name": "Крильця", "price": 120, "category": "snacks"},
-            11: {"id": 11, "name": "Coca-Cola", "price": 40, "category": "drinks"},
-            12: {"id": 12, "name": "Sprite", "price": 40, "category": "drinks"},
-            13: {"id": 13, "name": "Сік", "price": 50, "category": "drinks"}
-        }
-        sample_item = all_items.get(item_id)
-        if sample_item:
-            item = {
-                'ID': sample_item['id'],
-                'Страви': sample_item['name'],
-                'Ціна': sample_item['price'],
-                'Категорія': sample_item['category']
+    try:
+        # Try get from Sheets
+        item = None
+        if sheets_service.is_connected():
+            item = sheets_service.get_menu_item(item_id)
+        
+        # Fallback to sample
+        if not item:
+            all_items = {
+                1: {"id": 1, "name": "Маргарита", "price": 180, "category": "pizza"},
+                2: {"id": 2, "name": "Пепероні", "price": 200, "category": "pizza"},
+                5: {"id": 5, "name": "Класичний", "price": 150, "category": "burgers"},
+                6: {"id": 6, "name": "Чізбургер", "price": 170, "category": "burgers"},
+                8: {"id": 8, "name": "Картопля фрі", "price": 60, "category": "snacks"},
+                9: {"id": 9, "name": "Нагетси", "price": 80, "category": "snacks"},
+                11: {"id": 11, "name": "Coca-Cola", "price": 40, "category": "drinks"},
+                12: {"id": 12, "name": "Sprite", "price": 40, "category": "drinks"},
             }
-    
-    if item:
-        # Convert to cart format
-        cart_item = {
-            'id': item.get('ID'),
-            'name': item.get('Страви', 'Товар'),
-            'price': item.get('Ціна', 0),
-            'category': item.get('Категорія', ''),
-            'restaurant': item.get('Ресторан', ''),
-            'partner_id': context.user_data.get('selected_partner_id', '')
-        }
+            sample_item = all_items.get(item_id)
+            if sample_item:
+                item = {
+                    'ID': sample_item['id'],
+                    'Страви': sample_item['name'],
+                    'Ціна': sample_item['price'],
+                    'Категорія': sample_item['category']
+                }
         
-        add_to_cart(user_id, cart_item)
-        
-        try:
-            await query.answer(
-                f"✅ {cart_item['name']} додано в кошик!",
-                show_alert=True
-            )
-        except:
-            pass
-    else:
-        try:
-            await query.answer("❌ Товар не знайдено", show_alert=True)
-        except:
-            pass
+        if item:
+            cart_item = {
+                'id': item.get('ID'),
+                'name': item.get('Страви', 'Товар'),
+                'price': item.get('Ціна', 0),
+                'category': item.get('Категорія', ''),
+                'restaurant': item.get('Ресторан', ''),
+                'partner_id': context.user_data.get('selected_partner_id', '')
+            }
+            
+            add_to_cart(user_id, cart_item)
+            
+            try:
+                await query.answer(
+                    f"✅ {cart_item['name']} додано в кошик!",
+                    show_alert=True
+                )
+            except:
+                pass
+        else:
+            try:
+                await query.answer("❌ Товар не знайдено", show_alert=True)
+            except:
+                pass
+    except Exception as e:
+        logger.error(f"Error adding item: {e}")
+        await query.answer("❌ Помилка!", show_alert=True)
 
 
 async def handle_remove_item_callback(query, context, data):
-    """Handle removing item from cart"""
+    """Handle removing item"""
     item_id = int(data.replace("remove_", ""))
     user_id = query.from_user.id
     
@@ -561,7 +457,6 @@ async def handle_remove_item_callback(query, context, data):
     except:
         pass
     
-    # Refresh cart
     await handle_cart_callback(query, context)
 
 
@@ -575,62 +470,71 @@ async def handle_cart_clear_callback(query, context):
     except:
         pass
     
-    # Get cart and check restaurants
-    summary = get_cart_summary(user_id)
-    restaurants = set()
+    await handle_cart_callback(query, context)
+
+
+async def handle_checkout_callback(query, context):
+    """
+    ЦЕ КЛЮЧОВА ФУНКЦІЯ - ТУТ БУЛА ПОМИЛКА!
+    """
+    user_id = query.from_user.id
+    username = query.from_user.first_name or "Користувач"
     
+    logger.info(f"🛒 Checkout initiated by {username} (ID: {user_id})")
+    
+    # Get cart
+    summary = get_cart_summary(user_id)
+    
+    # Check if empty
+    if summary['is_empty']:
+        await query.answer("❌ Кошик порожній!", show_alert=True)
+        return
+    
+    # Check restaurants
+    restaurants = set()
     for item in summary['items']:
         restaurant = item.get('restaurant', '')
         if restaurant:
             restaurants.add(restaurant)
     
-    # If items from different restaurants, show warning
     if len(restaurants) > 1:
-        message = (
-            "⚠️ <b>Увага!</b>\n\n"
-            "У вашому кошику товари з різних закладів:\n"
-        )
-        for rest in restaurants:
-            message += f"▪️ {rest}\n"
-        
-        message += (
-            "\nДля оформлення замовлення потрібно обрати товари "
-            "тільки з одного закладу.\n\n"
-            "Очистити кошик та почати знову?"
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton("🗑️ Очистити кошик", callback_data="cart_clear")],
-            [InlineKeyboardButton("◀️ Назад до кошика", callback_data="cart")]
-        ]
-        
-        await query.edit_message_text(
-            message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
+        await query.answer(
+            "❌ Товари повинні бути з одного закладу!",
+            show_alert=True
         )
         return
     
-    # Proceed with checkout
+    # Save state
+    context.user_data['checkout_stage'] = 'awaiting_phone'
+    context.user_data['cart_snapshot'] = summary['items'].copy()
+    
+    # Show phone request
     message = (
         "📦 <b>Оформлення замовлення</b>\n\n"
         f"{format_cart_message(user_id)}\n\n"
         "📞 Введіть ваш номер телефону:\n"
-        "<i>Формат: +380XXXXXXXXX</i>"
+        "<i>Формат: +380XXXXXXXXX</i>\n\n"
+        "Наприклад: +380501234567"
     )
     
     keyboard = [
+        [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")],
         [InlineKeyboardButton("◀️ Назад до кошика", callback_data="cart")]
     ]
-    
-    # Set state for phone input
-    context.user_data['awaiting_phone'] = True
     
     await query.edit_message_text(
         message,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
     )
+    
+    await query.answer("✅ Переходимо до оформлення...")
+
+
+async def handle_partner_callback(query, context, data):
+    """Handle partner selection"""
+    # TODO: Implement when have multiple partners
+    pass
 
 
 async def handle_order_phone_callback(query, context):
@@ -639,85 +543,69 @@ async def handle_order_phone_callback(query, context):
 
 
 async def handle_confirm_order_callback(query, context):
-    """Handle order confirmation - save to Google Sheets"""
+    """Handle order confirmation"""
     user_id = query.from_user.id
     user = query.from_user
     
-    # Show processing message
     try:
         await query.answer("⏳ Обробка замовлення...", show_alert=False)
     except:
         pass
     
-    # Get order data
-    summary = get_cart_summary(user_id)
+    # Get data
+    cart = context.user_data.get('cart_snapshot', [])
     phone = context.user_data.get('phone', 'Не вказано')
     address = context.user_data.get('address', 'Не вказано')
     
-    # Calculate costs
-    delivery_cost = 0 if summary['total'] >= 300 else 50
-    total_with_delivery = summary['total'] + delivery_cost
+    # Calculate
+    total = sum(item['price'] * item.get('quantity', 1) for item in cart)
+    delivery_cost = 0 if total >= 300 else 50
+    total_with_delivery = total + delivery_cost
     
-    # Get restaurant info
+    # Get restaurant
     restaurant_name = "Ресторан"
-    partner_id = ""
-    if summary['items']:
-        first_item = summary['items'][0]
-        restaurant_name = first_item.get('restaurant', 'Ресторан')
-        partner_id = first_item.get('partner_id', '')
+    if cart:
+        restaurant_name = cart[0].get('restaurant', 'Ресторан')
     
-    # Save order to Google Sheets
+    # Save to Sheets
     order_saved = False
-    order_id = user_id % 10000  # Fallback order ID
+    order_id = user_id % 10000
     
     if sheets_service.is_connected():
         try:
             order_data = {
                 'user_id': user_id,
                 'username': user.username or user.first_name,
-                'items': summary['items'],
-                'total': summary['total'],
+                'items': cart,
+                'total': total,
                 'address': address,
                 'phone': phone,
-                'payment_method': 'Готівка при отриманні',
+                'payment_method': 'Готівка',
                 'delivery_cost': delivery_cost,
-                'delivery_type': 'Доставка',
-                'notes': context.user_data.get('notes', ''),
-                'promo_code': context.user_data.get('promo_code', ''),
-                'discount': context.user_data.get('discount', 0),
-                'partner_id': partner_id
+                'delivery_type': 'Доставка'
             }
             
             order_saved = sheets_service.add_order(order_data)
             
-            if order_saved:
-                logger.info(f"✅ Order saved to Google Sheets for user {user_id}")
-            else:
-                logger.error(f"❌ Failed to save order for user {user_id}")
-            
         except Exception as e:
-            logger.error(f"❌ Exception saving order: {e}", exc_info=True)
-    else:
-        logger.warning("⚠️ Google Sheets not connected, order not saved")
+            logger.error(f"❌ Error saving order: {e}")
     
-    # Update user stats
+    # Update stats
     try:
         update_user_stats(user_id, total_with_delivery)
     except Exception as e:
-        logger.error(f"Error updating user stats: {e}")
+        logger.error(f"Error updating stats: {e}")
     
     # Clear cart
     clear_user_cart(user_id)
-    
-    # Clear user data
     context.user_data.clear()
     
-    # Format success message
+    # Success message
     message = (
         "🎉 <b>ЗАМОВЛЕННЯ ПІДТВЕРДЖЕНО!</b>\n\n"
         f"📦 <b>Номер замовлення: #{order_id}</b>\n\n"
         f"🏪 Заклад: {restaurant_name}\n"
-        f"💰 Сума товарів: {summary['total']} грн\n"
+        f"💰 Сума товарів: {total} грн\n"
         f"🚚 Доставка: {delivery_cost} грн\n"
     )
     
@@ -725,19 +613,17 @@ async def handle_confirm_order_callback(query, context):
         message += "<i>(Безкоштовна від 300 грн)</i>\n"
     
     message += f"\n💵 <b>РАЗОМ: {total_with_delivery} грн</b>\n\n"
-    message += "📞 Ваш телефон: " + phone + "\n"
-    message += "📍 Адреса доставки: " + address + "\n\n"
+    message += f"📞 Ваш телефон: {phone}\n"
+    message += f"📍 Адреса доставки: {address}\n\n"
     message += "⏱ <b>Очікуваний час доставки: 30-45 хвилин</b>\n"
     message += "💳 Оплата: Готівка при отриманні\n\n"
     
     if order_saved:
         message += "✅ Замовлення передано в заклад\n"
-        message += "📲 Ми зв'яжемось з вами для підтвердження\n\n"
     else:
         message += "⚠️ Замовлення збережено локально\n"
-        message += "📞 Зателефонуйте нам для підтвердження\n\n"
     
-    message += "Дякуємо за замовлення! 🍕"
+    message += "\nДякуємо за замовлення! 🍕"
     
     keyboard = [
         [InlineKeyboardButton("🍕 Замовити ще", callback_data="menu")],
@@ -750,20 +636,10 @@ async def handle_confirm_order_callback(query, context):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
     )
-    
-    # Log order for monitoring
-    logger.info(
-        f"🎉 ORDER CONFIRMED: "
-        f"User {user_id} ({user.username or user.first_name}), "
-        f"Total: {total_with_delivery} UAH, "
-        f"Restaurant: {restaurant_name}, "
-        f"Saved: {order_saved}"
-    )
 
 
 async def handle_cancel_order_callback(query, context):
     """Handle order cancellation"""
-    # Clear user data
     context.user_data.clear()
     
     message = (
@@ -786,7 +662,7 @@ async def handle_cancel_order_callback(query, context):
 
 
 async def handle_change_phone_callback(query, context):
-    """Handle change phone request"""
+    """Handle change phone"""
     message = (
         "📞 <b>Зміна номера телефону</b>\n\n"
         "Введіть новий номер телефону:\n"
@@ -794,7 +670,6 @@ async def handle_change_phone_callback(query, context):
         "Наприклад: +380501234567"
     )
     
-    # Set state for phone input
     context.user_data['awaiting_phone'] = True
     
     keyboard = [
@@ -809,7 +684,7 @@ async def handle_change_phone_callback(query, context):
 
 
 async def handle_change_address_callback(query, context):
-    """Handle change address request"""
+    """Handle change address"""
     message = (
         "📍 <b>Зміна адреси доставки</b>\n\n"
         "Введіть нову адресу:\n"
@@ -817,7 +692,6 @@ async def handle_change_address_callback(query, context):
         "Наприклад: вул. Шевченка 15, кв. 42"
     )
     
-    # Set state for address input
     context.user_data['awaiting_address'] = True
     
     keyboard = [
@@ -831,5 +705,4 @@ async def handle_change_address_callback(query, context):
     )
 
 
-# Export
 __all__ = ['button_callback']

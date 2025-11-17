@@ -1,6 +1,6 @@
 """
 🔘 Обробники callback кнопок
-FerrikBot v3.2 - ВИПРАВЛЕНА ВЕРСІЯ
+FerrikBot v3.2 - ВИПРАВЛЕНА ВЕРСІЯ (з кнопкою підтвердження + редагуванням профілю)
 """
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -55,6 +55,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_cart_callback(query, context)
         elif data == "profile":
             await handle_profile_callback(query, context)
+        elif data == "edit_profile":
+            await handle_edit_profile_callback(query, context)
+        elif data == "edit_phone":
+            await handle_edit_phone_callback(query, context)
+        elif data == "edit_address":
+            await handle_edit_address_callback(query, context)
         elif data == "help":
             await handle_help_callback(query, context)
         elif data.startswith("category_"):
@@ -218,18 +224,100 @@ async def handle_cart_callback(query, context):
 
 
 async def handle_profile_callback(query, context):
-    """Handle 'profile' button"""
+    """Handle 'profile' button - ВИПРАВЛЕНО"""
     user_id = query.from_user.id
     username = query.from_user.username
     
     message = format_user_profile(user_id, username)
     
+    # Отримуємо збережені дані профілю
+    saved_phone = context.user_data.get('phone', 'Не вказано')
+    saved_address = context.user_data.get('address', 'Не вказано')
+    
+    # Додаємо інформацію про збережені дані
+    message += "\n\n📞 <b>Контактні дані:</b>\n"
+    message += f"▪️ Телефон: {saved_phone}\n"
+    message += f"▪️ Адреса: {saved_address}\n"
+    
     keyboard = [
+        [InlineKeyboardButton("✏️ Редагувати профіль", callback_data="edit_profile")],
         [
             InlineKeyboardButton("🛒 Кошик", callback_data="cart"),
             InlineKeyboardButton("🍕 Меню", callback_data="menu")
         ],
         [InlineKeyboardButton("◀️ Назад", callback_data="start")]
+    ]
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+
+async def handle_edit_profile_callback(query, context):
+    """Handle 'edit_profile' button - НОВА ФУНКЦІЯ"""
+    message = (
+        "✏️ <b>Редагування профілю</b>\n\n"
+        "Що ви хочете змінити?"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📞 Змінити телефон", callback_data="edit_phone")],
+        [InlineKeyboardButton("📍 Змінити адресу", callback_data="edit_address")],
+        [InlineKeyboardButton("◀️ Назад до профілю", callback_data="profile")]
+    ]
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+
+async def handle_edit_phone_callback(query, context):
+    """Handle 'edit_phone' button - НОВА ФУНКЦІЯ"""
+    context.user_data['awaiting_phone'] = True
+    context.user_data['editing_profile'] = True
+    
+    current_phone = context.user_data.get('phone', 'Не вказано')
+    
+    message = (
+        "📞 <b>Редагування телефону</b>\n\n"
+        f"Поточний номер: <code>{current_phone}</code>\n\n"
+        "Введіть новий номер телефону:\n"
+        "<i>Формат: +380XXXXXXXXX</i>\n\n"
+        "Наприклад: +380501234567"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ Скасувати", callback_data="profile")]
+    ]
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+
+async def handle_edit_address_callback(query, context):
+    """Handle 'edit_address' button - НОВА ФУНКЦІЯ"""
+    context.user_data['awaiting_address'] = True
+    context.user_data['editing_profile'] = True
+    
+    current_address = context.user_data.get('address', 'Не вказано')
+    
+    message = (
+        "📍 <b>Редагування адреси</b>\n\n"
+        f"Поточна адреса: <code>{current_address}</code>\n\n"
+        "Введіть нову адресу доставки:\n"
+        "<i>вулиця, номер будинку, квартира</i>\n\n"
+        "Наприклад: вул. Шевченка 15, кв. 42"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ Скасувати", callback_data="profile")]
     ]
     
     await query.edit_message_text(
@@ -475,7 +563,7 @@ async def handle_cart_clear_callback(query, context):
 
 async def handle_checkout_callback(query, context):
     """
-    ЦЕ КЛЮЧОВА ФУНКЦІЯ - ТУТ БУЛА ПОМИЛКА!
+    КЛЮЧОВА ФУНКЦІЯ - ВИПРАВЛЕНО з кнопкою підтвердження
     """
     user_id = query.from_user.id
     username = query.from_user.first_name or "Користувач"
@@ -504,131 +592,104 @@ async def handle_checkout_callback(query, context):
         )
         return
     
-    # Save state
-    context.user_data['checkout_stage'] = 'awaiting_phone'
-    context.user_data['cart_snapshot'] = summary['items'].copy()
+    # Перевіряємо чи є збережені дані
+    saved_phone = context.user_data.get('phone')
+    saved_address = context.user_data.get('address')
     
-    # Show phone request
-    message = (
-        "📦 <b>Оформлення замовлення</b>\n\n"
-        f"{format_cart_message(user_id)}\n\n"
-        "📞 Введіть ваш номер телефону:\n"
-        "<i>Формат: +380XXXXXXXXX</i>\n\n"
-        "Наприклад: +380501234567"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")],
-        [InlineKeyboardButton("◀️ Назад до кошика", callback_data="cart")]
-    ]
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
-    
-    await query.answer("✅ Переходимо до оформлення...")
+    # Якщо є збережені дані - показуємо підтвердження одразу
+    if saved_phone and saved_address:
+        await show_order_confirmation(query, context, saved_phone, saved_address)
+    else:
+        # Інакше запитуємо телефон
+        context.user_data['checkout_stage'] = 'awaiting_phone'
+        context.user_data['cart_snapshot'] = summary['items'].copy()
+        
+        message = (
+            "📦 <b>Оформлення замовлення</b>\n\n"
+            f"{format_cart_message(user_id)}\n\n"
+            "📞 Введіть ваш номер телефону:\n"
+            "<i>Формат: +380XXXXXXXXX</i>\n\n"
+            "Наприклад: +380501234567"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")],
+            [InlineKeyboardButton("◀️ Назад до кошика", callback_data="cart")]
+        ]
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        
+        await query.answer("✅ Переходимо до оформлення...")
 
 
-async def handle_partner_callback(query, context, data):
-    """Handle partner selection"""
-    # TODO: Implement when have multiple partners
-    pass
-
-
-async def handle_order_phone_callback(query, context):
-    """Handle order phone step"""
-    await handle_checkout_callback(query, context)
-
-
-async def handle_confirm_order_callback(query, context):
-    """Handle order confirmation"""
+async def show_order_confirmation(query, context, phone: str, address: str):
+    """Показати екран підтвердження замовлення - НОВА ФУНКЦІЯ"""
     user_id = query.from_user.id
-    user = query.from_user
+    summary = get_cart_summary(user_id)
     
-    try:
-        await query.answer("⏳ Обробка замовлення...", show_alert=False)
-    except:
-        pass
+    # Save snapshot
+    context.user_data['cart_snapshot'] = summary['items'].copy()
+    context.user_data['phone'] = phone
+    context.user_data['address'] = address
     
-    # Get data
-    cart = context.user_data.get('cart_snapshot', [])
-    phone = context.user_data.get('phone', 'Не вказано')
-    address = context.user_data.get('address', 'Не вказано')
-    
-    # Calculate
-    total = sum(item['price'] * item.get('quantity', 1) for item in cart)
-    delivery_cost = 0 if total >= 300 else 50
-    total_with_delivery = total + delivery_cost
+    # Calculate costs
+    delivery_cost = 0 if summary['total'] >= 300 else 50
+    total_with_delivery = summary['total'] + delivery_cost
     
     # Get restaurant
     restaurant_name = "Ресторан"
-    if cart:
-        restaurant_name = cart[0].get('restaurant', 'Ресторан')
+    if summary['items']:
+        restaurant_name = summary['items'][0].get('restaurant', 'Ресторан')
     
-    # Save to Sheets
-    order_saved = False
-    order_id = user_id % 10000
-    
-    if sheets_service.is_connected():
-        try:
-            order_data = {
-                'user_id': user_id,
-                'username': user.username or user.first_name,
-                'items': cart,
-                'total': total,
-                'address': address,
-                'phone': phone,
-                'payment_method': 'Готівка',
-                'delivery_cost': delivery_cost,
-                'delivery_type': 'Доставка'
-            }
-            
-            order_saved = sheets_service.add_order(order_data)
-            
-        except Exception as e:
-            logger.error(f"❌ Error saving order: {e}")
-    
-    # Update stats
-    try:
-        update_user_stats(user_id, total_with_delivery)
-    except Exception as e:
-        logger.error(f"Error updating stats: {e}")
-    
-    # Clear cart
-    clear_user_cart(user_id)
-    context.user_data.clear()
-    
-    # Success message
+    # Format message
     message = (
-        "🎉 <b>ЗАМОВЛЕННЯ ПІДТВЕРДЖЕНО!</b>\n\n"
-        f"📦 <b>Номер замовлення: #{order_id}</b>\n\n"
-        f"🏪 Заклад: {restaurant_name}\n"
-        f"💰 Сума товарів: {total} грн\n"
-        f"🚚 Доставка: {delivery_cost} грн\n"
+        "📋 <b>ПІДТВЕРДЖЕННЯ ЗАМОВЛЕННЯ</b>\n\n"
+        f"🏪 <b>Заклад:</b> {restaurant_name}\n\n"
     )
+    
+    # Add items
+    message += "🛒 <b>Ваше замовлення:</b>\n"
+    for item in summary['items']:
+        name = item['name']
+        price = item['price']
+        quantity = item.get('quantity', 1)
+        subtotal = price * quantity
+        message += f"▪️ {name} × {quantity} = {subtotal} грн\n"
+    
+    message += "\n━━━━━━━━━━━━━━━━\n"
+    message += f"💰 Сума товарів: <b>{summary['total']} грн</b>\n"
+    message += f"🚚 Доставка: <b>{delivery_cost} грн</b>\n"
     
     if delivery_cost == 0:
         message += "<i>(Безкоштовна від 300 грн)</i>\n"
     
     message += f"\n💵 <b>РАЗОМ: {total_with_delivery} грн</b>\n\n"
-    message += f"📞 Ваш телефон: {phone}\n"
-    message += f"📍 Адреса доставки: {address}\n\n"
-    message += "⏱ <b>Очікуваний час доставки: 30-45 хвилин</b>\n"
-    message += "💳 Оплата: Готівка при отриманні\n\n"
     
-    if order_saved:
-        message += "✅ Замовлення передано в заклад\n"
-    else:
-        message += "⚠️ Замовлення збережено локально\n"
+    # Delivery details
+    message += "📦 <b>Деталі доставки:</b>\n"
+    message += f"📞 Телефон: {phone}\n"
+    message += f"📍 Адреса: {address}\n"
+    message += "💳 Оплата: Готівка при отриманні\n"
+    message += "⏱ Час доставки: 30-45 хв\n\n"
     
-    message += "\nДякуємо за замовлення! 🍕"
+    message += "❓ Підтвердити замовлення?"
     
+    # Buttons - ЦЕ КРИТИЧНО ВАЖЛИВО!
     keyboard = [
-        [InlineKeyboardButton("🍕 Замовити ще", callback_data="menu")],
-        [InlineKeyboardButton("📊 Мій профіль", callback_data="profile")],
-        [InlineKeyboardButton("◀️ Головна", callback_data="start")]
+        [
+            InlineKeyboardButton("✅ ПІДТВЕРДИТИ ЗАМОВЛЕННЯ", callback_data="confirm_order")
+        ],
+        [
+            InlineKeyboardButton("✏️ Змінити телефон", callback_data="change_phone"),
+            InlineKeyboardButton("✏️ Змінити адресу", callback_data="change_address")
+        ],
+        [
+            InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")
+        ]
     ]
     
     await query.edit_message_text(
@@ -636,73 +697,3 @@ async def handle_confirm_order_callback(query, context):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
     )
-
-
-async def handle_cancel_order_callback(query, context):
-    """Handle order cancellation"""
-    context.user_data.clear()
-    
-    message = (
-        "❌ <b>Замовлення скасовано</b>\n\n"
-        "Товари залишились у кошику.\n"
-        "Ви можете продовжити покупки або оформити замовлення пізніше."
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("🛒 Повернутись до кошика", callback_data="cart")],
-        [InlineKeyboardButton("🍕 Продовжити покупки", callback_data="menu")],
-        [InlineKeyboardButton("◀️ Головна", callback_data="start")]
-    ]
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
-
-
-async def handle_change_phone_callback(query, context):
-    """Handle change phone"""
-    message = (
-        "📞 <b>Зміна номера телефону</b>\n\n"
-        "Введіть новий номер телефону:\n"
-        "<i>Формат: +380XXXXXXXXX</i>\n\n"
-        "Наприклад: +380501234567"
-    )
-    
-    context.user_data['awaiting_phone'] = True
-    
-    keyboard = [
-        [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")]
-    ]
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
-
-
-async def handle_change_address_callback(query, context):
-    """Handle change address"""
-    message = (
-        "📍 <b>Зміна адреси доставки</b>\n\n"
-        "Введіть нову адресу:\n"
-        "<i>вулиця, номер будинку, квартира</i>\n\n"
-        "Наприклад: вул. Шевченка 15, кв. 42"
-    )
-    
-    context.user_data['awaiting_address'] = True
-    
-    keyboard = [
-        [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_order")]
-    ]
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
-
-
-__all__ = ['button_callback']

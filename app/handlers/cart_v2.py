@@ -1,363 +1,334 @@
 """
-👋 START V2 - WOW вітання (Glovo-style)
+🛒 CART V2 - Кошик з upsell та покращеним UX
 FerrikBot v3.3 - Новий UX
 """
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CommandHandler
+from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
+
+from app.utils.cart_manager import (
+    get_user_cart,
+    get_cart_total,
+    is_cart_empty,
+    add_to_cart,
+    remove_from_cart,
+    clear_user_cart
+)
 
 logger = logging.getLogger(__name__)
 
 
-def get_emoji_for_category(category: str) -> str:
-    """Отримати емоджі для категорії"""
-    emoji_map = {
-        'Піца': '🍕',
-        'Бургери': '🍔',
-        'Салати': '🥗',
-        'Суші': '🍣',
-        'Кава': '☕',
-        'Десерти': '🍰',
-        'Напої': '🥤',
-        'Закуски': '🍟',
-        'Мексиканська': '🌮',
-        'Азійська': '🍜',
-    }
-    return emoji_map.get(category, '🍴')
+async def cart_v2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /cart_v2 - новий стиль"""
+    user = update.effective_user
+    await show_cart_v2(update.message, user.id, context)
 
 
-async def start_v2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cart_v2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback для кошика"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    await show_cart_v2(query.message, user.id, context, edit=True)
+
+
+async def show_cart_v2(message, user_id: int, context, edit: bool = False):
     """
-    Новий /start команда - WOW вітання
+    Показати кошик з новим UX
     
     Особливості:
-    - Персоналізоване привітання з іменем
-    - Динамічні категорії з Google Sheets
-    - Емоційний тон (емоджі, "смачненьке")
-    - Швидкий доступ до ТОП-категорій
+    - Деталізований підсумок
+    - Вартість доставки
+    - Upsell пропозиції
+    - Емоційний тон
     """
-    user = update.effective_user
-    user_id = user.id
-    first_name = user.first_name or "друже"
     
-    logger.info(f"👋 /start_v2 from {first_name} (ID: {user_id})")
+    if is_cart_empty(user_id):
+        text = (
+            "🛒 **Твій кошик порожній**\n\n"
+            "Обери щось смачне з меню! 😋"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🍕 До меню", callback_data="v2_back_to_start")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if edit:
+            await message.edit_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+        else:
+            await message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+        return
     
-    # Персоналізоване вітання
-    greeting = f"👋 Привіт, {first_name}!"
+    # Отримуємо товари з кошика
+    cart = get_user_cart(user_id)
+    total = get_cart_total(user_id)
     
-    # Основне повідомлення
-    message = (
-        f"{greeting}\n"
-        f"Я FerrikBot — підкажу щось смачненьке 😋\n\n"
-        f"Що хочеш сьогодні?"
-    )
+    # Розраховуємо доставку
+    delivery_cost = calculate_delivery(total)
+    final_total = total + delivery_cost
     
-    # Отримуємо категорії (динамічно або статично)
-    categories = get_top_categories(context)
+    # Формуємо повідомлення
+    text = "🛒 **Твій кошик:**\n\n"
     
-    # Формуємо клавіатуру
+    # Список товарів
+    for idx, item in enumerate(cart, 1):
+        name = item.get('name', 'Товар')
+        price = item.get('price', 0)
+        qty = item.get('quantity', 1)
+        subtotal = price * qty
+        
+        text += f"{idx}. {name} ×{qty} — {subtotal} грн\n"
+    
+    text += "\n" + "─" * 25 + "\n"
+    
+    # Підсумок
+    text += f"💰 Разом: **{total} грн**\n"
+    text += f"🚚 Доставка: **{delivery_cost} грн**\n"
+    
+    if delivery_cost == 0:
+        text += "   _🎉 Безкоштовна від 300 грн!_\n"
+    elif total >= 250:
+        left = 300 - total
+        text += f"   _💡 Ще {left} грн до безкоштовної!_\n"
+    
+    text += f"\n📦 **До оплати: {final_total} грн**\n"
+    
+    # Upsell пропозиції
+    upsell_items = get_upsell_suggestions(cart, context)
+    
+    if upsell_items:
+        text += "\n" + "─" * 25 + "\n"
+        text += "👇 **До замовлення часто додають:**\n\n"
+        
+        for item in upsell_items[:2]:
+            name = item.get('name', 'Товар')
+            price = item.get('price', 0)
+            text += f"• {name} — {price} грн\n"
+        
+        text += "\n_Додати щось? 🙂_"
+    
+    # Клавіатура
     keyboard = []
     
-    # ТОП-категорії (по 2 в рядку)
-    for i in range(0, len(categories), 2):
-        row = []
-        for cat in categories[i:i+2]:
-            emoji = get_emoji_for_category(cat)
-            row.append(InlineKeyboardButton(
-                f"{emoji} {cat}",
-                callback_data=f"v2_quick_category_{cat}"
-            ))
-        keyboard.append(row)
-    
-    # Додаткові опції
+    # Основні дії
     keyboard.append([
-        InlineKeyboardButton("🏪 Обрати ресторан", callback_data="v2_select_restaurant")
+        InlineKeyboardButton("🧾 Оформити замовлення", callback_data="v2_checkout")
     ])
     
     keyboard.append([
-        InlineKeyboardButton("❤️ Мій профіль", callback_data="v2_my_profile"),
-        InlineKeyboardButton("❓ Допомога", callback_data="v2_help")
+        InlineKeyboardButton("➕ Додати ще", callback_data="v2_back_to_start"),
+        InlineKeyboardButton("🗑 Очистити", callback_data="v2_clear_cart")
     ])
     
-    # Якщо є товари в кошику - показуємо
-    cart_count = get_cart_count(user_id, context)
-    if cart_count > 0:
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🛒 Кошик ({cart_count})",
-                callback_data="v2_view_cart"
-            )
-        ])
+    # Upsell кнопки
+    if upsell_items:
+        for item in upsell_items[:2]:
+            item_id = item.get('id', 0)
+            name = item.get('name', 'Товар')
+            price = item.get('price', 0)
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"➕ {name} ({price} грн)",
+                    callback_data=f"v2_add_{item_id}"
+                )
+            ])
+    
+    keyboard.append([
+        InlineKeyboardButton("◀️ Назад", callback_data="v2_back_to_start")
+    ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        message,
-        reply_markup=reply_markup
-    )
+    if edit:
+        await message.edit_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 
-def get_top_categories(context: ContextTypes.DEFAULT_TYPE) -> list:
+def calculate_delivery(total: float) -> int:
     """
-    Отримати ТОП-категорії
+    Розрахувати вартість доставки
+    
+    Правила:
+    - від 300 грн: безкоштовно
+    - менше 300: 50 грн
+    """
+    if total >= 300:
+        return 0
+    return 50
+
+
+def get_upsell_suggestions(cart: list, context) -> list:
+    """
+    Отримати upsell пропозиції
     
     Логіка:
-    1. Спробувати з Google Sheets (найпопулярніші)
-    2. Якщо не підключено - використати дефолтні
+    1. Аналізуємо що в кошику
+    2. Шукаємо популярні комбінації
+    3. Пропонуємо топ-2 товари
+    
+    Приклад:
+    - Якщо є піца → пропонуємо Cola, Garlic bread
+    - Якщо є бургер → пропонуємо Fries, Milkshake
     """
-    sheets_service = context.bot_data.get('sheets_service')
     
-    if sheets_service and sheets_service.is_connected():
-        try:
-            # Спробувати отримати з Sheets
-            categories = sheets_service.get_popular_categories(limit=6)
-            if categories:
-                return categories
-        except Exception as e:
-            logger.warning(f"Could not fetch categories from Sheets: {e}")
+    # Визначаємо категорії товарів у кошику
+    categories_in_cart = set()
+    for item in cart:
+        cat = item.get('category', '')
+        if cat:
+            categories_in_cart.add(cat.lower())
     
-    # Дефолтні категорії (якщо Sheets не підключено)
-    return ['Піца', 'Бургери', 'Салати', 'Суші', 'Кава', 'Десерти']
-
-
-def get_cart_count(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримати кількість товарів у кошику"""
-    try:
-        from app.utils.cart_manager import get_cart_item_count
-        return get_cart_item_count(user_id)
-    except:
-        return 0
-
-
-# ============================================================================
-# CALLBACK HANDLERS для нового /start
-# ============================================================================
-
-async def quick_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Швидкий вибір категорії (без вибору ресторану)
-    
-    Flow: Start → Категорія → Товари
-    """
-    query = update.callback_query
-    await query.answer()
-    
-    user = query.from_user
-    category = query.data.replace("v2_quick_category_", "")
-    
-    logger.info(f"🔥 Quick category: {category} by {user.first_name}")
-    
-    # Зберігаємо вибрану категорію
-    context.user_data['selected_category'] = category
-    
-    # Показуємо товари цієї категорії (з усіх ресторанів)
-    await show_category_items(query, context, category)
-
-
-async def show_category_items(query, context, category: str):
-    """Показати товари категорії"""
-    sheets_service = context.bot_data.get('sheets_service')
-    
-    # Отримуємо товари
-    items = []
-    if sheets_service and sheets_service.is_connected():
-        try:
-            items = sheets_service.get_menu_by_category(category)
-        except Exception as e:
-            logger.error(f"Error fetching items: {e}")
-    
-    # Якщо немає - використовуємо sample
-    if not items:
-        items = get_sample_items_for_category(category)
-    
-    if not items:
-        await query.edit_message_text(
-            f"😔 На жаль, товарів у категорії **{category}** зараз немає.\n\n"
-            "Спробуй іншу категорію!",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀️ Назад", callback_data="v2_back_to_start")]
-            ])
-        )
-        return
-    
-    # Формуємо повідомлення
-    emoji = get_emoji_for_category(category)
-    message = f"{emoji} **{category.upper()}**\n\n"
-    
-    # Показуємо перші 5 товарів
-    keyboard = []
-    for idx, item in enumerate(items[:5], 1):
-        item_id = item.get('ID', item.get('id', 0))
-        name = item.get('Страви', item.get('name', 'Товар'))
-        price = item.get('Ціна', item.get('price', 0))
-        restaurant = item.get('Ресторан', item.get('restaurant', ''))
-        
-        message += f"{idx}. **{name}** — {price} грн\n"
-        if restaurant:
-            message += f"   📍 {restaurant}\n"
-        message += "\n"
-        
-        keyboard.append([
-            InlineKeyboardButton(
-                f"➕ {name} ({price} грн)",
-                callback_data=f"v2_add_{item_id}"
-            )
-        ])
-    
-    # Навігація
-    keyboard.append([
-        InlineKeyboardButton("◀️ Назад", callback_data="v2_back_to_start"),
-        InlineKeyboardButton("🛒 Кошик", callback_data="v2_view_cart")
-    ])
-    
-    await query.edit_message_text(
-        message,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-def get_sample_items_for_category(category: str) -> list:
-    """Sample товари для демо"""
-    samples = {
-        'Піца': [
-            {'id': 1, 'name': 'Маргарита', 'price': 180, 'restaurant': 'FerrikPizza'},
-            {'id': 2, 'name': 'Пепероні', 'price': 200, 'restaurant': 'FerrikPizza'},
+    # Словник upsell пропозицій
+    upsell_map = {
+        'pizza': [
+            {'id': 20, 'name': 'Coca-Cola 0.5л', 'price': 40, 'category': 'drinks'},
+            {'id': 30, 'name': 'Часниковий хліб', 'price': 50, 'category': 'snacks'},
         ],
-        'Бургери': [
-            {'id': 5, 'name': 'Класичний', 'price': 150, 'restaurant': 'BurgerHub'},
-            {'id': 6, 'name': 'Чізбургер', 'price': 170, 'restaurant': 'BurgerHub'},
+        'піца': [
+            {'id': 20, 'name': 'Coca-Cola 0.5л', 'price': 40, 'category': 'drinks'},
+            {'id': 30, 'name': 'Часниковий хліб', 'price': 50, 'category': 'snacks'},
         ],
-        'Салати': [
-            {'id': 10, 'name': 'Цезар', 'price': 120, 'restaurant': 'FerrikPizza'},
-            {'id': 11, 'name': 'Грецький', 'price': 110, 'restaurant': 'FerrikPizza'},
+        'burgers': [
+            {'id': 31, 'name': 'Картопля фрі', 'price': 60, 'category': 'snacks'},
+            {'id': 32, 'name': 'Молочний коктейль', 'price': 70, 'category': 'drinks'},
         ],
-        'Напої': [
-            {'id': 20, 'name': 'Coca-Cola', 'price': 40, 'restaurant': 'FerrikPizza'},
-            {'id': 21, 'name': 'Sprite', 'price': 40, 'restaurant': 'FerrikPizza'},
+        'бургери': [
+            {'id': 31, 'name': 'Картопля фрі', 'price': 60, 'category': 'snacks'},
+            {'id': 32, 'name': 'Молочний коктейль', 'price': 70, 'category': 'drinks'},
         ],
     }
-    return samples.get(category, [])
+    
+    # Збираємо пропозиції
+    suggestions = []
+    
+    for cat in categories_in_cart:
+        if cat in upsell_map:
+            suggestions.extend(upsell_map[cat])
+    
+    # Якщо немає категорій - пропонуємо популярні напої
+    if not suggestions:
+        suggestions = [
+            {'id': 20, 'name': 'Coca-Cola 0.5л', 'price': 40, 'category': 'drinks'},
+            {'id': 21, 'name': 'Sprite 0.5л', 'price': 40, 'category': 'drinks'},
+        ]
+    
+    # Фільтруємо товари які вже є в кошику
+    cart_ids = {item.get('id') for item in cart}
+    suggestions = [s for s in suggestions if s.get('id') not in cart_ids]
+    
+    return suggestions[:2]
 
 
-async def back_to_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Повернутись до головного меню"""
+async def clear_cart_v2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очистити кошик"""
     query = update.callback_query
-    await query.answer()
+    await query.answer("🗑️ Кошик очищено")
     
-    user = query.from_user
-    first_name = user.first_name or "друже"
+    user_id = query.from_user.id
+    clear_user_cart(user_id)
     
-    message = (
-        f"👋 Привіт, {first_name}!\n"
-        f"Я FerrikBot — підкажу щось смачненьке 😋\n\n"
-        f"Що хочеш сьогодні?"
-    )
-    
-    categories = get_top_categories(context)
-    keyboard = []
-    
-    for i in range(0, len(categories), 2):
-        row = []
-        for cat in categories[i:i+2]:
-            emoji = get_emoji_for_category(cat)
-            row.append(InlineKeyboardButton(
-                f"{emoji} {cat}",
-                callback_data=f"v2_quick_category_{cat}"
-            ))
-        keyboard.append(row)
-    
-    keyboard.append([
-        InlineKeyboardButton("🏪 Обрати ресторан", callback_data="v2_select_restaurant")
-    ])
-    
-    keyboard.append([
-        InlineKeyboardButton("❤️ Мій профіль", callback_data="v2_my_profile"),
-        InlineKeyboardButton("❓ Допомога", callback_data="v2_help")
-    ])
-    
-    cart_count = get_cart_count(user.id, context)
-    if cart_count > 0:
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🛒 Кошик ({cart_count})",
-                callback_data="v2_view_cart"
-            )
-        ])
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await show_cart_v2(query.message, user_id, context, edit=True)
 
 
-async def help_v2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Допомога - новий стиль"""
+async def add_item_v2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Додати товар в кошик (v2)"""
     query = update.callback_query
-    await query.answer()
     
-    message = (
-        "❓ **Як замовити:**\n\n"
-        "1️⃣ Обери ресторан або категорію\n"
-        "2️⃣ Додай страви в кошик\n"
-        "3️⃣ Надішли телефон + адресу\n"
-        "4️⃣ Отримай замовлення 🚗\n\n"
-        "💡 **Корисні команди:**\n"
-        "• /start - Головне меню\n"
-        "• /menu - Список ресторанів\n"
-        "• /cart - Твій кошик\n"
-        "• /profile - Твій профіль\n\n"
-        "💬 **Підтримка:** @ferrik_support"
-    )
+    user_id = query.from_user.id
+    item_id = int(query.data.replace("v2_add_", ""))
     
-    keyboard = [
-        [InlineKeyboardButton("◀️ На початок", callback_data="v2_back_to_start")]
-    ]
+    # Отримуємо товар
+    item = get_item_by_id(item_id, context)
     
-    await query.edit_message_text(
-        message,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    if not item:
+        await query.answer("❌ Товар не знайдено", show_alert=True)
+        return
+    
+    # Додаємо в кошик
+    cart_item = {
+        'id': item.get('id'),
+        'name': item.get('name'),
+        'price': item.get('price'),
+        'category': item.get('category', ''),
+        'restaurant': item.get('restaurant', ''),
+        'quantity': 1
+    }
+    
+    add_to_cart(user_id, cart_item)
+    
+    await query.answer(f"✅ {item.get('name')} додано!", show_alert=False)
+    
+    logger.info(f"✅ Item {item_id} added to cart by user {user_id}")
+
+
+def get_item_by_id(item_id: int, context) -> dict:
+    """Отримати товар по ID"""
+    sheets_service = context.bot_data.get('sheets_service')
+    
+    if sheets_service and sheets_service.is_connected():
+        try:
+            item = sheets_service.get_item_by_id(item_id)
+            if item:
+                return item
+        except:
+            pass
+    
+    # Sample для демо
+    sample_items = {
+        1: {'id': 1, 'name': 'Маргарита', 'price': 180, 'category': 'pizza'},
+        2: {'id': 2, 'name': 'Пепероні', 'price': 200, 'category': 'pizza'},
+        5: {'id': 5, 'name': 'Класичний', 'price': 150, 'category': 'burgers'},
+        6: {'id': 6, 'name': 'Чізбургер', 'price': 170, 'category': 'burgers'},
+        20: {'id': 20, 'name': 'Coca-Cola 0.5л', 'price': 40, 'category': 'drinks'},
+        21: {'id': 21, 'name': 'Sprite 0.5л', 'price': 40, 'category': 'drinks'},
+        30: {'id': 30, 'name': 'Часниковий хліб', 'price': 50, 'category': 'snacks'},
+        31: {'id': 31, 'name': 'Картопля фрі', 'price': 60, 'category': 'snacks'},
+        32: {'id': 32, 'name': 'Молочний коктейль', 'price': 70, 'category': 'drinks'},
+    }
+    
+    return sample_items.get(item_id)
 
 
 # ============================================================================
 # РЕЄСТРАЦІЯ HANDLERS
 # ============================================================================
 
-def register_start_v2_handlers(application):
+def register_cart_v2_handlers(application):
     """
-    Реєструє нові start v2 handlers
+    Реєструє cart v2 handlers
     
     Використання в main.py:
     ───────────────────────────
-    from app.handlers.start_v2 import register_start_v2_handlers
+    from app.handlers.cart_v2 import register_cart_v2_handlers
     
-    register_start_v2_handlers(app)
+    register_cart_v2_handlers(app)
     """
-    from telegram.ext import CallbackQueryHandler
     
     # Команда
-    application.add_handler(CommandHandler("start_v2", start_v2_command))
+    application.add_handler(CommandHandler("cart_v2", cart_v2_command))
     
     # Callbacks
     application.add_handler(CallbackQueryHandler(
-        quick_category_callback,
-        pattern="^v2_quick_category_"
+        cart_v2_callback,
+        pattern="^v2_view_cart$"
     ))
     
     application.add_handler(CallbackQueryHandler(
-        back_to_start_callback,
-        pattern="^v2_back_to_start$"
+        clear_cart_v2_callback,
+        pattern="^v2_clear_cart$"
     ))
     
     application.add_handler(CallbackQueryHandler(
-        help_v2_callback,
-        pattern="^v2_help$"
+        add_item_v2_callback,
+        pattern="^v2_add_"
     ))
     
-    logger.info("✅ Start v2 handlers registered")
+    logger.info("✅ Cart v2 handlers registered")
 
 
-__all__ = ['register_start_v2_handlers', 'start_v2_command']
+__all__ = ['register_cart_v2_handlers']

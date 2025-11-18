@@ -1,6 +1,6 @@
 """
 🔘 Обробники callback кнопок
-FerrikBot v3.2 - ПОВНА ВЕРСІЯ з усіма функціями
+FerrikBot v3.3 - ВИПРАВЛЕНА ВЕРСІЯ з підтримкою V2
 """
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,6 +32,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     data = query.data
     
+    # ⚠️ ВАЖЛИВО: Пропускаємо v2 callbacks (вони оброблюються окремими handlers)
+    if data.startswith("v2_"):
+        return
+    
     logger.info(f"🔘 Callback '{data}' from {user.username or user.first_name}")
     
     # Answer callback
@@ -46,7 +50,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Unexpected query answer error: {e}")
     
     try:
-        # Route to handlers
+        # Route to handlers (V1 only)
         if data == "start":
             await handle_start_callback(query, context)
         elif data == "menu":
@@ -124,7 +128,8 @@ async def handle_start_callback(query, context):
         "▪️ /cart - Кошик\n"
         "▪️ /order - Оформити замовлення\n"
         "▪️ /profile - Мій профіль\n"
-        "▪️ /help - Допомога"
+        "▪️ /help - Допомога\n\n"
+        "🆕 <b>Спробуй новий інтерфейс:</b> /start_v2"
     )
     
     keyboard = [
@@ -349,7 +354,8 @@ async def handle_help_callback(query, context):
         "⭐ Platinum (25-49) - 25% знижка\n"
         "💎 Diamond (50+) - 30% знижка\n\n"
         "<b>📞 Підтримка:</b>\n"
-        "Питання? Напиши @support"
+        "Питання? Напиши @support\n\n"
+        "🆕 <b>Спробуй новий інтерфейс:</b> /start_v2"
     )
     
     keyboard = [

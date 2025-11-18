@@ -50,7 +50,7 @@ async def create_application():
         # ============================================================================
         # V2 HANDLERS (НОВИЙ UX)
         # ============================================================================
-        from app.handlers.start_v2 import register_start_v2_handlers
+        from app.handlers.start_v2_wow import register_start_v2_wow_handlers
         from app.handlers.restaurant_selector import register_restaurant_selector_handlers
         from app.handlers.cart_v2 import register_cart_v2_handlers
         from app.handlers.checkout_v2 import register_checkout_v2_handlers

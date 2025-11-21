@@ -6,7 +6,7 @@ import logging
 import random
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CommandHandler
+from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +122,17 @@ async def start_v2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        message,
-        reply_markup=reply_markup
-    )
+    # Відправка або редагування
+    if update.message:
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup
+        )
+    elif update.callback_query:
+        await update.callback_query.message.edit_text(
+            message,
+            reply_markup=reply_markup
+        )
 
 
 # ============================================================================
@@ -477,6 +484,7 @@ async def back_to_start_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     
     user = query.from_user
+    user_id = user.id
     first_name = user.first_name or "друже"
     
     greeting = get_time_based_greeting(first_name)

@@ -1,458 +1,203 @@
 """
-Google Sheets Service - Database operations
-FerrikBot v3.2
+Google Sheets Service
+Handles all interactions with the Google Sheet database
 """
-
 import os
 import json
 import logging
-from datetime import datetime
-from typing import List, Dict, Optional
+import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 logger = logging.getLogger(__name__)
 
-# Try to import Google Sheets libraries
-try:
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-    SHEETS_AVAILABLE = True
-except ImportError:
-    SHEETS_AVAILABLE = False
-    logger.warning("⚠️ Google Sheets libraries not available")
-
-
-class SheetsService:
-    """Service for Google Sheets operations"""
-    
+class GoogleSheetsService:
     def __init__(self):
-        """Initialize Google Sheets connection"""
         self.client = None
         self.spreadsheet = None
-        self.connected = False
+        self.menu_cache = []
+        self.last_cache_time = None
+        self.CACHE_DURATION = 300  # 5 minutes cache
         
-        if not SHEETS_AVAILABLE:
-            logger.error("❌ gspread not installed")
-            return
-        
-        # Get credentials from environment
-        sheets_id = os.environ.get('GOOGLE_SHEETS_ID')
-        credentials_json = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
-        
-        if not sheets_id or not credentials_json:
-            logger.warning("⚠️ Google Sheets credentials not found in environment")
-            return
-        
+        # Column structure for Orders (must match exact order in Sheet)
+        self.ORDER_COLUMNS = [
+            "ID Замовлення", "Telegram User ID", "Час Замовлення", 
+            "Товари (JSON)", "Загальна Сума", "Адреса", "Телефон", 
+            "Спосіб Оплати", "Статус", "Канал", "Вартість доставки", 
+            "Тип доставки", "Час доставки/самовивозу", "Оператор", 
+            "Примітки", "ID_партнера", "Сума_комісії", "Сплачена_комісія",
+            "Статус_оплати", "Дохід_платформи", "Промокод", 
+            "Застосована_знижка", "Статус_повернення_коштів"
+        ]
+
+    def connect(self):
+        """Connect to Google Sheets"""
         try:
-            # Parse credentials
-            credentials_dict = json.loads(credentials_json)
-            
-            # Define scope
+            creds_json = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
+            sheet_id = os.environ.get('GOOGLE_SHEETS_ID')
+
+            if not creds_json or not sheet_id:
+                logger.warning("⚠️ Google Sheets credentials not found in env")
+                return False
+
             scope = [
                 'https://spreadsheets.google.com/feeds',
                 'https://www.googleapis.com/auth/drive'
             ]
             
-            # Authorize
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(
-                credentials_dict,
-                scope
-            )
-            
+            creds_dict = json.loads(creds_json)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             self.client = gspread.authorize(creds)
-            self.spreadsheet = self.client.open_by_key(sheets_id)
-            
-            self.connected = True
-            logger.info("✅ Google Sheets connected successfully")
+            self.spreadsheet = self.client.open_by_key(sheet_id)
+            logger.info("✅ Connected to Google Sheets")
+            return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to connect to Google Sheets: {e}")
-            self.connected = False
-    
-    def is_connected(self) -> bool:
-        """Check if connected to Google Sheets"""
-        return self.connected
-    
-    # ==================== MENU OPERATIONS ====================
-    
-    def get_menu(self) -> List[Dict]:
-        """
-        Get all active menu items
-        
-        Returns:
-            list: Menu items with structure matching your sheet
-        """
-        if not self.connected:
-            logger.warning("⚠️ Sheets not connected, returning empty menu")
+            logger.error(f"❌ Sheets connection error: {e}")
+            return False
+
+    def is_connected(self):
+        """Check if connected, try to reconnect if not"""
+        if self.client and self.spreadsheet:
+            return True
+        return self.connect()
+
+    def get_menu_items(self):
+        """Get all active menu items with caching"""
+        # Check cache
+        import time
+        if self.menu_cache and self.last_cache_time and \
+           (time.time() - self.last_cache_time < self.CACHE_DURATION):
+            return self.menu_cache
+
+        if not self.is_connected():
             return []
-        
+
         try:
-            sheet = self.spreadsheet.worksheet("Меню")
-            records = sheet.get_all_records()
+            worksheet = self.spreadsheet.worksheet("Меню")
+            records = worksheet.get_all_records()
             
-            # Filter only active items
-            active_items = [
-                item for item in records
-                if str(item.get('Активний', '')).upper() in ['TRUE', 'ТАК', '1', 'YES']
-            ]
+            # Filter active items and convert types
+            active_items = []
+            for item in records:
+                # Robust check for 'TRUE' string or boolean True
+                is_active = str(item.get('Активний', '')).upper() == 'TRUE'
+                
+                if is_active:
+                    # Ensure ID is int
+                    try:
+                        item['ID'] = int(item['ID'])
+                    except:
+                        continue
+                        
+                    # Ensure Price is int/float
+                    try:
+                        item['Ціна'] = float(str(item['Ціна']).replace(',', '.'))
+                    except:
+                        item['Ціна'] = 0
+                        
+                    active_items.append(item)
             
-            logger.info(f"✅ Loaded {len(active_items)} menu items")
+            self.menu_cache = active_items
+            self.last_cache_time = time.time()
             return active_items
             
         except Exception as e:
-            logger.error(f"❌ Error loading menu: {e}")
+            logger.error(f"❌ Error fetching menu: {e}")
             return []
-    
-    def get_menu_by_category(self, category: str) -> List[Dict]:
-        """
-        Get menu items by category
-        
-        Args:
-            category: Category name (e.g., "Піца", "Бургери")
-            
-        Returns:
-            list: Filtered menu items
-        """
-        menu = self.get_menu()
-        return [item for item in menu if item.get('Категорія') == category]
-    
-    def get_menu_item(self, item_id: int) -> Optional[Dict]:
-        """
-        Get specific menu item by ID
-        
-        Args:
-            item_id: Item ID
-            
-        Returns:
-            dict or None: Menu item details
-        """
-        menu = self.get_menu()
-        for item in menu:
+
+    def get_menu_item(self, item_id):
+        """Get single item by ID"""
+        items = self.get_menu_items()
+        for item in items:
             if item.get('ID') == item_id:
                 return item
         return None
-    
-    # ==================== ORDER OPERATIONS ====================
-    
-    def add_order(self, order_data: Dict) -> bool:
-        """
-        Add new order to sheet
+
+    def get_menu_by_category(self, category):
+        """Get items by category"""
+        items = self.get_menu_items()
+        # Support both English (code) and Ukrainian (sheet) category names
+        category_map = {
+            'pizza': 'Піца',
+            'burgers': 'Бургери',
+            'snacks': 'Закуски',
+            'drinks': 'Напої'
+        }
+        target_cat = category_map.get(category, category)
         
-        Args:
-            order_data: Order details
-            
-        Returns:
-            bool: Success status
+        return [
+            i for i in items 
+            if str(i.get('Категорія', '')).lower() == target_cat.lower()
+        ]
+
+    def add_order(self, order_data):
         """
-        if not self.connected:
-            logger.error("❌ Cannot add order: Sheets not connected")
+        Add new order to 'Замовлення' sheet.
+        Maps dictionary data to the specific column order.
+        """
+        if not self.is_connected():
             return False
-        
+
         try:
-            sheet = self.spreadsheet.worksheet("Замовлення")
+            worksheet = self.spreadsheet.worksheet("Замовлення")
             
-            # Get next order ID
-            all_orders = sheet.get_all_values()
-            next_id = len(all_orders)  # Row count = ID (minus header)
+            # Generate Order ID (simple incremental based on rows)
+            # In production, use UUID or handle concurrency better
+            try:
+                # Assumes header is row 1
+                next_id = len(worksheet.col_values(1)) 
+            except:
+                next_id = 1001
+
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # Prepare row according to your structure
-            row = [
-                next_id,  # ID Замовлення
-                order_data.get('user_id', ''),  # Telegram User ID
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),  # Час Замовлення
-                json.dumps(order_data.get('items', []), ensure_ascii=False),  # Товари (JSON)
-                order_data.get('total', 0),  # Загальна Сума
-                order_data.get('address', ''),  # Адреса
-                order_data.get('phone', ''),  # Телефон
-                order_data.get('payment_method', 'Готівка'),  # Спосіб Оплати
-                'Нове',  # Статус
-                'Telegram Bot',  # Канал
-                order_data.get('delivery_cost', 0),  # Вартість доставки
-                order_data.get('total', 0) + order_data.get('delivery_cost', 0),  # Загальна сума
-                order_data.get('delivery_type', 'Доставка'),  # Тип доставки
-                order_data.get('delivery_time', ''),  # Час доставки/самовивозу
-                '',  # Оператор
-                order_data.get('notes', ''),  # Примітки
-                order_data.get('partner_id', ''),  # ID_партнера
-                order_data.get('commission', 0),  # Сума_комісії
-                'Ні',  # Сплачена_комісія
-                'Не оплачено',  # Статус_оплати
-                0,  # Дохід_платформи
-                order_data.get('promo_code', ''),  # Промокод
-                order_data.get('discount', 0),  # Застосована_знижка
-                '',  # Статус_повернення_коштів
-            ]
+            # Prepare row data maintaining the exact column order
+            row = []
             
-            # Append row
-            sheet.append_row(row, value_input_option='USER_ENTERED')
+            # Mapping logic
+            items_json = json.dumps(order_data.get('items', []), ensure_ascii=False)
+            total = order_data.get('total', 0)
+            delivery_cost = order_data.get('delivery_cost', 0)
+            total_sum = total + delivery_cost
             
-            logger.info(f"✅ Order #{next_id} added successfully")
+            # Fill row based on self.ORDER_COLUMNS
+            data_map = {
+                "ID Замовлення": next_id,
+                "Telegram User ID": order_data.get('user_id', ''),
+                "Час Замовлення": timestamp,
+                "Товари (JSON)": items_json,
+                "Загальна Сума": total_sum,
+                "Адреса": order_data.get('address', ''),
+                "Телефон": order_data.get('phone', ''),
+                "Спосіб Оплати": order_data.get('payment_method', 'Готівка'),
+                "Статус": "Новий",
+                "Канал": "Telegram Bot",
+                "Вартість доставки": delivery_cost,
+                "Тип доставки": order_data.get('delivery_type', 'Доставка'),
+                "Час доставки/самовивозу": "", # Можна додати логіку пізніше
+                "Оператор": "",
+                "Примітки": order_data.get('notes', ''),
+                "ID_партнера": order_data.get('partner_id', ''),
+                "Сума_комісії": "",
+                "Сплачена_комісія": "FALSE",
+                "Статус_оплати": "Не оплачено",
+                "Дохід_платформи": "",
+                "Промокод": order_data.get('promo_code', ''),
+                "Застосована_знижка": order_data.get('discount_amount', 0),
+                "Статус_повернення_коштів": ""
+            }
+            
+            for col in self.ORDER_COLUMNS:
+                row.append(data_map.get(col, ""))
+            
+            worksheet.append_row(row)
+            logger.info(f"✅ Order #{next_id} saved to Sheets")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Error adding order: {e}", exc_info=True)
-            return False
-    
-    def get_user_orders(self, user_id: int) -> List[Dict]:
-        """
-        Get all orders for specific user
-        
-        Args:
-            user_id: Telegram user ID
-            
-        Returns:
-            list: User's orders
-        """
-        if not self.connected:
-            return []
-        
-        try:
-            sheet = self.spreadsheet.worksheet("Замовлення")
-            records = sheet.get_all_records()
-            
-            user_orders = [
-                order for order in records
-                if order.get('Telegram User ID') == user_id
-            ]
-            
-            logger.info(f"✅ Found {len(user_orders)} orders for user {user_id}")
-            return user_orders
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting user orders: {e}")
-            return []
-    
-    def update_order_status(self, order_id: int, status: str) -> bool:
-        """
-        Update order status
-        
-        Args:
-            order_id: Order ID
-            status: New status
-            
-        Returns:
-            bool: Success status
-        """
-        if not self.connected:
-            return False
-        
-        try:
-            sheet = self.spreadsheet.worksheet("Замовлення")
-            
-            # Find order row (order_id + 2 because of header and 1-based indexing)
-            row_number = order_id + 2
-            
-            # Update status column (column 9: Статус)
-            sheet.update_cell(row_number, 9, status)
-            
-            logger.info(f"✅ Order #{order_id} status updated to '{status}'")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error updating order status: {e}")
-            return False
-    
-    # ==================== PROMO CODE OPERATIONS ====================
-    
-    def get_promo_code(self, code: str) -> Optional[Dict]:
-        """
-        Get promo code details
-        
-        Args:
-            code: Promo code
-            
-        Returns:
-            dict or None: Promo code details
-        """
-        if not self.connected:
-            return None
-        
-        try:
-            sheet = self.spreadsheet.worksheet("Промокоди")
-            records = sheet.get_all_records()
-            
-            for promo in records:
-                if promo.get('Код', '').upper() == code.upper():
-                    # Check if active
-                    if promo.get('Статус') == 'Активний':
-                        return promo
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting promo code: {e}")
-            return None
-    
-    def use_promo_code(self, code: str) -> bool:
-        """
-        Increment promo code usage counter
-        
-        Args:
-            code: Promo code
-            
-        Returns:
-            bool: Success status
-        """
-        if not self.connected:
-            return False
-        
-        try:
-            sheet = self.spreadsheet.worksheet("Промокоди")
-            cell = sheet.find(code)
-            
-            if cell:
-                # Get current usage count
-                usage_col = 5  # Кількість_використань
-                current_usage = int(sheet.cell(cell.row, usage_col).value or 0)
-                
-                # Increment
-                sheet.update_cell(cell.row, usage_col, current_usage + 1)
-                
-                logger.info(f"✅ Promo code '{code}' usage incremented")
-                return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Error using promo code: {e}")
-            return False
-    
-    # ==================== CONFIG OPERATIONS ====================
-    
-    def get_config(self, key: str) -> Optional[str]:
-        """
-        Get configuration value
-        
-        Args:
-            key: Config key
-            
-        Returns:
-            str or None: Config value
-        """
-        if not self.connected:
-            return None
-        
-        try:
-            sheet = self.spreadsheet.worksheet("Конфіг")
-            records = sheet.get_all_records()
-            
-            for config in records:
-                if config.get('Ключ') == key:
-                    return config.get('Значення')
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting config: {e}")
-            return None
-    
-    def is_open(self) -> bool:
-        """
-        Check if restaurant is open based on config
-        
-        Returns:
-            bool: True if open
-        """
-        try:
-            open_hour = int(self.get_config('OPEN_HOUR') or 8)
-            close_hour = int(self.get_config('CLOSE_HOUR') or 23)
-            
-            current_hour = datetime.now().hour
-            
-            return open_hour <= current_hour < close_hour
-            
-        except:
-            return True  # Default: always open
-    
-    # ==================== PARTNER OPERATIONS ====================
-    
-    def get_partners(self) -> List[Dict]:
-        """
-        Get all active partners
-        
-        Returns:
-            list: Active partners
-        """
-        if not self.connected:
-            return []
-        
-        try:
-            sheet = self.spreadsheet.worksheet("Партнери")
-            records = sheet.get_all_records()
-            
-            active_partners = [
-                partner for partner in records
-                if partner.get('Статус') == 'Активний'
-            ]
-            
-            logger.info(f"✅ Loaded {len(active_partners)} active partners")
-            return active_partners
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting partners: {e}")
-            return []
-    
-    def get_partner(self, partner_id: str) -> Optional[Dict]:
-        """
-        Get specific partner by ID
-        
-        Args:
-            partner_id: Partner ID
-            
-        Returns:
-            dict or None: Partner details
-        """
-        partners = self.get_partners()
-        for partner in partners:
-            if partner.get('ID') == partner_id:
-                return partner
-        return None
-    
-    # ==================== REVIEW OPERATIONS ====================
-    
-    def add_review(self, review_data: Dict) -> bool:
-        """
-        Add review to sheet
-        
-        Args:
-            review_data: Review details
-            
-        Returns:
-            bool: Success status
-        """
-        if not self.connected:
-            return False
-        
-        try:
-            sheet = self.spreadsheet.worksheet("Відгуки")
-            
-            # Get next review ID
-            all_reviews = sheet.get_all_values()
-            next_id = len(all_reviews)
-            
-            row = [
-                next_id,  # ID_відгуку
-                review_data.get('partner_id', ''),  # ID_партнера
-                review_data.get('user_id', ''),  # ID_користувача
-                review_data.get('rating', 5),  # Рейтинг
-                review_data.get('comment', ''),  # Коментар
-                review_data.get('order_id', ''),  # ID_замовлення
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),  # Дата
-                0  # Кількість_корисних_посилань
-            ]
-            
-            sheet.append_row(row, value_input_option='USER_ENTERED')
-            
-            logger.info(f"✅ Review #{next_id} added")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error adding review: {e}")
+            logger.error(f"❌ Error adding order: {e}")
             return False
 
-
-# Global instance
-sheets_service = SheetsService()
-
-
-# Export
-__all__ = ['SheetsService', 'sheets_service']
+# Create singleton instance
+sheets_service = GoogleSheetsService()

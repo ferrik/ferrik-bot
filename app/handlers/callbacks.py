@@ -883,6 +883,3 @@ async def handle_change_address_callback(query, context):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
     )
-
-
-__all__ = ['button_callback']

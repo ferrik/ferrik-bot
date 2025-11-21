@@ -50,7 +50,9 @@ async def create_application():
         # ============================================================================
         # V2 HANDLERS (НОВИЙ UX)
         # ============================================================================
+        # 🔥 ВИПРАВЛЕНО: Імпортуємо WOW хендлер
         from app.handlers.start_v2_wow import register_start_v2_wow_handlers
+        
         from app.handlers.restaurant_selector import register_restaurant_selector_handlers
         from app.handlers.cart_v2 import register_cart_v2_handlers
         from app.handlers.checkout_v2 import register_checkout_v2_handlers
@@ -106,7 +108,10 @@ async def create_application():
     # ============================================================================
     # REGISTER V2 HANDLERS (новий UX - /start_v2, /cart_v2 тощо)
     # ============================================================================
-    register_start_v2_handlers(application)
+    
+    # 🔥 ВИПРАВЛЕНО: Викликаємо правильну функцію реєстрації
+    register_start_v2_wow_handlers(application)
+    
     register_restaurant_selector_handlers(application)
     register_cart_v2_handlers(application)
     register_checkout_v2_handlers(application)
@@ -173,7 +178,7 @@ async def handle_index(scope, receive, send):
         'webhook': f"{WEBHOOK_URL}/webhook",
         'features': {
             'v1': 'Classic UI (/start)',
-            'v2': 'New UX (/start_v2)'
+            'v2': 'Mood UI (/start_v2)'
         }
     })
 

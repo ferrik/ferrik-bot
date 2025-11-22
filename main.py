@@ -111,9 +111,8 @@ if has_menu_v2:
 logger.info("✅ V2 handlers registered")
 logger.info("✅ All handlers registered (v1 + v2)")
 
-# Ініціалізація бота
-application.initialize()
-logger.info("✅ Bot initialized")
+# ВАЖЛИВО: НЕ викликаємо application.initialize() тут!
+# У Pure ASGI mode ініціалізація відбувається автоматично при старті Uvicorn
 
 logger.info("=" * 70)
 logger.info("✅ BOT READY!")

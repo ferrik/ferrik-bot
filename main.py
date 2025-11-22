@@ -6,7 +6,7 @@ import os
 import logging
 from datetime import datetime
 from telegram import Update, Bot
-from telegram.ext import Application, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 import json
 
 # Налаштування логування
@@ -33,10 +33,19 @@ logger.info("🍕 FERRIKBOT v3.3 STARTING (V1 + V2)")
 logger.info("=" * 70)
 logger.info("📦 Importing handlers...")
 
-# V1 Handlers
-from app.handlers import commands, callbacks, messages
+# V1 Handlers (окремі функції)
+from app.handlers.commands import (
+    start,
+    menu,
+    cart,
+    order,
+    profile,
+    help_command
+)
+from app.handlers.callbacks import button_callback
+from app.handlers.messages import handle_text_message
 
-# V2 Handlers (WOW mode)
+# V2 Handlers (мають register_handlers)
 from app.handlers import (
     start_v2_wow,
     restaurant_selector,
@@ -52,20 +61,36 @@ logger.info("✅ Handlers imported")
 # ============================================================================
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-# Реєстрація V1 handlers
-commands.register_handlers(application)
-callbacks.register_handlers(application)
-messages.register_handlers(application)
+# ============================================================================
+# РЕЄСТРАЦІЯ V1 HANDLERS (вручну через CommandHandler)
+# ============================================================================
+
+# Commands
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("menu", menu))
+application.add_handler(CommandHandler("cart", cart))
+application.add_handler(CommandHandler("order", order))
+application.add_handler(CommandHandler("profile", profile))
+application.add_handler(CommandHandler("help", help_command))
+
+# Callbacks
+application.add_handler(CallbackQueryHandler(button_callback))
+
+# Text messages
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+
 logger.info("✅ V1 handlers registered")
 
-# Реєстрація V2 handlers
+# ============================================================================
+# РЕЄСТРАЦІЯ V2 HANDLERS (через register_handlers)
+# ============================================================================
 start_v2_wow.register_handlers(application)
 restaurant_selector.register_handlers(application)
 cart_v2.register_handlers(application)
 checkout_v2.register_handlers(application)
 messages_v2.register_handlers(application)
-logger.info("✅ V2 handlers registered")
 
+logger.info("✅ V2 handlers registered")
 logger.info("✅ All handlers registered (v1 + v2)")
 
 # Ініціалізація бота

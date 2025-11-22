@@ -77,7 +77,7 @@ application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 # РЕЄСТРАЦІЯ V1 HANDLERS (вручну через CommandHandler)
 # ============================================================================
 
-# Commands
+# V1 Commands
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("menu", menu))
 application.add_handler(CommandHandler("cart", cart))
@@ -85,16 +85,10 @@ application.add_handler(CommandHandler("order", order))
 application.add_handler(CommandHandler("profile", profile))
 application.add_handler(CommandHandler("help", help_command))
 
-# Callbacks
-application.add_handler(CallbackQueryHandler(button_callback))
-
-# Text messages
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-
-logger.info("✅ V1 handlers registered")
+logger.info("✅ V1 commands registered")
 
 # ============================================================================
-# РЕЄСТРАЦІЯ V2 HANDLERS (через функції реєстрації)
+# РЕЄСТРАЦІЯ V2 HANDLERS (ПЕРЕД V1 callbacks!)
 # ============================================================================
 register_start_v2_wow_handlers(application)
 register_cart_v2_handlers(application)
@@ -109,6 +103,18 @@ if has_menu_v2:
     register_menu_v2_handlers(application)
 
 logger.info("✅ V2 handlers registered")
+
+# ============================================================================
+# V1 CALLBACKS І TEXT (ПІСЛЯ V2!)
+# ============================================================================
+
+# V1 Callback handler (ОСТАННІМ - як fallback)
+application.add_handler(CallbackQueryHandler(button_callback))
+
+# V1 Text messages (ОСТАННІМИ)
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+
+logger.info("✅ V1 callbacks and text handlers registered")
 logger.info("✅ All handlers registered (v1 + v2)")
 
 # ВАЖЛИВО: НЕ викликаємо application.initialize() тут!

@@ -121,11 +121,41 @@ logger.info("=" * 70)
 # ============================================================================
 # ASGI APPLICATION
 # ============================================================================
+
+# Keepalive для стабільності
+import asyncio
+_keepalive_task = None
+
+async def keepalive():
+    """Keepalive task щоб тримати бота живим"""
+    while True:
+        await asyncio.sleep(30)
+        logger.debug("💓 Keepalive ping")
+
+async def startup():
+    """ASGI startup event"""
+    global _keepalive_task
+    _keepalive_task = asyncio.create_task(keepalive())
+    logger.info("🚀 ASGI startup complete")
+
+async def shutdown():
+    """ASGI shutdown event"""
+    global _keepalive_task
+    if _keepalive_task:
+        _keepalive_task.cancel()
+    logger.info("🛑 ASGI shutdown complete")
+
 async def app(scope, receive, send):
     """
     Pure ASGI application
     Підтримує GET, HEAD, POST
     """
+    
+    # Startup on first request
+    if not hasattr(app, '_started'):
+        app._started = True
+        await startup()
+    
     path = scope['path']
     method = scope['method']
     
@@ -181,12 +211,18 @@ async def app(scope, receive, send):
             
             # Парсинг JSON
             update_data = json.loads(body.decode('utf-8'))
+            logger.info(f"📨 Webhook received: {update_data.get('update_id')}")
             
             # Обробка через Telegram Bot
-            update = Update.de_json(update_data, application.bot)
-            await application.process_update(update)
+            try:
+                update = Update.de_json(update_data, application.bot)
+                await application.process_update(update)
+                logger.info(f"✅ Update {update_data.get('update_id')} processed")
+            except Exception as process_error:
+                logger.error(f"❌ Error processing update: {process_error}", exc_info=True)
+                # ВСЕ ОДНО повертаємо 200, щоб Telegram не повторював
             
-            # Відповідь OK
+            # Відповідь OK (завжди 200, навіть якщо була помилка)
             await send({
                 'type': 'http.response.start',
                 'status': 200,
@@ -198,15 +234,16 @@ async def app(scope, receive, send):
             })
             
         except Exception as e:
-            logger.error(f"❌ Webhook error: {e}", exc_info=True)
+            logger.error(f"❌ Webhook fatal error: {e}", exc_info=True)
+            # Повертаємо 200 замість 500, щоб не блокувати webhook
             await send({
                 'type': 'http.response.start',
-                'status': 500,
+                'status': 200,
                 'headers': [[b'content-type', b'application/json']],
             })
             await send({
                 'type': 'http.response.body',
-                'body': json.dumps({"error": str(e)}).encode(),
+                'body': b'{"ok": true}',
             })
         return
     

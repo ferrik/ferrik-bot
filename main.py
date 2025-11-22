@@ -45,14 +45,26 @@ from app.handlers.commands import (
 from app.handlers.callbacks import button_callback
 from app.handlers.messages import handle_text_message
 
-# V2 Handlers (мають register_handlers)
-from app.handlers import (
-    start_v2_wow,
-    restaurant_selector,
-    cart_v2,
-    checkout_v2,
-    messages_v2
-)
+# V2 Handlers (імпорт функцій реєстрації)
+from app.handlers.start_v2_wow import register_start_v2_wow_handlers
+from app.handlers.cart_v2 import register_cart_v2_handlers
+from app.handlers.checkout_v2 import register_checkout_v2_handlers
+from app.handlers.messages_v2 import register_messages_v2_handlers
+
+# Додаткові V2 handlers (якщо є)
+try:
+    from app.handlers.restaurant_selector import register_restaurant_selector_handlers
+    has_restaurant_selector = True
+except ImportError:
+    has_restaurant_selector = False
+    logger.warning("⚠️ restaurant_selector not found, skipping")
+
+try:
+    from app.handlers.menu_v2 import register_menu_v2_handlers
+    has_menu_v2 = True
+except ImportError:
+    has_menu_v2 = False
+    logger.warning("⚠️ menu_v2 not found, skipping")
 
 logger.info("✅ Handlers imported")
 
@@ -82,13 +94,19 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_t
 logger.info("✅ V1 handlers registered")
 
 # ============================================================================
-# РЕЄСТРАЦІЯ V2 HANDLERS (через register_handlers)
+# РЕЄСТРАЦІЯ V2 HANDLERS (через функції реєстрації)
 # ============================================================================
-start_v2_wow.register_handlers(application)
-restaurant_selector.register_handlers(application)
-cart_v2.register_handlers(application)
-checkout_v2.register_handlers(application)
-messages_v2.register_handlers(application)
+register_start_v2_wow_handlers(application)
+register_cart_v2_handlers(application)
+register_checkout_v2_handlers(application)
+register_messages_v2_handlers(application)
+
+# Опціональні handlers
+if has_restaurant_selector:
+    register_restaurant_selector_handlers(application)
+
+if has_menu_v2:
+    register_menu_v2_handlers(application)
 
 logger.info("✅ V2 handlers registered")
 logger.info("✅ All handlers registered (v1 + v2)")

@@ -135,12 +135,26 @@ async def keepalive():
 async def startup():
     """ASGI startup event"""
     global _keepalive_task
+    
+    # Ініціалізація Telegram Application (ОБОВ'ЯЗКОВО для webhook!)
+    await application.initialize()
+    await application.start()
+    logger.info("✅ Telegram Application initialized")
+    
+    # Keepalive task
     _keepalive_task = asyncio.create_task(keepalive())
     logger.info("🚀 ASGI startup complete")
 
 async def shutdown():
     """ASGI shutdown event"""
     global _keepalive_task
+    
+    # Зупинка Telegram Application
+    await application.stop()
+    await application.shutdown()
+    logger.info("🛑 Telegram Application stopped")
+    
+    # Зупинка keepalive
     if _keepalive_task:
         _keepalive_task.cancel()
     logger.info("🛑 ASGI shutdown complete")
